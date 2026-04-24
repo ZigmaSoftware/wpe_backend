@@ -1,14 +1,57 @@
-from rest_framework.views import APIView
+from rest_framework import status, viewsets
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework.views import APIView
 
 from .models import GRN
-from .serializers import GRNSerializer
+from .serializers import GRNReadSerializer, GRNSerializer
 
 
-class GRNCreateAPIView(APIView):
+class GRNAPIViewMixin:
+    def get_grn_response(self, request):
+        try:
+            queryset = GRN.objects.all().order_by("-id")
 
-    def post(self, request):
+            grn_id = request.query_params.get("id")
+            grn_no = request.query_params.get("grn_no")
+
+            if grn_id:
+                queryset = queryset.filter(id=grn_id)
+            if grn_no:
+                queryset = queryset.filter(grn_no=grn_no)
+
+            if (grn_id or grn_no) and not queryset.exists():
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "GRN not found",
+                        "count": 0,
+                        "data": [],
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            serializer = GRNReadSerializer(queryset, many=True)
+
+            return Response(
+                {
+                    "status": "success",
+                    "message": "GRN data fetched successfully",
+                    "count": queryset.count(),
+                    "data": serializer.data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            return Response(
+                {
+                    "status": "error",
+                    "message": str(e),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    def create_grn_response(self, request):
         try:
             data = request.data
 
@@ -139,3 +182,19 @@ class GRNCreateAPIView(APIView):
                 "status": "error",
                 "message": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class GRNCreateAPIView(GRNAPIViewMixin, APIView):
+    def get(self, request):
+        return self.get_grn_response(request)
+
+    def post(self, request):
+        return self.create_grn_response(request)
+
+
+class GRNViewSet(GRNAPIViewMixin, viewsets.ViewSet):
+    def list(self, request):
+        return self.get_grn_response(request)
+
+    def create(self, request):
+        return self.create_grn_response(request)

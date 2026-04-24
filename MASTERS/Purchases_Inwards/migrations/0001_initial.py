@@ -53,12 +53,12 @@ class Migration(migrations.Migration):
                 ('total_amount', models.DecimalField(decimal_places=2, max_digits=12)),
                 ('gst_rate', models.DecimalField(decimal_places=2, default=0, max_digits=5)),
                 ('total_item_value', models.DecimalField(decimal_places=2, max_digits=12)),
-                ('grn', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='items', to='Purchases_Iwards.grn')),
+                ('grn', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='items', to='Purchases_Inwards.grn')),
             ],
         ),
         migrations.AddField(
             model_name='grn',
             name='supplier',
-            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='Purchases_Iwards.supplier'),
+            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='Purchases_Inwards.supplier'),
         ),
     ]
