@@ -2,4 +2,4 @@ from django.apps import AppConfig
 
 
 class PurchasesIwardsConfig(AppConfig):
-    name = 'Purchases_Iwards'
+    name = 'Purchases_Inwards'
