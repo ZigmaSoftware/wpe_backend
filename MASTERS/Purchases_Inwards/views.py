@@ -5,18 +5,18 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from django.forms.models import model_to_dict
 from django.db import IntegrityError, OperationalError, ProgrammingError, transaction
+from django.forms.models import model_to_dict
 from django.utils import timezone
 from openpyxl import load_workbook
 from openpyxl.utils.datetime import from_excel
-from rest_framework import status
+from rest_framework import status, viewsets
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import GRN, QCR
-from .serializers import GRNSerializer, QCRSerializer
+from .serializers import GRNReadSerializer, GRNSerializer, QCRSerializer
 
 
 HEADER_ALIASES = {
@@ -405,12 +405,10 @@ def map_nested_grn_payload(data: dict[str, Any]) -> dict[str, Any]:
 
     first_item = items[0] if items else {}
 
-    grn_no = document_details.get("grn_no")
-
     return {
         "po_no": document_details.get("po_no"),
         "po_date": document_details.get("po_date"),
-        "grn_no": grn_no,
+        "grn_no": document_details.get("grn_no"),
         "grn_date": document_details.get("grn_date"),
         "supplier_invoice_no": document_details.get("supplier_invoice_no"),
         "supplier_invoice_date": document_details.get("supplier_invoice_date"),
@@ -488,11 +486,7 @@ def get_actor_name(request) -> str | None:
 
 
 def serialize_grn_snapshot(grn: GRN) -> dict[str, Any]:
-    snapshot = model_to_dict(
-        grn,
-        exclude=["id", "created_at", "updated_at"],
-    )
-
+    snapshot = model_to_dict(grn, exclude=["id", "created_at", "updated_at"])
     snapshot["id"] = grn.id
     snapshot["created_at"] = grn.created_at.isoformat() if grn.created_at else None
     snapshot["updated_at"] = grn.updated_at.isoformat() if grn.updated_at else None
@@ -518,7 +512,7 @@ def schema_sync_response() -> Response:
     return Response(
         {
             "status": "error",
-            "message": "Database schema is not up to date. Apply the latest Purchases_Iwards migration before using the GRN to QCR flow.",
+            "message": "Database schema is not up to date. Apply the latest Purchases_Inwards migration before using the GRN to QCR flow.",
             "code": "schema_out_of_sync",
         },
         status=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -534,32 +528,73 @@ def get_compatible_grn_payload() -> list[dict[str, Any]]:
     return rows
 
 
-class GRNListCreateAPIView(APIView):
-    parser_classes = [JSONParser, FormParser, MultiPartParser]
-    tab_scope = ""
+class GRNAPIViewMixin:
+    def get_base_queryset(self, request):
+        queryset = GRN.objects.all()
+        list_scope = resolve_list_scope(request, getattr(self, "tab_scope", ""))
 
-    def get(self, request):
+        if list_scope in MOVED_TO_GRN_SCOPES:
+            return queryset.filter(process_status="Moved to GRN")
+        if list_scope in ACTIVE_QCR_SCOPES:
+            return queryset.filter(status=True, process_status="GRN Process")
+        return queryset
+
+    def get_grn_response(self, request):
         try:
-            list_scope = resolve_list_scope(request, self.tab_scope)
+            queryset = self.get_base_queryset(request).order_by("-id")
 
-            queryset = GRN.objects.filter(status=True)
-            if list_scope in MOVED_TO_GRN_SCOPES:
-                queryset = queryset.filter(process_status="Moved to GRN")
-            else:
-                queryset = queryset.filter(process_status="GRN Process")
+            grn_id = request.query_params.get("id")
+            grn_no = request.query_params.get("grn_no")
 
-            queryset = queryset.order_by("-id")
-            serializer = GRNSerializer(queryset, many=True)
-            return Response(serializer.data)
+            if grn_id:
+                queryset = queryset.filter(id=grn_id)
+            if grn_no:
+                queryset = queryset.filter(grn_no=grn_no)
+
+            if (grn_id or grn_no) and not queryset.exists():
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "GRN not found",
+                        "count": 0,
+                        "data": [],
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            serializer = GRNReadSerializer(queryset, many=True)
+            return Response(
+                {
+                    "status": "success",
+                    "message": "GRN data fetched successfully",
+                    "count": queryset.count(),
+                    "data": serializer.data,
+                },
+                status=status.HTTP_200_OK,
+            )
         except (ProgrammingError, OperationalError) as exc:
             if is_missing_schema_error(exc):
                 try:
-                    return Response(get_compatible_grn_payload())
+                    return Response(get_compatible_grn_payload(), status=status.HTTP_200_OK)
                 except (ProgrammingError, OperationalError):
                     return schema_sync_response()
-            raise
+            return Response(
+                {
+                    "status": "error",
+                    "message": str(exc),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        except Exception as exc:
+            return Response(
+                {
+                    "status": "error",
+                    "message": str(exc),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
-    def post(self, request):
+    def create_grn_response(self, request):
         try:
             data = request.data
             nested_keys = {"document_details", "document_requirement_details", "supplier_details", "items", "value_details"}
@@ -611,6 +646,25 @@ class GRNListCreateAPIView(APIView):
             )
 
 
+class GRNCreateAPIView(GRNAPIViewMixin, APIView):
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+    tab_scope = ""
+
+    def get(self, request):
+        return self.get_grn_response(request)
+
+    def post(self, request):
+        return self.create_grn_response(request)
+
+
+class GRNViewSet(GRNAPIViewMixin, viewsets.ViewSet):
+    def list(self, request):
+        return self.get_grn_response(request)
+
+    def create(self, request):
+        return self.create_grn_response(request)
+
+
 class GRNImportAPIView(APIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
@@ -654,9 +708,7 @@ class GRNImportAPIView(APIView):
             missing_required_fields = [field for field in REQUIRED_FIELDS if field not in column_map.values()]
             if missing_required_fields:
                 return Response(
-                    {
-                        "detail": "The workbook is missing required columns: " + ", ".join(missing_required_fields)
-                    },
+                    {"detail": "The workbook is missing required columns: " + ", ".join(missing_required_fields)},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -686,12 +738,7 @@ class GRNImportAPIView(APIView):
                         else:
                             payload[field_name] = stringify_cell(cell_value, allow_blank=True)
                 except ValueError as exc:
-                    failed_rows.append(
-                        {
-                            "row": row_number,
-                            "message": str(exc),
-                        }
-                    )
+                    failed_rows.append({"row": row_number, "message": str(exc)})
                     continue
 
                 serializer = GRNSerializer(data=payload)
@@ -709,12 +756,7 @@ class GRNImportAPIView(APIView):
                     with transaction.atomic():
                         serializer.save()
                 except IntegrityError as exc:
-                    failed_rows.append(
-                        {
-                            "row": row_number,
-                            "message": str(exc),
-                        }
-                    )
+                    failed_rows.append({"row": row_number, "message": str(exc)})
                     continue
 
                 created_count += 1
@@ -889,21 +931,17 @@ class QCRStatusUpdateAPIView(APIView):
                 if action == "move_to_grn":
                     qcr_record.status = "Moved to GRN"
                     qcr_record.save(update_fields=["status", "updated_at"])
-
                     grn.process_status = "Moved to GRN"
                     grn.status = True
-                    grn.save(update_fields=["process_status", "status", "updated_at"])
-
                     message = "QCR record moved to GRN successfully."
                 else:
                     qcr_record.status = "Rejected"
                     qcr_record.save(update_fields=["status", "updated_at"])
-
                     grn.process_status = "Rejected"
                     grn.status = False
-                    grn.save(update_fields=["process_status", "status", "updated_at"])
-
                     message = "QCR record rejected successfully."
+
+                grn.save(update_fields=["process_status", "status", "updated_at"])
 
             return Response(
                 {

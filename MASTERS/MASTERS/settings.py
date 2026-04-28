@@ -55,7 +55,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
     'Items',
-    'Purchases_Iwards',
+    'Purchases_Inwards',
 ]
 
 REST_FRAMEWORK = {

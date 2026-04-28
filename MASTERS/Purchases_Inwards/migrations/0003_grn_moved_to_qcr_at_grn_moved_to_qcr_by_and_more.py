@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('Purchases_Iwards', '0002_remove_grn_supplier_grn_accepted_qty_grn_address1_and_more'),
+        ('Purchases_Inwards', '0002_remove_grn_supplier_grn_accepted_qty_grn_address1_and_more'),
     ]
 
     operations = [
@@ -37,7 +37,7 @@ class Migration(migrations.Migration):
                 ('moved_to_qcr_by', models.CharField(blank=True, max_length=255, null=True)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
                 ('updated_at', models.DateTimeField(auto_now=True)),
-                ('source_grn', models.OneToOneField(on_delete=django.db.models.deletion.PROTECT, related_name='qcr_record', to='Purchases_Iwards.grn')),
+                ('source_grn', models.OneToOneField(on_delete=django.db.models.deletion.PROTECT, related_name='qcr_record', to='Purchases_Inwards.grn')),
             ],
         ),
     ]
