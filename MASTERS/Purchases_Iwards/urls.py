@@ -1,22 +1,9 @@
-from django.urls import include, path
-from rest_framework.routers import DefaultRouter
-
-from .views import (
-    GRNCreateAPIView,
-    GRNImportAPIView,
-    GRNMoveToQCRAPIView,
-    GRNViewSet,
-    QCRListAPIView,
-    QCRStatusUpdateAPIView,
-)
-
-router = DefaultRouter()
-router.register(r"view", GRNViewSet, basename="grn-view")
+from django.urls import path
+from .views import GRNImportAPIView, GRNListCreateAPIView, GRNMoveToQCRAPIView, QCRListAPIView, QCRStatusUpdateAPIView
 
 urlpatterns = [
-    path("grn", include(router.urls)),
-    path("grn/", GRNCreateAPIView.as_view(), name="grn-create"),
-    path("grn/moved/", GRNCreateAPIView.as_view(tab_scope="grn"), name="grn-moved-list"),
+    path("grn/", GRNListCreateAPIView.as_view(), name="grn-list-create"),
+    path("grn/moved/", GRNListCreateAPIView.as_view(tab_scope="grn"), name="grn-moved-list"),
     path("grn/import/", GRNImportAPIView.as_view(), name="grn-import"),
     path("grn/<int:pk>/move-to-qcr/", GRNMoveToQCRAPIView.as_view(), name="grn-move-to-qcr"),
     path("qcr/", QCRListAPIView.as_view(), name="qcr-list"),

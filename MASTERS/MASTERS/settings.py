@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -52,6 +53,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'corsheaders',
     'Items',
     'Purchases_Inwards',
 ]
@@ -64,12 +66,24 @@ REST_FRAMEWORK = {
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+]
+
+CORS_ALLOWED_ORIGINS = [
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'http://localhost:4173',
+    'http://127.0.0.1:4173',
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    'http://localhost:8080',
+    'http://127.0.0.1:8080',
 ]
 
 ROOT_URLCONF = 'MASTERS.urls'
@@ -95,14 +109,16 @@ WSGI_APPLICATION = 'MASTERS.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
+USE_SQLITE_TEST_DB = any(arg == 'test' or arg.startswith('test') for arg in sys.argv)
+
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'wpe_db',
-        'USER': 'root',
-        'PASSWORD': 'admin@123',
-        'HOST': '127.0.0.1',
-        'PORT': '3306',
+        'ENGINE': 'django.db.backends.sqlite3' if USE_SQLITE_TEST_DB else 'django.db.backends.mysql',
+        'NAME': BASE_DIR / 'db.sqlite3' if USE_SQLITE_TEST_DB else 'wpe_db',
+        'USER': '' if USE_SQLITE_TEST_DB else 'root',
+        'PASSWORD': '' if USE_SQLITE_TEST_DB else 'admin@123',
+        'HOST': '' if USE_SQLITE_TEST_DB else '127.0.0.1',
+        'PORT': '' if USE_SQLITE_TEST_DB else '3306',
     }
 }
 

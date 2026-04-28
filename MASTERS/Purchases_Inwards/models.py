@@ -63,7 +63,7 @@ class GRN(models.Model):
     # =========================
     # Item Details (Single Item)
     # If multiple items come,
-    # either store JSONField or
+    # either store JSONField orq
     # create child table.
     # Since you asked same table,
     # keeping first-level fields here.
@@ -115,6 +115,23 @@ class GRN(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     status = models.BooleanField(default=True)
+    process_status = models.CharField(max_length=100, default="GRN Process")
+    moved_to_qcr_at = models.DateTimeField(blank=True, null=True)
+    moved_to_qcr_by = models.CharField(max_length=255, blank=True, null=True)
 
     def __str__(self):
         return self.grn_no
+
+
+class QCR(models.Model):
+    source_grn = models.OneToOneField(GRN, on_delete=models.PROTECT, related_name="qcr_record")
+    grn_reference_no = models.CharField(max_length=100, db_index=True)
+    snapshot = models.JSONField(default=dict)
+    status = models.CharField(max_length=100, default="Active")
+    moved_to_qcr_at = models.DateTimeField()
+    moved_to_qcr_by = models.CharField(max_length=255, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"QCR-{self.grn_reference_no}"
