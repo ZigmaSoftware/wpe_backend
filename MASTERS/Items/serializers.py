@@ -5,7 +5,8 @@ from .models import Item
 class ItemSerializer(serializers.ModelSerializer):
 
     class Meta:
-        db_table = "Items"
+        model = Item
+        fields = '__all__'
 
     def validate_item_code(self, value):
         if not value:
@@ -14,9 +15,14 @@ class ItemSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         # Optional: prevent duplicate item_name under same category
-        if Item.objects.filter(
+        duplicate_query = Item.objects.filter(
             item_name=data.get('item_name'),
             category=data.get('category')
-        ).exists():
+        )
+
+        if self.instance is not None:
+            duplicate_query = duplicate_query.exclude(pk=self.instance.pk)
+
+        if duplicate_query.exists():
             raise serializers.ValidationError("Duplicate item in same category")
         return data

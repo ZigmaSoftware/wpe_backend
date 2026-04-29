@@ -1,5 +1,6 @@
 from rest_framework import serializers
-from .models import GRN
+
+from .models import GRN, QCR
 
 
 class GRNSerializer(serializers.ModelSerializer):
@@ -102,3 +103,11 @@ class GRNReadSerializer(serializers.ModelSerializer):
                 "total_after_tax": instance.total_after_tax,
             },
         }
+
+
+class QCRSerializer(serializers.ModelSerializer):
+    source_grn_data = GRNSerializer(source="source_grn", read_only=True)
+
+    class Meta:
+        model = QCR
+        fields = "__all__"
