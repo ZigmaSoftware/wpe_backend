@@ -11,7 +11,7 @@ from .views import (
 )
 
 router = DefaultRouter()
-router.register(r"view", GRNViewSet, basename="grn-view")
+router.register(r"grnview", GRNViewSet, basename="grn-view")
 
 urlpatterns = [
     path("grn", include(router.urls)),

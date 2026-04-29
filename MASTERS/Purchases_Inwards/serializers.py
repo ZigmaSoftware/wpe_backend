@@ -16,8 +16,7 @@ class GRNSerializer(serializers.ModelSerializer):
 
 class GRNReadSerializer(serializers.ModelSerializer):
     class Meta:
-        model = GRN
-        fields = "__all__"
+        db_table = "Purchase_Inwards"
 
     def to_representation(self, instance):
         item_data = {
