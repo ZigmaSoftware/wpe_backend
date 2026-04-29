@@ -5,8 +5,7 @@ from .models import Item
 class ItemSerializer(serializers.ModelSerializer):
 
     class Meta:
-        model = Item
-        fields = '__all__'
+        db_table = "Items"
 
     def validate_item_code(self, value):
         if not value:

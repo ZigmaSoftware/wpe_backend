@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'Items',
     'Purchases_Inwards',
+    'Presales',
 ]
 
 REST_FRAMEWORK = {
@@ -105,6 +106,10 @@ DATABASES = {
         'PORT': '3306',
     }
 }
+
+# MEDIA_URL = '/media/'
+# MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
