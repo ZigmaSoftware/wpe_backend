@@ -1,11 +1,19 @@
 import os
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
-
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = BASE_DIR.parent
+MASTERS_DIR = PROJECT_ROOT / "MASTERS"
+
+load_dotenv(PROJECT_ROOT / ".env")
+
+for app_dir in (BASE_DIR, MASTERS_DIR):
+    app_dir_string = str(app_dir)
+    if app_dir_string not in sys.path:
+        sys.path.insert(0, app_dir_string)
 
 
 # Quick-start development settings - unsuitable for production
@@ -15,7 +23,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # SECRET_KEY = 'django-insecure-gctx+v9&-lg=u@7@5d6c*#m_sns@_pb-fi=c^@cdn&(-f=yf6w'
 
 # # SECURITY WARNING: don't run with debug turned on in production!
-# DEBUG = True
+
 SECRET_KEY = os.getenv("SECRET_KEY")
 DEBUG = True
 
@@ -32,17 +40,34 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'Auth'
+    'rest_framework',
+    'corsheaders',
+    'Auth',
+    'Items',
+    'Purchases_Inwards',
+    'Presales',
 ]
 
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
+]
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
 ]
 
 ROOT_URLCONF = 'LOGIN.urls'
@@ -140,8 +165,6 @@ LOGIN_REDIRECT_URL = "/"
 # ================= RATE LIMIT =================
 LOGIN_ATTEMPT_LIMIT = 5
 LOGIN_BLOCK_TIME = 300  # seconds
-
-INSTALLED_APPS += ["rest_framework"]
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
