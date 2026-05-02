@@ -1,7 +1,33 @@
+from random import SystemRandom
+
 from django.db import models
 
 
-class GRN(models.Model):
+_random = SystemRandom()
+
+
+def generate_wpe_unique_id() -> str:
+    return f"WPE-{_random.randrange(100000000):08d}"
+
+
+class WPEUniqueIDModel(models.Model):
+    unique_id = models.CharField(max_length=12, unique=True, editable=False, default=generate_wpe_unique_id)
+
+    class Meta:
+        abstract = True
+
+    def save(self, *args, **kwargs):
+        if not self.unique_id:
+            self.unique_id = generate_wpe_unique_id()
+
+        model = self.__class__
+        while model.objects.filter(unique_id=self.unique_id).exclude(pk=self.pk).exists():
+            self.unique_id = generate_wpe_unique_id()
+
+        return super().save(*args, **kwargs)
+
+
+class GRN(WPEUniqueIDModel):
     # =========================
     # Document Details
     # =========================
@@ -108,6 +134,8 @@ class GRN(models.Model):
     total_tax_amount = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
     total_after_tax = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
 
+    raw_payload = models.JSONField(default=dict, blank=True)
+
     # =========================
     # System Fields
     # =========================
@@ -123,7 +151,7 @@ class GRN(models.Model):
         return self.grn_no
 
 
-class QCR(models.Model):
+class QCR(WPEUniqueIDModel):
     source_grn = models.OneToOneField(GRN, on_delete=models.PROTECT, related_name="qcr_record")
     grn_reference_no = models.CharField(max_length=100, db_index=True)
     snapshot = models.JSONField(default=dict)

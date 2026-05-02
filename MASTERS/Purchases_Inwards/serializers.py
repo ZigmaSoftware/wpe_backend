@@ -16,9 +16,13 @@ class GRNSerializer(serializers.ModelSerializer):
 
 class GRNReadSerializer(serializers.ModelSerializer):
     class Meta:
+        model = GRN
+        fields = "__all__"
         db_table = "Purchase_Inwards"
 
     def to_representation(self, instance):
+        raw_payload = instance.raw_payload if isinstance(instance.raw_payload, dict) else {}
+        raw_items = raw_payload.get("items")
         item_data = {
             "item_id": instance.item_id,
             "item_serial_number": instance.item_serial_number,
@@ -44,6 +48,7 @@ class GRNReadSerializer(serializers.ModelSerializer):
 
         return {
             "id": instance.id,
+            "unique_id": instance.unique_id,
             "grn_no": instance.grn_no,
             "grn_date": instance.grn_date,
             "supplier_id": instance.supplier_id,
@@ -94,7 +99,7 @@ class GRNReadSerializer(serializers.ModelSerializer):
                 "sales_contact_id": instance.sales_contact_id,
                 "currency": instance.currency,
             },
-            "items": [item_data] if has_item_data else [],
+            "items": raw_items if isinstance(raw_items, list) else ([item_data] if has_item_data else []),
             "value_details": {
                 "freight_charge": instance.freight_charge,
                 "loading_unloading_charge": instance.loading_unloading_charge,

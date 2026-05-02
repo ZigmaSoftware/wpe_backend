@@ -1,8 +1,19 @@
 from pathlib import Path
+import os
 import sys
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = BASE_DIR.parent
+LOGIN_DIR = PROJECT_ROOT / "LOGIN"
+
+load_dotenv(PROJECT_ROOT / ".env")
+
+for app_dir in (BASE_DIR, LOGIN_DIR):
+    app_dir_string = str(app_dir)
+    if app_dir_string not in sys.path:
+        sys.path.insert(0, app_dir_string)
 
 
 # Quick-start development settings - unsuitable for production
@@ -54,6 +65,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'corsheaders',
+    'Auth',
     'Items',
     'Purchases_Inwards',
     'Presales',
@@ -110,16 +122,18 @@ WSGI_APPLICATION = 'MASTERS.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-USE_SQLITE_TEST_DB = any(arg == 'test' or arg.startswith('test') for arg in sys.argv)
-
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3' if USE_SQLITE_TEST_DB else 'django.db.backends.mysql',
-        'NAME': BASE_DIR / 'db.sqlite3' if USE_SQLITE_TEST_DB else 'wpe_db',
-        'USER': '' if USE_SQLITE_TEST_DB else 'root',
-        'PASSWORD': '' if USE_SQLITE_TEST_DB else 'admin@123',
-        'HOST': '' if USE_SQLITE_TEST_DB else '127.0.0.1',
-        'PORT': '' if USE_SQLITE_TEST_DB else '3306',
+        'ENGINE': 'django.db.backends.mysql',
+        'NAME': os.getenv('DB_NAME', 'wpe_db'),
+        'USER': os.getenv('DB_USER', 'root'),
+        'PASSWORD': os.getenv('DB_PASSWORD', 'admin@123'),
+        'HOST': os.getenv('DB_HOST', '127.0.0.1'),
+        'PORT': os.getenv('DB_PORT', '3306'),
+        'OPTIONS': {
+            'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
+            'charset': 'utf8mb4',
+        },
     }
 }
 

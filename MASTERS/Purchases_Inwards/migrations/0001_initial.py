@@ -1,0 +1,80 @@
+# Generated manually to activate the existing Purchases_Inwards schema.
+
+from django.db import migrations, models
+
+
+class Migration(migrations.Migration):
+
+    initial = True
+
+    dependencies = []
+
+    operations = [
+        migrations.CreateModel(
+            name="GRN",
+            fields=[
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                ("po_no", models.CharField(blank=True, max_length=100, null=True)),
+                ("po_date", models.DateField(blank=True, null=True)),
+                ("grn_no", models.CharField(max_length=100, unique=True)),
+                ("grn_date", models.DateField(blank=True, null=True)),
+                ("supplier_invoice_no", models.CharField(blank=True, max_length=100, null=True)),
+                ("supplier_invoice_date", models.DateField(blank=True, null=True)),
+                ("gateentry_bookno", models.CharField(blank=True, max_length=100, null=True)),
+                ("gateentry_bookdate", models.DateField(blank=True, null=True)),
+                ("tolerance", models.CharField(blank=True, max_length=50, null=True)),
+                ("req_date", models.CharField(blank=True, max_length=100, null=True)),
+                ("req_person_name", models.CharField(blank=True, max_length=255, null=True)),
+                ("req_person_id", models.CharField(blank=True, max_length=100, null=True)),
+                ("req_department", models.CharField(blank=True, max_length=255, null=True)),
+                ("req_reason", models.TextField(blank=True, null=True)),
+                ("supplier_id", models.CharField(blank=True, max_length=100, null=True)),
+                ("gstin", models.CharField(blank=True, max_length=100, null=True)),
+                ("contact_name", models.CharField(blank=True, max_length=255, null=True)),
+                ("trade_name", models.CharField(blank=True, max_length=255, null=True)),
+                ("contact_type", models.CharField(blank=True, max_length=100, null=True)),
+                ("address1", models.TextField(blank=True, null=True)),
+                ("address2", models.TextField(blank=True, null=True)),
+                ("location", models.CharField(blank=True, max_length=255, null=True)),
+                ("pincode", models.CharField(blank=True, max_length=50, null=True)),
+                ("state_name", models.CharField(blank=True, max_length=255, null=True)),
+                ("state_code", models.CharField(blank=True, max_length=50, null=True)),
+                ("country", models.CharField(blank=True, max_length=100, null=True)),
+                ("person_name", models.CharField(blank=True, max_length=255, null=True)),
+                ("phone_number", models.CharField(blank=True, max_length=50, null=True)),
+                ("email", models.EmailField(blank=True, max_length=254, null=True)),
+                ("category", models.CharField(blank=True, max_length=255, null=True)),
+                ("segment", models.CharField(blank=True, max_length=255, null=True)),
+                ("sub_segment", models.CharField(blank=True, max_length=255, null=True)),
+                ("sales_contact_id", models.CharField(blank=True, max_length=100, null=True)),
+                ("currency", models.CharField(blank=True, max_length=100, null=True)),
+                ("item_id", models.CharField(blank=True, max_length=100, null=True)),
+                ("item_serial_number", models.IntegerField(blank=True, null=True)),
+                ("product_description", models.TextField(blank=True, null=True)),
+                ("hsn_code", models.CharField(blank=True, max_length=100, null=True)),
+                ("total_quantity", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("quantity", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("free_quantity", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("accepted_qty", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("rejected_qty", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("unit", models.CharField(blank=True, max_length=100, null=True)),
+                ("unit_price", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("total_amount", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("discount", models.CharField(blank=True, max_length=100, null=True)),
+                ("assessable_value", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("gst_rate", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("igst_amount", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("cgst_amount", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("sgst_amount", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("total_item_value", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("freight_charge", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("loading_unloading_charge", models.CharField(blank=True, max_length=100, null=True)),
+                ("total_before_tax", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("total_tax_amount", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("total_after_tax", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                ("status", models.BooleanField(default=True)),
+            ],
+        ),
+    ]
