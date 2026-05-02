@@ -8,5 +8,5 @@ router = DefaultRouter()
 router.register(r'', PreSalesViewSet)
 
 urlpatterns = [
-    path('presales/', include(router.urls)),
+    path('presales', include(router.urls)),
 ]

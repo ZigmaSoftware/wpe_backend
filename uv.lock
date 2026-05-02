@@ -285,6 +285,15 @@ wheels = [
 ]
 
 [[package]]
+name = "rg"
+version = "0.0.76"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ba/9b/5e9e9ce3e2290d77a61675c19297ecc017e0c188e25306976830185d3f24/rg-0.0.76.tar.gz", hash = "sha256:ea92d4fdb511f4ec1eb73ac1831e688ade3bb1f38b730bf89798205327d62c68", size = 25808, upload-time = "2026-02-10T19:18:58.157Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9f/c7/33d896d5b35d2a7589071a249adb086f89b9c6725c68c32c4487fae19129/rg-0.0.76-py3-none-any.whl", hash = "sha256:5573c12c700cca72765e93acdcbeeb94167997a45276787b6449dec6b2f101c2", size = 33854, upload-time = "2026-02-10T19:18:56.509Z" },
+]
+
+[[package]]
 name = "sqlparse"
 version = "0.5.5"
 source = { registry = "https://pypi.org/simple" }
@@ -316,6 +325,7 @@ dependencies = [
     { name = "mysqlclient" },
     { name = "openpyxl" },
     { name = "pillow" },
+    { name = "rg" },
 ]
 
 [package.metadata]
@@ -329,4 +339,5 @@ requires-dist = [
     { name = "mysqlclient", specifier = ">=2.2.8" },
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "pillow", specifier = ">=12.2.0" },
+    { name = "rg", specifier = ">=0.0.76" },
 ]

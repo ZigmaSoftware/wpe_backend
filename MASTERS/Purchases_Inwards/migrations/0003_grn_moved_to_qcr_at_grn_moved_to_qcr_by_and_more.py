@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('Purchases_Inwards', '0002_remove_grn_supplier_grn_accepted_qty_grn_address1_and_more'),
+        ('Purchases_Inwards', '0001_initial'),
     ]
 
     operations = [

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -168,6 +169,14 @@ DECIMAL_FIELDS = {
 INTEGER_FIELDS = {"item_serial_number"}
 BOOLEAN_FIELDS = {"status"}
 REQUIRED_FIELDS = ("grn_no",)
+RECEIVER_NESTED_KEYS = {"document_details", "document_requirement_details", "supplier_details", "items", "value_details"}
+RECEIVER_REQUIRED_FIELDS = (
+    "document_details.grn_no",
+    "document_details.po_no",
+    "document_details.grn_date",
+    "supplier_details.supplier_id",
+)
+MODEL_DATE_FIELDS = {"po_date", "grn_date", "supplier_invoice_date", "gateentry_bookdate"}
 GRN_LEGACY_VALUE_FIELDS = (
     "id",
     "po_no",
@@ -396,6 +405,97 @@ def format_serializer_errors(errors: dict[str, Any]) -> str:
     return "; ".join(parts) if parts else "Invalid GRN row"
 
 
+def is_blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def get_nested_value(data: dict[str, Any], path: str) -> Any:
+    current: Any = data
+    for part in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def parse_api_date(value: Any) -> date | None:
+    if is_blank(value):
+        return None
+
+    if isinstance(value, datetime):
+        return value.date()
+
+    if isinstance(value, date):
+        return value
+
+    normalized = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%m/%d/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(normalized, fmt).date()
+        except ValueError:
+            continue
+
+    raise ValueError(f"Cannot interpret date value: {value}")
+
+
+def clean_model_value(field_name: str, value: Any, *, required: bool = False) -> Any:
+    if field_name in MODEL_DATE_FIELDS:
+        try:
+            return parse_api_date(value)
+        except ValueError:
+            if required:
+                raise
+            return None
+
+    if field_name in DECIMAL_FIELDS:
+        try:
+            return parse_decimal(value)
+        except ValueError:
+            return None
+
+    if field_name in INTEGER_FIELDS:
+        try:
+            return parse_integer(value)
+        except ValueError:
+            return None
+
+    return value
+
+
+def validate_grn_receiver_payload(data: Any) -> dict[str, Any]:
+    errors: dict[str, Any] = {}
+
+    if not isinstance(data, dict):
+        return {"payload": "Expected a JSON object."}
+
+    document_details = data.get("document_details")
+    supplier_details = data.get("supplier_details")
+    items = data.get("items")
+
+    if not isinstance(document_details, dict):
+        errors["document_details"] = "This object is required."
+    if not isinstance(supplier_details, dict):
+        errors["supplier_details"] = "This object is required."
+
+    for field_path in RECEIVER_REQUIRED_FIELDS:
+        if is_blank(get_nested_value(data, field_path)):
+            errors[field_path] = "This field is required."
+
+    if not isinstance(items, list) or not items:
+        errors["items"] = "At least one item is required."
+    elif not all(isinstance(item, dict) for item in items):
+        errors["items"] = "Each item must be an object."
+
+    grn_date = get_nested_value(data, "document_details.grn_date")
+    if not is_blank(grn_date):
+        try:
+            parse_api_date(grn_date)
+        except ValueError as exc:
+            errors["document_details.grn_date"] = str(exc)
+
+    return errors
+
+
 def map_nested_grn_payload(data: dict[str, Any]) -> dict[str, Any]:
     document_details = data.get("document_details", {}) or {}
     document_requirement_details = data.get("document_requirement_details", {}) or {}
@@ -465,6 +565,20 @@ def map_nested_grn_payload(data: dict[str, Any]) -> dict[str, Any]:
         "total_tax_amount": value_details.get("total_tax_amount"),
         "total_after_tax": value_details.get("total_after_tax"),
     }
+
+
+def build_receiver_grn_payload(data: dict[str, Any]) -> dict[str, Any]:
+    payload = map_nested_grn_payload(data)
+
+    for field_name, value in list(payload.items()):
+        payload[field_name] = clean_model_value(
+            field_name,
+            value,
+            required=field_name == "grn_date",
+        )
+
+    payload["raw_payload"] = deepcopy(data)
+    return payload
 
 
 def get_actor_name(request) -> str | None:
@@ -597,8 +711,7 @@ class GRNAPIViewMixin:
     def create_grn_response(self, request):
         try:
             data = request.data
-            nested_keys = {"document_details", "document_requirement_details", "supplier_details", "items", "value_details"}
-            if any(key in data for key in nested_keys):
+            if any(key in data for key in RECEIVER_NESTED_KEYS):
                 payload = map_nested_grn_payload(data)
             elif hasattr(data, "dict"):
                 payload = data.dict()
@@ -655,6 +768,87 @@ class GRNCreateAPIView(GRNAPIViewMixin, APIView):
 
     def post(self, request):
         return self.create_grn_response(request)
+
+
+class GRNReceiverCreateAPIView(APIView):
+    parser_classes = [JSONParser]
+
+    def post(self, request):
+        data = request.data
+        grn_no = get_nested_value(data, "document_details.grn_no") if isinstance(data, dict) else None
+
+        if is_blank(grn_no):
+            return Response(
+                {
+                    "status": "error",
+                    "message": "Validation failed",
+                    "errors": {"document_details.grn_no": "This field is required."},
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            grn_no = str(grn_no).strip()
+            if GRN.objects.filter(grn_no=grn_no).exists():
+                return Response(
+                    {"status": "duplicate", "message": "GRN already exists"},
+                    status=status.HTTP_200_OK,
+                )
+
+            errors = validate_grn_receiver_payload(data)
+            if errors:
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "Validation failed",
+                        "errors": errors,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            payload = build_receiver_grn_payload(data)
+            payload["grn_no"] = grn_no
+            serializer = GRNSerializer(data=payload)
+            if not serializer.is_valid():
+                if GRN.objects.filter(grn_no=grn_no).exists():
+                    return Response(
+                        {"status": "duplicate", "message": "GRN already exists"},
+                        status=status.HTTP_200_OK,
+                    )
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "Validation failed",
+                        "errors": serializer.errors,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            try:
+                with transaction.atomic():
+                    serializer.save()
+            except IntegrityError:
+                if GRN.objects.filter(grn_no=grn_no).exists():
+                    return Response(
+                        {"status": "duplicate", "message": "GRN already exists"},
+                        status=status.HTTP_200_OK,
+                    )
+                raise
+        except (ProgrammingError, OperationalError) as exc:
+            if is_missing_schema_error(exc):
+                return schema_sync_response()
+            return Response(
+                {
+                    "status": "error",
+                    "message": str(exc),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(
+            {"status": "sent", "message": "GRN received successfully"},
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class GRNViewSet(GRNAPIViewMixin, viewsets.ViewSet):
