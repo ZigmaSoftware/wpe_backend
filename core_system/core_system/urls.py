@@ -15,6 +15,7 @@ urlpatterns = [
     path("api/token/verify", TokenVerifyView.as_view(), name="token_verify_no_slash"),
     path("api/auth/", include("apps.auth.urls")),
     path("api/blending/", include("apps.blending.urls")),
-    path("api/items", include("apps.items.urls")),
-    path("api/presales", include("apps.presales.urls")),
+    path("api/items/", include("apps.items.urls")),
+    path("api/presales/", include("apps.presales.urls")),
+    path("api/contacts/", include("apps.contacts.urls")),
 ]
