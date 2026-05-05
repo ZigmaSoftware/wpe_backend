@@ -2,14 +2,18 @@ import logging
 
 from django.contrib.auth import authenticate, login, logout
 from django.db import DatabaseError
-from django.views.decorators.csrf import ensure_csrf_cookie
 from django.utils.decorators import method_decorator
-from rest_framework.views import APIView
+from django.views.decorators.csrf import ensure_csrf_cookie
+from rest_framework import serializers, status
 from rest_framework.response import Response
-from rest_framework import status
-from .serializers import LoginSerializer
+from rest_framework.views import APIView
 
 logger = logging.getLogger(__name__)
+
+
+class LoginSerializer(serializers.Serializer):
+    username = serializers.CharField()
+    password = serializers.CharField(write_only=True)
 
 
 @method_decorator(ensure_csrf_cookie, name="dispatch")
@@ -18,7 +22,7 @@ class CsrfAPIView(APIView):
     authentication_classes = []
 
     def get(self, request):
-        return Response({"message": "CSRF cookie set"}, status=200)
+        return Response({"message": "CSRF cookie set"}, status=status.HTTP_200_OK)
 
 
 class LoginAPIView(APIView):
@@ -27,15 +31,14 @@ class LoginAPIView(APIView):
 
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
-
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        username = serializer.validated_data["username"]
-        password = serializer.validated_data["password"]
+        serializer.is_valid(raise_exception=True)
 
         try:
-            user = authenticate(request, username=username, password=password)
+            user = authenticate(
+                request,
+                username=serializer.validated_data["username"],
+                password=serializer.validated_data["password"],
+            )
         except DatabaseError:
             logger.exception("Authentication failed because the database is unavailable.")
             return Response(
@@ -43,22 +46,26 @@ class LoginAPIView(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
-        if user is not None:
-            try:
-                login(request, user)
-            except DatabaseError:
-                logger.exception("Login failed because the session store is unavailable.")
-                return Response(
-                    {"error": "Login service is temporarily unavailable."},
-                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
-                )
-            return Response({"message": "Login successful"}, status=200)
-        else:
-            return Response({"error": "Invalid credentials"}, status=status.HTTP_401_UNAUTHORIZED)
+        if user is None:
+            return Response(
+                {"error": "Invalid credentials"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        try:
+            login(request, user)
+        except DatabaseError:
+            logger.exception("Login failed because the session store is unavailable.")
+            return Response(
+                {"error": "Login service is temporarily unavailable."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return Response({"message": "Login successful"}, status=status.HTTP_200_OK)
 
 
 class SessionAPIView(APIView):
     permission_classes = []
+    authentication_classes = []
 
     def get(self, request):
         try:
@@ -71,14 +78,14 @@ class SessionAPIView(APIView):
             )
 
         if not is_authenticated:
-            return Response({"authenticated": False}, status=401)
+            return Response({"authenticated": False}, status=status.HTTP_401_UNAUTHORIZED)
 
         return Response(
             {
                 "authenticated": True,
                 "username": request.user.get_username(),
             },
-            status=200,
+            status=status.HTTP_200_OK,
         )
 
 
@@ -92,4 +99,4 @@ class LogoutAPIView(APIView):
                 {"error": "Logout service is temporarily unavailable."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        return Response({"message": "Logged out"}, status=200)
+        return Response({"message": "Logged out"}, status=status.HTTP_200_OK)
