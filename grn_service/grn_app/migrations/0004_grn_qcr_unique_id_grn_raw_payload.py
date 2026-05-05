@@ -2,7 +2,7 @@
 
 import random
 
-import Purchases_Inwards.models
+import grn_app.models
 from django.db import migrations, models
 from django.db.models import Q
 
@@ -56,7 +56,7 @@ class Migration(migrations.Migration):
             model_name="grn",
             name="unique_id",
             field=models.CharField(
-                default=Purchases_Inwards.models.generate_wpe_unique_id,
+                default=grn_app.models.generate_wpe_unique_id,
                 editable=False,
                 max_length=12,
                 unique=True,
@@ -66,7 +66,7 @@ class Migration(migrations.Migration):
             model_name="qcr",
             name="unique_id",
             field=models.CharField(
-                default=Purchases_Inwards.models.generate_wpe_unique_id,
+                default=grn_app.models.generate_wpe_unique_id,
                 editable=False,
                 max_length=12,
                 unique=True,
