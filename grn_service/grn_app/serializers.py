@@ -59,6 +59,9 @@ class GRNReadSerializer(serializers.ModelSerializer):
             "created_at": instance.created_at,
             "updated_at": instance.updated_at,
             "status": instance.status,
+            "process_status": instance.process_status,
+            "moved_to_qcr_at": instance.moved_to_qcr_at,
+            "moved_to_qcr_by": instance.moved_to_qcr_by,
             "document_details": {
                 "po_no": instance.po_no,
                 "po_date": instance.po_date,

@@ -139,13 +139,14 @@ HEADER_ALIASES = {
     "status": "status",
 }
 
-DATE_FIELDS = {
+MODEL_DATE_FIELDS = {
     "po_date",
     "grn_date",
     "supplier_invoice_date",
     "gateentry_bookdate",
-    "req_date",
 }
+
+STRING_DATE_FIELDS = {"req_date"}
 
 DECIMAL_FIELDS = {
     "total_quantity",
@@ -177,7 +178,6 @@ RECEIVER_REQUIRED_FIELDS = (
     "document_details.grn_date",
     "supplier_details.supplier_id",
 )
-MODEL_DATE_FIELDS = {"po_date", "grn_date", "supplier_invoice_date", "gateentry_bookdate"}
 GRN_LEGACY_VALUE_FIELDS = (
     "id",
     "po_no",
@@ -391,6 +391,11 @@ def parse_date(value: Any, *, epoch: Any) -> date | None:
             continue
 
     raise ValueError(f"Cannot interpret date value: {value}")
+
+
+def parse_string_date(value: Any, *, epoch: Any) -> str | None:
+    parsed_date = parse_date(value, epoch=epoch)
+    return parsed_date.isoformat() if parsed_date else None
 
 
 def format_serializer_errors(errors: dict[str, Any]) -> str:
@@ -924,8 +929,10 @@ class GRNImportAPIView(APIView):
                     for column_index, field_name in column_map.items():
                         cell_value = row[column_index] if column_index < len(row) else None
 
-                        if field_name in DATE_FIELDS:
+                        if field_name in MODEL_DATE_FIELDS:
                             payload[field_name] = parse_date(cell_value, epoch=workbook.epoch)
+                        elif field_name in STRING_DATE_FIELDS:
+                            payload[field_name] = parse_string_date(cell_value, epoch=workbook.epoch)
                         elif field_name in DECIMAL_FIELDS:
                             payload[field_name] = parse_decimal(cell_value)
                         elif field_name in INTEGER_FIELDS:

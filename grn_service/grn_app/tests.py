@@ -1,7 +1,11 @@
 import re
+from datetime import date
+from io import BytesIO
 
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.urls import reverse
+from openpyxl import Workbook
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
@@ -13,6 +17,7 @@ class GRNAPIViewTests(APITestCase):
         self.url = reverse("grn-create")
         self.receiver_url = reverse("grn-receiver-create")
         self.view_url = reverse("grn-view-list")
+        self.import_url = reverse("grn-import")
         self.api_root_url = "/api/grn/"
         self.first_grn = GRN.objects.create(
             grn_no="GRN-001",
@@ -234,6 +239,29 @@ class GRNAPIViewTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(response.data["status"], "error")
         self.assertEqual(response.data["count"], 0)
+
+    def test_grn_import_accepts_excel_date_cell_for_req_date(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["grn_no", "grn_date", "req_date"])
+        sheet.append(["GRN-IMPORT-001", date(2026, 5, 1), date(2026, 4, 30)])
+
+        file_buffer = BytesIO()
+        workbook.save(file_buffer)
+        upload = SimpleUploadedFile(
+            "grn-import.xlsx",
+            file_buffer.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        response = self.client.post(self.import_url, {"file": upload}, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["created_count"], 1)
+
+        grn = GRN.objects.get(grn_no="GRN-IMPORT-001")
+        self.assertEqual(str(grn.grn_date), "2026-05-01")
+        self.assertEqual(grn.req_date, "2026-04-30")
 
 
 class GRNQCRFlowTests(TestCase):
