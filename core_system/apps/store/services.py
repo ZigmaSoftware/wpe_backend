@@ -21,6 +21,9 @@ GRN_CONTACT = "GRN Service"
 GRN_BIN = "GRN"
 TRANSFER_CONTACT = "Store Stock Transfer"
 TRANSFER_BIN = "DEPT"
+AUTO_CREATED_ITEM_CATEGORY = "GRN Imported"
+AUTO_CREATED_ITEM_GROUP = "Inbound GRN"
+AUTO_CREATED_ITEM_SUB_GROUP = "Auto Created"
 
 
 def quantize_stock(value: Decimal | int | float | str) -> Decimal:
@@ -34,6 +37,10 @@ def quantize_stock(value: Decimal | int | float | str) -> Decimal:
 
 def normalize_unit(value: Any) -> str:
     return str(value or "").strip().upper().replace(" ", "")
+
+
+def normalize_text(value: Any) -> str:
+    return str(value or "").strip()
 
 
 def ensure_item_unit(item: Item) -> None:
@@ -171,46 +178,67 @@ def extract_grn_lines(grn_payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def resolve_item_for_grn_line(grn_payload: dict[str, Any], line_payload: dict[str, Any]) -> Item:
-    external_item_id = line_payload.get("item_id") or grn_payload.get("item_id")
-    if external_item_id not in (None, ""):
-        external_item_id_text = str(external_item_id).strip()
-        if external_item_id_text.isdigit():
-            item = Item.objects.filter(pk=int(external_item_id_text)).first()
-            if item is not None:
-                return item
-
-        item = Item.objects.filter(item_code__iexact=external_item_id_text).first()
-        if item is not None:
-            return item
-
-    product_description = str(
+    external_item_id_text = normalize_text(line_payload.get("item_id") or grn_payload.get("item_id"))
+    product_description = normalize_text(
         line_payload.get("product_description")
         or line_payload.get("item_name")
         or grn_payload.get("product_description")
-        or ""
-    ).strip()
-    unit = str(line_payload.get("unit") or grn_payload.get("unit") or "").strip()
-    hsn_code = str(line_payload.get("hsn_code") or grn_payload.get("hsn_code") or "").strip()
+    )
+    unit = normalize_text(line_payload.get("unit") or grn_payload.get("unit"))
+    hsn_code = normalize_text(line_payload.get("hsn_code") or grn_payload.get("hsn_code"))
 
-    queryset = Item.objects.all()
-    if product_description:
-        queryset = queryset.filter(item_name__iexact=product_description)
-    if unit:
-        queryset = queryset.filter(unit__iexact=unit)
-    if hsn_code:
-        queryset = queryset.filter(hsn_code__iexact=hsn_code)
+    item_by_external_id = None
+    if external_item_id_text:
+        item_by_external_id = Item.objects.filter(external_item_id__iexact=external_item_id_text).first()
+        if item_by_external_id is None and external_item_id_text.isdigit():
+            item_by_external_id = Item.objects.filter(pk=int(external_item_id_text)).first()
+        if item_by_external_id is None:
+            item_by_external_id = Item.objects.filter(item_code__iexact=external_item_id_text).first()
 
-    matches = list(queryset[:2])
-    if len(matches) == 1:
-        return matches[0]
+    name_matches = list(Item.objects.filter(item_name__iexact=product_description).order_by("id")[:2]) if product_description else []
+    item_by_name = name_matches[0] if len(name_matches) == 1 else None
 
-    raise ValidationError(
-        {
-            "item_id": (
-                "Unable to match GRN line to an item. "
-                "Provide a valid item_id/item_code or align product_description, unit, and hsn_code."
-            )
-        }
+    if len(name_matches) > 1 and item_by_external_id is None:
+        raise ValidationError(
+            {
+                "product_description": (
+                    "Multiple items with this product name already exist in the store app. "
+                    "Use a unique sender item_id to identify the correct product."
+                )
+            }
+        )
+
+    if item_by_external_id is not None and item_by_name is not None and item_by_external_id.pk != item_by_name.pk:
+        raise ValidationError(
+            {
+                "item_id": "Sender item ID matches a different store item than the product name provided.",
+                "product_description": "Product name matches a different store item than the sender item ID provided.",
+            }
+        )
+
+    item = item_by_external_id or item_by_name
+    if item is not None:
+        if external_item_id_text and not normalize_text(item.external_item_id):
+            item.external_item_id = external_item_id_text
+            item.save(update_fields=["external_item_id", "updated_at"])
+        return item
+
+    if not product_description:
+        raise ValidationError({"product_description": "Product description is required to create a new store item."})
+    if not unit:
+        raise ValidationError({"unit": "Unit is required to create a new store item."})
+
+    return Item.objects.create(
+        product_type=Item.PRODUCT_TYPE_GENERAL,
+        category=AUTO_CREATED_ITEM_CATEGORY,
+        group=AUTO_CREATED_ITEM_GROUP,
+        sub_group=AUTO_CREATED_ITEM_SUB_GROUP,
+        item_name=product_description,
+        external_item_id=external_item_id_text or None,
+        hsn_code=hsn_code or None,
+        unit=unit,
+        product_details=f"Auto-created from GRN {resolve_grn_identifier(grn_payload)}",
+        description=f"Imported from supplier GRN payload for {product_description}.",
     )
 
 

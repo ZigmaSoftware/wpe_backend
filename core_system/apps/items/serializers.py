@@ -47,6 +47,21 @@ class ItemSerializer(serializers.ModelSerializer):
             if value is not None and value < 0:
                 raise serializers.ValidationError({field_name: "Stock quantity cannot be negative."})
 
+        external_item_id = data.get("external_item_id")
+        if external_item_id is not None:
+            external_item_id = str(external_item_id).strip() or None
+            data["external_item_id"] = external_item_id
+
+            if external_item_id:
+                duplicate_external_id_query = Item.objects.filter(external_item_id__iexact=external_item_id)
+                if self.instance is not None:
+                    duplicate_external_id_query = duplicate_external_id_query.exclude(pk=self.instance.pk)
+
+                if duplicate_external_id_query.exists():
+                    raise serializers.ValidationError(
+                        {"external_item_id": "An item with this external item ID already exists."}
+                    )
+
         if self.instance is not None:
             duplicate_query = Item.objects.filter(
                 item_name=data.get("item_name", self.instance.item_name),

@@ -12,11 +12,14 @@ from django.utils import timezone
 from openpyxl import load_workbook
 from openpyxl.utils.datetime import from_excel
 from rest_framework import status, viewsets
+from rest_framework.exceptions import ParseError, UnsupportedMediaType, ValidationError as DRFValidationError
 from rest_framework.permissions import AllowAny
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
+from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.store.services import add_stock_from_grn
 from .models import GRN, QCR
 from .serializers import GRNReadSerializer, GRNSerializer, QCRSerializer
 
@@ -178,6 +181,8 @@ RECEIVER_REQUIRED_FIELDS = (
     "document_details.grn_date",
     "supplier_details.supplier_id",
 )
+RECEIVER_VALIDATION_RESPONSE_CODE = "WPE-VAL-000400"
+RECEIVER_INTERNAL_RESPONSE_CODE = "WPE-ERR-000500"
 GRN_LEGACY_VALUE_FIELDS = (
     "id",
     "po_no",
@@ -587,6 +592,74 @@ def build_receiver_grn_payload(data: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def receiver_error_key(field_name: str | None) -> str:
+    if is_blank(field_name):
+        return "non_field_errors"
+
+    normalized = str(field_name).strip()
+    if normalized == "non_field_errors":
+        return normalized
+
+    parts = [part for part in normalized.split(".") if part and not part.isdigit()]
+    if not parts:
+        return "non_field_errors"
+
+    return parts[-1]
+
+
+def merge_receiver_errors(target: dict[str, list[str]], source: dict[str, list[str]]) -> dict[str, list[str]]:
+    for field_name, messages in source.items():
+        bucket = target.setdefault(field_name, [])
+        for message in messages:
+            message_text = str(message)
+            if message_text not in bucket:
+                bucket.append(message_text)
+    return target
+
+
+def normalize_receiver_errors(errors: Any, *, field_name: str | None = None) -> dict[str, list[str]]:
+    normalized: dict[str, list[str]] = {}
+
+    if errors in (None, ""):
+        return normalized
+
+    if isinstance(errors, dict):
+        for key, value in errors.items():
+            next_field_name = key if field_name is None else f"{field_name}.{key}"
+            if key == "non_field_errors":
+                next_field_name = "non_field_errors"
+            merge_receiver_errors(
+                normalized,
+                normalize_receiver_errors(value, field_name=next_field_name),
+            )
+        return normalized
+
+    if isinstance(errors, (list, tuple)):
+        has_nested_values = any(isinstance(item, (dict, list, tuple)) for item in errors)
+        if has_nested_values:
+            for item in errors:
+                merge_receiver_errors(
+                    normalized,
+                    normalize_receiver_errors(item, field_name=field_name),
+                )
+            return normalized
+
+        messages = [str(item) for item in errors if str(item).strip()]
+        if messages:
+            normalized[receiver_error_key(field_name)] = messages
+        return normalized
+
+    normalized[receiver_error_key(field_name)] = [str(errors)]
+    return normalized
+
+
+def format_receiver_timestamp(value: datetime | None = None) -> str:
+    moment = value or timezone.now()
+    if timezone.is_naive(moment):
+        moment = timezone.make_aware(moment, timezone.get_current_timezone())
+    return timezone.localtime(moment).isoformat()
+
+
 def get_actor_name(request) -> str | None:
     user = getattr(request, "user", None)
     if user is not None and getattr(user, "is_authenticated", False):
@@ -780,83 +853,172 @@ class GRNReceiverCreateAPIView(APIView):
     authentication_classes = []
     parser_classes = [JSONParser]
     permission_classes = [AllowAny]
+    renderer_classes = [JSONRenderer]
+
+    def build_response(
+        self,
+        *,
+        http_status: int,
+        status_text: str,
+        message: str,
+        response_code: str,
+        grn_no: str | None,
+        receiver_reference: str | None,
+        received_at: datetime | None = None,
+        errors: dict[str, list[str]] | None,
+    ) -> Response:
+        return Response(
+            {
+                "status": status_text,
+                "message": message,
+                "response_code": response_code,
+                "grn_no": grn_no,
+                "receiver_reference": receiver_reference,
+                "received_at": format_receiver_timestamp(received_at),
+                "errors": errors,
+            },
+            status=http_status,
+        )
+
+    def build_grn_response_code(self, grn: GRN) -> str:
+        return f"WPE-GRN-{grn.pk:06d}"
+
+    def normalize_text(self, value: Any) -> str | None:
+        if is_blank(value):
+            return None
+        return str(value).strip()
+
+    def extract_request_grn_no(self, data: Any, *, fallback: str | None = None) -> str | None:
+        grn_no = fallback
+        if isinstance(data, dict):
+            grn_no = get_nested_value(data, "document_details.grn_no") or data.get("grn_no") or fallback
+        return self.normalize_text(grn_no)
+
+    def find_existing_grn(self, *, grn_no: str | None, idempotency_key: str | None) -> GRN | None:
+        lookup_values: list[str] = []
+        for candidate in (grn_no, idempotency_key):
+            normalized = self.normalize_text(candidate)
+            if normalized and normalized not in lookup_values:
+                lookup_values.append(normalized)
+
+        if not lookup_values:
+            return None
+
+        return GRN.objects.filter(grn_no__in=lookup_values).order_by("id").first()
+
+    def build_success_response(self, grn: GRN) -> Response:
+        return self.build_response(
+            http_status=status.HTTP_201_CREATED,
+            status_text="sent",
+            message="GRN received and processed successfully.",
+            response_code=self.build_grn_response_code(grn),
+            grn_no=grn.grn_no,
+            receiver_reference=grn.unique_id,
+            received_at=grn.created_at,
+            errors=None,
+        )
+
+    def build_duplicate_response(self, grn: GRN, *, grn_no: str | None = None) -> Response:
+        return self.build_response(
+            http_status=status.HTTP_200_OK,
+            status_text="duplicate",
+            message="GRN already exists.",
+            response_code=self.build_grn_response_code(grn),
+            grn_no=grn_no or grn.grn_no,
+            receiver_reference=grn.unique_id,
+            received_at=grn.created_at,
+            errors=None,
+        )
+
+    def build_validation_error_response(self, *, grn_no: str | None, errors: Any) -> Response:
+        return self.build_response(
+            http_status=status.HTTP_400_BAD_REQUEST,
+            status_text="error",
+            message="Payload validation failed.",
+            response_code=RECEIVER_VALIDATION_RESPONSE_CODE,
+            grn_no=grn_no,
+            receiver_reference=None,
+            errors=normalize_receiver_errors(errors),
+        )
+
+    def build_internal_error_response(self, *, grn_no: str | None) -> Response:
+        return self.build_response(
+            http_status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_text="error",
+            message="Internal processing failed.",
+            response_code=RECEIVER_INTERNAL_RESPONSE_CODE,
+            grn_no=grn_no,
+            receiver_reference=None,
+            errors={"non_field_errors": ["Unexpected server error."]},
+        )
+
+    def build_store_sync_payload(self, *, grn: GRN) -> dict[str, Any]:
+        payload = deepcopy(grn.raw_payload if isinstance(grn.raw_payload, dict) else {})
+        document_details = payload.get("document_details")
+        if not isinstance(document_details, dict):
+            document_details = {}
+            payload["document_details"] = document_details
+
+        document_details.setdefault("grn_no", grn.grn_no)
+        if grn.grn_date:
+            document_details.setdefault("grn_date", grn.grn_date.isoformat())
+
+        payload["id"] = grn.id
+        payload["unique_id"] = grn.unique_id
+        payload["grn_no"] = grn.grn_no
+        if grn.grn_date:
+            payload.setdefault("grn_date", grn.grn_date.isoformat())
+        return payload
 
     def post(self, request):
-        data = request.data
-        grn_no = get_nested_value(data, "document_details.grn_no") if isinstance(data, dict) else None
-
-        if is_blank(grn_no):
-            return Response(
-                {
-                    "status": "error",
-                    "message": "Validation failed",
-                    "errors": {"document_details.grn_no": "This field is required."},
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        idempotency_key = self.normalize_text(request.headers.get("Idempotency-Key"))
+        grn_no = idempotency_key
 
         try:
-            grn_no = str(grn_no).strip()
-            if GRN.objects.filter(grn_no=grn_no).exists():
-                return Response(
-                    {"status": "duplicate", "message": "GRN already exists"},
-                    status=status.HTTP_200_OK,
-                )
+            data = request.data
+            grn_no = self.extract_request_grn_no(data, fallback=idempotency_key)
+
+            existing_grn = self.find_existing_grn(grn_no=grn_no, idempotency_key=idempotency_key)
+            if existing_grn is not None:
+                return self.build_duplicate_response(existing_grn, grn_no=grn_no)
 
             errors = validate_grn_receiver_payload(data)
             if errors:
-                return Response(
-                    {
-                        "status": "error",
-                        "message": "Validation failed",
-                        "errors": errors,
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+                return self.build_validation_error_response(grn_no=grn_no, errors=errors)
 
             payload = build_receiver_grn_payload(data)
             payload["grn_no"] = grn_no
             serializer = GRNSerializer(data=payload)
             if not serializer.is_valid():
-                if GRN.objects.filter(grn_no=grn_no).exists():
-                    return Response(
-                        {"status": "duplicate", "message": "GRN already exists"},
-                        status=status.HTTP_200_OK,
-                    )
-                return Response(
-                    {
-                        "status": "error",
-                        "message": "Validation failed",
-                        "errors": serializer.errors,
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+                existing_grn = self.find_existing_grn(grn_no=grn_no, idempotency_key=idempotency_key)
+                if existing_grn is not None:
+                    return self.build_duplicate_response(existing_grn, grn_no=grn_no)
+                return self.build_validation_error_response(grn_no=grn_no, errors=serializer.errors)
 
             try:
                 with transaction.atomic():
-                    serializer.save()
+                    saved_grn = serializer.save()
+                    add_stock_from_grn(self.build_store_sync_payload(grn=saved_grn))
             except IntegrityError:
-                if GRN.objects.filter(grn_no=grn_no).exists():
-                    return Response(
-                        {"status": "duplicate", "message": "GRN already exists"},
-                        status=status.HTTP_200_OK,
-                    )
+                existing_grn = self.find_existing_grn(grn_no=grn_no, idempotency_key=idempotency_key)
+                if existing_grn is not None:
+                    return self.build_duplicate_response(existing_grn, grn_no=grn_no)
                 raise
+        except DRFValidationError as exc:
+            return self.build_validation_error_response(grn_no=grn_no, errors=exc.detail)
+        except (ParseError, UnsupportedMediaType) as exc:
+            return self.build_validation_error_response(
+                grn_no=grn_no,
+                errors={"payload": exc.detail},
+            )
         except (ProgrammingError, OperationalError) as exc:
             if is_missing_schema_error(exc):
-                return schema_sync_response()
-            return Response(
-                {
-                    "status": "error",
-                    "message": str(exc),
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+                return self.build_internal_error_response(grn_no=grn_no)
+            return self.build_internal_error_response(grn_no=grn_no)
+        except Exception:
+            return self.build_internal_error_response(grn_no=grn_no)
 
-        return Response(
-            {"status": "sent", "message": "GRN received successfully"},
-            status=status.HTTP_201_CREATED,
-        )
+        return self.build_success_response(saved_grn)
 
 
 class GRNViewSet(GRNAPIViewMixin, viewsets.ViewSet):

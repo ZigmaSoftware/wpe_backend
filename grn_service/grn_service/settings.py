@@ -63,6 +63,9 @@ INSTALLED_APPS = [
     "rest_framework",
     "corsheaders",
     "rest_framework_simplejwt.token_blacklist",
+    "apps.items",
+    "apps.blending",
+    "apps.store",
     "grn_app",
 ]
 
@@ -164,4 +167,3 @@ SIMPLE_JWT = {
     "UPDATE_LAST_LOGIN": True,
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
-
