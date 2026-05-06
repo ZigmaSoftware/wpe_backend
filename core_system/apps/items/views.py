@@ -128,6 +128,7 @@ ITEM_MODEL_FIELDS = {
     "group",
     "sub_group",
     "item_name",
+    "external_item_id",
     "hsn_code",
     "unit",
     "opening_stock",
@@ -379,7 +380,14 @@ def create_or_update_item_with_stock(
     metadata = extract_stock_metadata(raw_payload, validated_data)
 
     with transaction.atomic():
-        existing_item = Item.objects.select_for_update().filter(**item_identity_filter(item_data)).first()
+        external_item_id = clean_text(item_data.get("external_item_id"))
+        if external_item_id:
+            existing_item = Item.objects.select_for_update().filter(external_item_id__iexact=external_item_id).first()
+        else:
+            existing_item = None
+
+        if existing_item is None:
+            existing_item = Item.objects.select_for_update().filter(**item_identity_filter(item_data)).first()
 
         if existing_item is not None:
             if stock_quantity > STOCK_ZERO:

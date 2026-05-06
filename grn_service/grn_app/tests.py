@@ -1,14 +1,18 @@
 import re
 from datetime import date
 from io import BytesIO
+from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 from openpyxl import Workbook
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
+from apps.items.models import Item
+from apps.store.models import StoreStock, StoreTransaction
 from .models import GRN, QCR
 
 
@@ -190,20 +194,50 @@ class GRNAPIViewTests(APITestCase):
         self.assertTrue(GRN.objects.filter(grn_no="GRN-003").exists())
 
     def test_grn_receiver_creates_grn_from_sender_payload(self):
-        response = self.client.post(self.receiver_url, self.build_receiver_payload(), format="json")
-
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(
-            response.data,
-            {"status": "sent", "message": "GRN received successfully"},
+        payload = self.build_receiver_payload()
+        response = self.client.post(
+            self.receiver_url,
+            payload,
+            format="json",
+            HTTP_IDEMPOTENCY_KEY=payload["document_details"]["grn_no"],
         )
 
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response["Content-Type"].startswith("application/json"))
+
         grn = GRN.objects.get(grn_no="GRN-RCV-001")
+        self.assertEqual(
+            response.data,
+            {
+                "status": "sent",
+                "message": "GRN received and processed successfully.",
+                "response_code": f"WPE-GRN-{grn.id:06d}",
+                "grn_no": grn.grn_no,
+                "receiver_reference": grn.unique_id,
+                "received_at": timezone.localtime(grn.created_at).isoformat(),
+                "errors": None,
+            },
+        )
         self.assertEqual(grn.po_no, "PO-RCV-001")
         self.assertEqual(grn.supplier_id, "SUP-RCV-001")
         self.assertEqual(grn.item_id, "ITEM-RCV-001")
         self.assertEqual(grn.raw_payload["items"][1]["item_id"], "ITEM-RCV-002")
         self.assertTrue(re.fullmatch(r"WPE-\d{8}", grn.unique_id))
+
+        first_item = Item.objects.get(external_item_id="ITEM-RCV-001")
+        second_item = Item.objects.get(external_item_id="ITEM-RCV-002")
+        self.assertEqual(first_item.item_name, "Receiver Item 1")
+        self.assertEqual(second_item.item_name, "Receiver Item 2")
+        self.assertEqual(str(first_item.current_stock), "10.000")
+        self.assertEqual(str(second_item.current_stock), "5.000")
+        self.assertEqual(str(StoreStock.objects.get(item=first_item).quantity), "10.000")
+        self.assertEqual(str(StoreStock.objects.get(item=second_item).quantity), "5.000")
+        self.assertEqual(
+            StoreTransaction.objects.filter(
+                transaction_type=StoreTransaction.TransactionType.GRN_IN,
+            ).count(),
+            2,
+        )
 
     def test_grn_receiver_duplicate_returns_200_without_creating_duplicate(self):
         payload = self.build_receiver_payload("GRN-RCV-DUP")
@@ -213,11 +247,27 @@ class GRNAPIViewTests(APITestCase):
 
         self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(duplicate_response.status_code, status.HTTP_200_OK)
+        grn = GRN.objects.get(grn_no="GRN-RCV-DUP")
         self.assertEqual(
             duplicate_response.data,
-            {"status": "duplicate", "message": "GRN already exists"},
+            {
+                "status": "duplicate",
+                "message": "GRN already exists.",
+                "response_code": f"WPE-GRN-{grn.id:06d}",
+                "grn_no": grn.grn_no,
+                "receiver_reference": grn.unique_id,
+                "received_at": timezone.localtime(grn.created_at).isoformat(),
+                "errors": None,
+            },
         )
         self.assertEqual(GRN.objects.filter(grn_no="GRN-RCV-DUP").count(), 1)
+        self.assertEqual(Item.objects.filter(external_item_id__in=["ITEM-RCV-001", "ITEM-RCV-002"]).count(), 2)
+        self.assertEqual(
+            StoreTransaction.objects.filter(
+                transaction_type=StoreTransaction.TransactionType.GRN_IN,
+            ).count(),
+            2,
+        )
 
     def test_grn_receiver_invalid_payload_returns_400(self):
         payload = self.build_receiver_payload("GRN-RCV-BAD")
@@ -227,11 +277,160 @@ class GRNAPIViewTests(APITestCase):
         response = self.client.post(self.receiver_url, payload, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(response["Content-Type"].startswith("application/json"))
         self.assertEqual(response.data["status"], "error")
-        self.assertEqual(response.data["message"], "Validation failed")
-        self.assertIn("document_details.po_no", response.data["errors"])
-        self.assertIn("items", response.data["errors"])
+        self.assertEqual(response.data["message"], "Payload validation failed.")
+        self.assertEqual(response.data["response_code"], "WPE-VAL-000400")
+        self.assertEqual(response.data["grn_no"], "GRN-RCV-BAD")
+        self.assertIsNone(response.data["receiver_reference"])
+        self.assertIsNotNone(response.data["received_at"])
+        self.assertEqual(
+            response.data["errors"],
+            {
+                "po_no": ["This field is required."],
+                "items": ["At least one item is required."],
+            },
+        )
         self.assertFalse(GRN.objects.filter(grn_no="GRN-RCV-BAD").exists())
+
+    def test_grn_receiver_duplicate_can_be_detected_from_idempotency_key(self):
+        payload = self.build_receiver_payload("GRN-RCV-KEY-001")
+
+        first_response = self.client.post(
+            self.receiver_url,
+            payload,
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="GRN-RCV-KEY-001",
+        )
+
+        duplicate_payload = self.build_receiver_payload("GRN-RCV-KEY-002")
+        duplicate_response = self.client.post(
+            self.receiver_url,
+            duplicate_payload,
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="GRN-RCV-KEY-001",
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(duplicate_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(GRN.objects.count(), 3)
+        self.assertFalse(GRN.objects.filter(grn_no="GRN-RCV-KEY-002").exists())
+
+        grn = GRN.objects.get(grn_no="GRN-RCV-KEY-001")
+        self.assertEqual(
+            duplicate_response.data,
+            {
+                "status": "duplicate",
+                "message": "GRN already exists.",
+                "response_code": f"WPE-GRN-{grn.id:06d}",
+                "grn_no": "GRN-RCV-KEY-002",
+                "receiver_reference": grn.unique_id,
+                "received_at": timezone.localtime(grn.created_at).isoformat(),
+                "errors": None,
+            },
+        )
+
+    def test_grn_receiver_reuses_existing_item_by_product_name_and_backfills_external_item_id(self):
+        existing_item = Item.objects.create(
+            category="GRN Imported",
+            group="Inbound GRN",
+            sub_group="Auto Created",
+            item_name="Receiver Item 1",
+            unit="NOS",
+            opening_stock="0.000",
+            current_stock="0.000",
+        )
+        payload = self.build_receiver_payload("GRN-RCV-EXISTING")
+
+        response = self.client.post(self.receiver_url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        existing_item.refresh_from_db()
+        self.assertEqual(existing_item.external_item_id, "ITEM-RCV-001")
+        self.assertEqual(str(existing_item.current_stock), "10.000")
+        self.assertEqual(Item.objects.filter(item_name="Receiver Item 1").count(), 1)
+        self.assertEqual(Item.objects.filter(external_item_id="ITEM-RCV-002").count(), 1)
+
+    def test_grn_receiver_returns_400_when_item_id_and_product_name_map_to_different_store_items(self):
+        Item.objects.create(
+            category="GRN Imported",
+            group="Inbound GRN",
+            sub_group="Auto Created",
+            item_name="Existing External Match",
+            external_item_id="ITEM-RCV-001",
+            unit="NOS",
+            opening_stock="0.000",
+            current_stock="0.000",
+        )
+        Item.objects.create(
+            category="GRN Imported",
+            group="Inbound GRN",
+            sub_group="Auto Created",
+            item_name="Receiver Item 1",
+            unit="NOS",
+            opening_stock="0.000",
+            current_stock="0.000",
+        )
+        payload = self.build_receiver_payload("GRN-RCV-CONFLICT")
+
+        response = self.client.post(self.receiver_url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["status"], "error")
+        self.assertEqual(response.data["message"], "Payload validation failed.")
+        self.assertEqual(response.data["response_code"], "WPE-VAL-000400")
+        self.assertEqual(response.data["grn_no"], "GRN-RCV-CONFLICT")
+        self.assertEqual(
+            response.data["errors"],
+            {
+                "item_id": ["Sender item ID matches a different store item than the product name provided."],
+                "product_description": [
+                    "Product name matches a different store item than the sender item ID provided."
+                ],
+            },
+        )
+        self.assertFalse(GRN.objects.filter(grn_no="GRN-RCV-CONFLICT").exists())
+        self.assertEqual(StoreTransaction.objects.count(), 0)
+
+    def test_grn_receiver_invalid_json_returns_structured_400(self):
+        response = self.client.generic(
+            "POST",
+            self.receiver_url,
+            "{bad json",
+            content_type="application/json",
+            HTTP_IDEMPOTENCY_KEY="GRN-RCV-PARSE",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(response["Content-Type"].startswith("application/json"))
+        self.assertEqual(response.data["status"], "error")
+        self.assertEqual(response.data["message"], "Payload validation failed.")
+        self.assertEqual(response.data["response_code"], "WPE-VAL-000400")
+        self.assertEqual(response.data["grn_no"], "GRN-RCV-PARSE")
+        self.assertIsNone(response.data["receiver_reference"])
+        self.assertIn("payload", response.data["errors"])
+
+    def test_grn_receiver_internal_error_returns_structured_500(self):
+        payload = self.build_receiver_payload("GRN-RCV-ERR")
+
+        with patch("grn_app.views.GRNSerializer.save", side_effect=RuntimeError("boom")):
+            response = self.client.post(self.receiver_url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertTrue(response["Content-Type"].startswith("application/json"))
+        self.assertEqual(
+            response.data,
+            {
+                "status": "error",
+                "message": "Internal processing failed.",
+                "response_code": "WPE-ERR-000500",
+                "grn_no": "GRN-RCV-ERR",
+                "receiver_reference": None,
+                "received_at": response.data["received_at"],
+                "errors": {"non_field_errors": ["Unexpected server error."]},
+            },
+        )
+        self.assertFalse(GRN.objects.filter(grn_no="GRN-RCV-ERR").exists())
 
     def test_get_grn_list_returns_not_found_for_missing_grn(self):
         response = self.client.get(self.url, {"grn_no": "GRN-404"})

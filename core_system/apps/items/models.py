@@ -52,6 +52,7 @@ class Item(models.Model):
     sub_group = models.CharField(max_length=150)
 
     item_name = models.CharField(max_length=255)
+    external_item_id = models.CharField(max_length=100, unique=True, blank=True, null=True)
     item_code = models.CharField(max_length=100, unique=True, blank=True, editable=False)
     hsn_code = models.CharField(max_length=50, blank=True, null=True)
 
@@ -116,6 +117,8 @@ class Item(models.Model):
 
     def save(self, *args, **kwargs):
         self.product_type = self.infer_product_type()
+        if self.external_item_id is not None:
+            self.external_item_id = str(self.external_item_id).strip() or None
         if not self.item_code:
             self.item_code = self.generate_item_code(self.product_type)
 
