@@ -64,6 +64,7 @@ INSTALLED_APPS = [
     "apps.auth",
     "apps.contacts",
     "apps.items",
+    "apps.store",
     "apps.blending",
     "apps.presales",
 ]

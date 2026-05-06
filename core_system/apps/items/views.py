@@ -352,62 +352,19 @@ def record_stock_movement(
     locked_item: Item | None = None,
     locked_department_stock: Any | None = None,
 ) -> tuple[Item, ItemStockTransaction]:
-    from apps.blending.services import get_department_stock, normalize_department
+    from apps.store.services import record_store_stock_movement
 
-    quantity = quantize_stock(quantity)
-    if quantity <= STOCK_ZERO:
-        raise ValidationError({"quantity": "Stock quantity must be greater than zero."})
+    if str(department or "").strip().upper() != "STORE":
+        raise ValidationError({"department": "Only STORE stock movements are supported from the items module."})
 
-    department = normalize_department(department)
-
-    with transaction.atomic():
-        item = locked_item or Item.objects.select_for_update().get(pk=item_id)
-        department_stock = locked_department_stock or get_department_stock(
-            item_id=item.id,
-            department=department,
-            item=item,
-            lock_for_update=True,
-        )
-        current_stock = quantize_stock(department_stock.quantity)
-
-        if movement_type == "inward":
-            inwards = quantity
-            outwards = STOCK_ZERO
-            balance = current_stock + quantity
-        elif movement_type == "outward":
-            inwards = STOCK_ZERO
-            outwards = quantity
-            balance = current_stock - quantity
-        else:
-            raise ValueError("Invalid stock movement type.")
-
-        if balance < STOCK_ZERO:
-            raise ValidationError({"quantity": f"Insufficient stock in {department} department."})
-
-        department_stock.quantity = balance
-        department_stock.save(update_fields=["quantity", "updated_at"])
-
-        if department == "STORE":
-            item.current_stock = balance
-            item.save(update_fields=["current_stock", "updated_at"])
-
-        stock_transaction = ItemStockTransaction.objects.create(
-            item=item,
-            date=metadata.get("date") or timezone.localdate(),
-            ref_id=metadata.get("ref_id"),
-            trans_type=metadata.get("trans_type") or (
-                INWARD_TRANS_TYPE if movement_type == "inward" else OUTWARD_TRANS_TYPE
-            ),
-            sale_type=metadata.get("sale_type"),
-            doc_id=metadata.get("doc_id"),
-            contact=metadata.get("contact") or DEFAULT_STOCK_CONTACT,
-            warehouse=metadata.get("warehouse") or department,
-            bin=metadata.get("bin") or DEFAULT_STOCK_BIN,
-            inwards=inwards,
-            outwards=outwards,
-            balance=balance,
-        )
-
+    item, _store_stock, stock_transaction = record_store_stock_movement(
+        item_id=item_id,
+        movement_type=movement_type,
+        quantity=quantity,
+        metadata=metadata,
+        locked_item=locked_item,
+        locked_store_stock=locked_department_stock,
+    )
     return item, stock_transaction
 
 
