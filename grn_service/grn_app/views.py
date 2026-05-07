@@ -19,7 +19,7 @@ from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.store.services import add_stock_from_grn
+from core_system.apps.store.services import add_stock_from_grn
 from .models import GRN, QCR
 from .serializers import GRNReadSerializer, GRNSerializer, QCRSerializer
 
