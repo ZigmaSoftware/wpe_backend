@@ -1,15 +1,60 @@
+from __future__ import annotations
+
+import uuid
 from decimal import Decimal
 
 from django.conf import settings
 from django.core.validators import MinValueValidator
 from django.db import models
+from django.utils import timezone
 
 from apps.items.models import Item, STOCK_ZERO
 
 
+class UUIDAuditMixin(models.Model):
+    unique_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+
+
+class Warehouse(UUIDAuditMixin):
+    class WarehouseType(models.TextChoices):
+        STORE = "STORE", "Store"
+        BLENDING = "BLENDING", "Blending"
+        GENERAL = "GENERAL", "General"
+
+    code = models.CharField(max_length=30, unique=True, db_index=True)
+    name = models.CharField(max_length=120, db_index=True)
+    warehouse_type = models.CharField(
+        max_length=20,
+        choices=WarehouseType.choices,
+        default=WarehouseType.GENERAL,
+        db_index=True,
+    )
+    description = models.TextField(blank=True, null=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    is_system = models.BooleanField(default=False)
+
+    class Meta(UUIDAuditMixin.Meta):
+        ordering = ["name", "id"]
+
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+
+
 class StoreStock(models.Model):
-    item = models.OneToOneField(Item, on_delete=models.CASCADE, related_name="store_stock")
-    quantity = models.DecimalField(
+    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="inventory_stocks")
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name="current_stocks")
+    available_qty = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        default=STOCK_ZERO,
+        validators=[MinValueValidator(Decimal("0.000"))],
+    )
+    reserved_qty = models.DecimalField(
         max_digits=14,
         decimal_places=3,
         default=STOCK_ZERO,
@@ -19,55 +64,124 @@ class StoreStock(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["item_id"]
+        ordering = ["warehouse__name", "item__item_name", "id"]
         constraints = [
             models.CheckConstraint(
-                condition=models.Q(quantity__gte=STOCK_ZERO),
-                name="store_stock_quantity_gte_zero",
+                condition=models.Q(available_qty__gte=STOCK_ZERO),
+                name="store_stock_available_qty_gte_zero",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(reserved_qty__gte=STOCK_ZERO),
+                name="store_stock_reserved_qty_gte_zero",
+            ),
+            models.UniqueConstraint(
+                fields=["item", "warehouse"],
+                name="store_stock_item_warehouse_unique",
             ),
         ]
+        indexes = [
+            models.Index(fields=["warehouse", "item"], name="store_stock_wh_item_idx"),
+            models.Index(fields=["item", "warehouse"], name="store_stock_item_wh_idx"),
+        ]
+
+    @property
+    def net_available_qty(self):
+        net_available = self.available_qty - self.reserved_qty
+        return net_available if net_available > STOCK_ZERO else STOCK_ZERO
 
     def __str__(self):
-        return f"{self.item.item_code} STORE {self.quantity}"
+        return f"{self.item.item_code} {self.warehouse.code} {self.available_qty}"
 
 
 class StoreTransaction(models.Model):
     class TransactionType(models.TextChoices):
-        GRN_IN = "GRN_IN", "GRN In"
-        TRANSFER_OUT = "TRANSFER_OUT", "Transfer Out"
-        ADJUSTMENT = "ADJUSTMENT", "Adjustment"
+        GRN_INWARD = "GRN_INWARD", "GRN Inward"
+        OPENING_STOCK = "OPENING_STOCK", "Opening Stock"
+        MANUAL_INWARD = "MANUAL_INWARD", "Manual Inward"
+        MANUAL_OUTWARD = "MANUAL_OUTWARD", "Manual Outward"
+        ADJUSTMENT_IN = "ADJUSTMENT_IN", "Adjustment In"
+        ADJUSTMENT_OUT = "ADJUSTMENT_OUT", "Adjustment Out"
+        SR_ISSUE = "SR_ISSUE", "Store Request Issue"
+        SR_RECEIPT = "SR_RECEIPT", "Store Request Receipt"
 
+    class ReferenceType(models.TextChoices):
+        GRN = "GRN", "GRN"
+        OPENING_STOCK = "OPENING_STOCK", "Opening Stock"
+        MANUAL = "MANUAL", "Manual"
+        ADJUSTMENT = "ADJUSTMENT", "Adjustment"
+        STORE_REQUEST = "STORE_REQUEST", "Store Request"
+
+    transaction_no = models.CharField(max_length=30, unique=True, blank=True, null=True, db_index=True)
+    transaction_date = models.DateField(default=timezone.localdate, db_index=True)
+    transaction_type = models.CharField(max_length=30, choices=TransactionType.choices, db_index=True)
+    reference_type = models.CharField(max_length=30, choices=ReferenceType.choices, db_index=True)
+    reference_id = models.CharField(max_length=100, blank=True, null=True)
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="store_transactions")
-    transaction_type = models.CharField(max_length=30, choices=TransactionType.choices)
-    quantity = models.DecimalField(
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name="stock_transactions")
+    inward_qty = models.DecimalField(
         max_digits=14,
         decimal_places=3,
-        validators=[MinValueValidator(Decimal("0.001"))],
+        default=STOCK_ZERO,
+        validators=[MinValueValidator(Decimal("0.000"))],
     )
-    reference_id = models.CharField(max_length=100)
+    outward_qty = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        default=STOCK_ZERO,
+        validators=[MinValueValidator(Decimal("0.000"))],
+    )
+    balance_qty = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        default=STOCK_ZERO,
+        validators=[MinValueValidator(Decimal("0.000"))],
+    )
+    remarks = models.TextField(blank=True, null=True)
     metadata = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="created_store_transactions",
+        null=True,
+        blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["-created_at", "-id"]
+        ordering = ["-transaction_date", "-created_at", "-id"]
         constraints = [
             models.CheckConstraint(
-                condition=models.Q(quantity__gte=Decimal("0.001")),
-                name="store_tx_quantity_gt_zero",
+                condition=models.Q(inward_qty__gte=STOCK_ZERO),
+                name="store_tx_inward_qty_gte_zero",
             ),
-            models.UniqueConstraint(
-                fields=["transaction_type", "reference_id"],
-                name="store_tx_type_reference_unique",
+            models.CheckConstraint(
+                condition=models.Q(outward_qty__gte=STOCK_ZERO),
+                name="store_tx_outward_qty_gte_zero",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(balance_qty__gte=STOCK_ZERO),
+                name="store_tx_balance_qty_gte_zero",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(inward_qty=STOCK_ZERO) & models.Q(outward_qty__gt=STOCK_ZERO))
+                    | (models.Q(inward_qty__gt=STOCK_ZERO) & models.Q(outward_qty=STOCK_ZERO))
+                ),
+                name="store_tx_single_direction_qty",
             ),
         ]
         indexes = [
-            models.Index(fields=["item", "transaction_type"], name="store_tx_item_type_idx"),
-            models.Index(fields=["reference_id"], name="store_tx_reference_idx"),
-            models.Index(fields=["created_at"], name="store_tx_created_idx"),
+            models.Index(fields=["warehouse", "item", "transaction_date"], name="store_tx_wh_item_date_idx"),
+            models.Index(fields=["transaction_type", "reference_id"], name="store_tx_type_ref_idx"),
+            models.Index(fields=["reference_type", "reference_id"], name="store_tx_ref_type_ref_idx"),
         ]
 
+    @property
+    def movement_qty(self):
+        return self.inward_qty if self.inward_qty > STOCK_ZERO else self.outward_qty
+
     def __str__(self):
-        return f"{self.item.item_code} {self.transaction_type} {self.quantity}"
+        return f"{self.transaction_no or 'PENDING'} {self.item.item_code} {self.transaction_type}"
 
 
 class StockRequest(models.Model):
@@ -75,41 +189,114 @@ class StockRequest(models.Model):
         PENDING = "PENDING", "Pending"
         APPROVED = "APPROVED", "Approved"
         REJECTED = "REJECTED", "Rejected"
+        PARTIALLY_APPROVED = "PARTIALLY_APPROVED", "Partially Approved"
+        CANCELLED = "CANCELLED", "Cancelled"
 
-    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="store_stock_requests")
-    quantity = models.DecimalField(
-        max_digits=14,
-        decimal_places=3,
-        validators=[MinValueValidator(Decimal("0.001"))],
+    request_no = models.CharField(max_length=30, unique=True, blank=True, null=True, db_index=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True)
+    requesting_warehouse = models.ForeignKey(
+        Warehouse,
+        on_delete=models.PROTECT,
+        related_name="requested_store_requests",
+        null=True,
+        blank=True,
     )
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    issuing_warehouse = models.ForeignKey(
+        Warehouse,
+        on_delete=models.PROTECT,
+        related_name="issued_store_requests",
+        null=True,
+        blank=True,
+    )
+    remarks = models.TextField(blank=True, null=True)
+    approval_remarks = models.TextField(blank=True, null=True)
     requested_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
         related_name="requested_store_stock_requests",
     )
-    approved_by = models.ForeignKey(
+    action_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
-        related_name="approved_store_stock_requests",
+        related_name="actioned_store_stock_requests",
+        null=True,
+        blank=True,
+    )
+    cancelled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="cancelled_store_stock_requests",
         null=True,
         blank=True,
     )
     requested_at = models.DateTimeField(auto_now_add=True)
-    approved_at = models.DateTimeField(null=True, blank=True)
+    action_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-requested_at", "-id"]
-        constraints = [
-            models.CheckConstraint(
-                condition=models.Q(quantity__gte=Decimal("0.001")),
-                name="store_request_quantity_gt_zero",
-            ),
-        ]
         indexes = [
-            models.Index(fields=["item", "status"], name="store_request_item_status_idx"),
-            models.Index(fields=["requested_at"], name="store_request_created_idx"),
+            models.Index(fields=["status", "requested_at"], name="store_request_status_date_idx"),
+            models.Index(fields=["request_no"], name="store_request_no_idx"),
         ]
 
     def __str__(self):
-        return f"{self.item.item_code} request {self.quantity} [{self.status}]"
+        return self.request_no or f"SR-{self.pk or 'NEW'}"
+
+
+class StockRequestItem(UUIDAuditMixin):
+    stock_request = models.ForeignKey(StockRequest, on_delete=models.CASCADE, related_name="items")
+    item = models.ForeignKey(Item, on_delete=models.PROTECT, related_name="store_request_items")
+    requested_qty = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        validators=[MinValueValidator(Decimal("0.001"))],
+    )
+    approved_qty = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        default=STOCK_ZERO,
+        validators=[MinValueValidator(Decimal("0.000"))],
+    )
+    issued_qty = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        default=STOCK_ZERO,
+        validators=[MinValueValidator(Decimal("0.000"))],
+    )
+    remarks = models.TextField(blank=True, null=True)
+
+    class Meta(UUIDAuditMixin.Meta):
+        ordering = ["id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(requested_qty__gt=STOCK_ZERO),
+                name="stock_request_item_requested_qty_gt_zero",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(approved_qty__gte=STOCK_ZERO),
+                name="stock_request_item_approved_qty_gte_zero",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(issued_qty__gte=STOCK_ZERO),
+                name="stock_request_item_issued_qty_gte_zero",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(approved_qty__lte=models.F("requested_qty")),
+                name="stock_request_item_approved_lte_requested",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(issued_qty__lte=models.F("approved_qty")),
+                name="stock_request_item_issued_lte_approved",
+            ),
+            models.UniqueConstraint(
+                fields=["stock_request", "item"],
+                name="stock_request_item_unique_item_per_request",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["stock_request", "item"], name="sr_item_req_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.stock_request.request_no or self.stock_request_id} - {self.item.item_code}"

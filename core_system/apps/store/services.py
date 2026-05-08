@@ -7,44 +7,52 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from apps.items.models import Item, ItemStockTransaction, STOCK_ZERO
+from apps.items.models import Item, STOCK_ZERO
 from common.grn_client import GRNServiceClient
+from common.rbac import ADMIN_ROLE_TOKENS, user_has_role
 
-from .models import StockRequest, StoreStock, StoreTransaction
+from .models import StockRequest, StockRequestItem, StoreStock, StoreTransaction, Warehouse
 
 
 STOCK_QUANTIZER = Decimal("0.001")
-DEFAULT_STOCK_CONTACT = "Inventory Control"
-DEFAULT_STOCK_BIN = "GEN"
-STORE_WAREHOUSE = "STORE"
-GRN_CONTACT = "GRN Service"
-GRN_BIN = "GRN"
-TRANSFER_CONTACT = "Store Stock Transfer"
-TRANSFER_BIN = "DEPT"
+STORE_WAREHOUSE_CODE = "STORE"
+BLENDING_WAREHOUSE_CODE = "BLENDING"
 AUTO_CREATED_ITEM_CATEGORY = "GRN Imported"
 AUTO_CREATED_ITEM_GROUP = "Inbound GRN"
 AUTO_CREATED_ITEM_SUB_GROUP = "Auto Created"
+
+INWARD_TRANSACTION_TYPES = {
+    StoreTransaction.TransactionType.GRN_INWARD,
+    StoreTransaction.TransactionType.OPENING_STOCK,
+    StoreTransaction.TransactionType.MANUAL_INWARD,
+    StoreTransaction.TransactionType.ADJUSTMENT_IN,
+    StoreTransaction.TransactionType.SR_RECEIPT,
+}
+OUTWARD_TRANSACTION_TYPES = {
+    StoreTransaction.TransactionType.MANUAL_OUTWARD,
+    StoreTransaction.TransactionType.ADJUSTMENT_OUT,
+    StoreTransaction.TransactionType.SR_ISSUE,
+}
 
 
 def quantize_stock(value: Decimal | int | float | str) -> Decimal:
     try:
         decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError) as exc:
-        raise ValidationError({"quantity": "Stock quantity must be a valid decimal value."}) from exc
-
+        raise ValidationError({"quantity": "Quantity must be a valid decimal value."}) from exc
     return decimal_value.quantize(STOCK_QUANTIZER)
-
-
-def normalize_unit(value: Any) -> str:
-    return str(value or "").strip().upper().replace(" ", "")
 
 
 def normalize_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def normalize_unit(value: Any) -> str:
+    return normalize_text(value).upper().replace(" ", "")
+
+
 def ensure_item_unit(item: Item) -> None:
-    if not str(item.unit or "").strip():
+    if not normalize_text(item.unit):
         raise ValidationError({"item_id": "Item unit is required for inventory transactions."})
 
 
@@ -53,110 +61,531 @@ def require_persisted_user(user, *, field_name: str) -> None:
         raise ValidationError({field_name: "A persisted authenticated user is required for this action."})
 
 
-def get_store_stock(
-    item_id: int,
+def get_or_create_system_warehouse(
     *,
-    item: Item | None = None,
-    lock_for_update: bool = False,
-) -> StoreStock:
-    if item is None:
-        item_queryset = Item.objects.select_for_update() if lock_for_update else Item.objects
-        item = item_queryset.get(pk=item_id)
-
-    stock_queryset = StoreStock.objects.select_related("item")
-    if lock_for_update:
-        stock_queryset = stock_queryset.select_for_update()
-
-    store_stock = stock_queryset.filter(item=item).first()
-    if store_stock is not None:
-        return store_stock
-
-    try:
-        store_stock = StoreStock.objects.create(
-            item=item,
-            quantity=quantize_stock(item.current_stock),
-        )
-    except IntegrityError:
-        store_stock = StoreStock.objects.select_related("item").get(item=item)
-
-    if lock_for_update:
-        return StoreStock.objects.select_related("item").select_for_update().get(pk=store_stock.pk)
-
-    return store_stock
+    code: str,
+    name: str,
+    warehouse_type: str,
+) -> Warehouse:
+    warehouse, _created = Warehouse.objects.get_or_create(
+        code=code,
+        defaults={
+            "name": name,
+            "warehouse_type": warehouse_type,
+            "is_active": True,
+            "is_system": True,
+        },
+    )
+    return warehouse
 
 
-def create_item_stock_transaction(
-    *,
-    item: Item,
-    quantity: Decimal,
-    movement_type: str,
-    metadata: dict[str, Any],
-    warehouse: str,
-    balance: Decimal,
-) -> ItemStockTransaction:
-    return ItemStockTransaction.objects.create(
-        item=item,
-        date=metadata.get("date") or timezone.localdate(),
-        ref_id=metadata.get("ref_id"),
-        trans_type=metadata.get("trans_type") or (
-            "stock movement inward" if movement_type == "inward" else "stock movement outward"
-        ),
-        sale_type=metadata.get("sale_type"),
-        doc_id=metadata.get("doc_id"),
-        contact=metadata.get("contact") or DEFAULT_STOCK_CONTACT,
-        warehouse=metadata.get("warehouse") or warehouse,
-        bin=metadata.get("bin") or DEFAULT_STOCK_BIN,
-        inwards=quantity if movement_type == "inward" else STOCK_ZERO,
-        outwards=quantity if movement_type == "outward" else STOCK_ZERO,
-        balance=balance,
+def get_store_warehouse() -> Warehouse:
+    return get_or_create_system_warehouse(
+        code=STORE_WAREHOUSE_CODE,
+        name="Main Store",
+        warehouse_type=Warehouse.WarehouseType.STORE,
     )
 
 
-def record_store_stock_movement(
+def get_blending_warehouse() -> Warehouse:
+    return get_or_create_system_warehouse(
+        code=BLENDING_WAREHOUSE_CODE,
+        name="Blending Floor",
+        warehouse_type=Warehouse.WarehouseType.BLENDING,
+    )
+
+
+def assign_request_no(stock_request: StockRequest) -> StockRequest:
+    if not stock_request.request_no:
+        stock_request.request_no = f"SR-{stock_request.pk:08d}"
+        stock_request.save(update_fields=["request_no"])
+    return stock_request
+
+
+def assign_transaction_no(stock_transaction: StoreTransaction) -> StoreTransaction:
+    if not stock_transaction.transaction_no:
+        stock_transaction.transaction_no = f"STX-{stock_transaction.pk:08d}"
+        stock_transaction.save(update_fields=["transaction_no"])
+    return stock_transaction
+
+
+def get_current_stock(
     *,
-    item_id: int,
-    movement_type: str,
+    item: Item,
+    warehouse: Warehouse,
+    lock_for_update: bool = False,
+) -> StoreStock:
+    queryset = StoreStock.objects.select_related("item", "warehouse")
+    if lock_for_update:
+        queryset = queryset.select_for_update()
+
+    stock_row = queryset.filter(item=item, warehouse=warehouse).first()
+    if stock_row is not None:
+        return stock_row
+
+    try:
+        stock_row = StoreStock.objects.create(
+            item=item,
+            warehouse=warehouse,
+            available_qty=STOCK_ZERO,
+            reserved_qty=STOCK_ZERO,
+        )
+    except IntegrityError:
+        stock_row = StoreStock.objects.select_related("item", "warehouse").get(item=item, warehouse=warehouse)
+
+    if lock_for_update:
+        return StoreStock.objects.select_related("item", "warehouse").select_for_update().get(pk=stock_row.pk)
+    return stock_row
+
+
+def calculate_available_qty(*, item: Item, warehouse: Warehouse) -> Decimal:
+    stock_row = get_current_stock(item=item, warehouse=warehouse, lock_for_update=False)
+    return quantize_stock(stock_row.available_qty)
+
+
+def _validate_transaction_type(transaction_type: str, *, movement_type: str) -> None:
+    if movement_type == "inward" and transaction_type not in INWARD_TRANSACTION_TYPES:
+        raise ValidationError({"transaction_type": "Invalid inward transaction type."})
+    if movement_type == "outward" and transaction_type not in OUTWARD_TRANSACTION_TYPES:
+        raise ValidationError({"transaction_type": "Invalid outward transaction type."})
+
+
+def _apply_stock_movement(
+    *,
+    item: Item,
+    warehouse: Warehouse,
     quantity: Decimal | int | float | str,
-    metadata: dict[str, Any],
-    locked_item: Item | None = None,
-    locked_store_stock: StoreStock | None = None,
-) -> tuple[Item, StoreStock, ItemStockTransaction]:
+    movement_type: str,
+    transaction_type: str,
+    reference_type: str,
+    reference_id: str | None = None,
+    remarks: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    created_by=None,
+    transaction_date=None,
+    locked_stock: StoreStock | None = None,
+) -> tuple[StoreStock, StoreTransaction]:
     quantity = quantize_stock(quantity)
     if quantity <= STOCK_ZERO:
-        raise ValidationError({"quantity": "Stock quantity must be greater than zero."})
+        raise ValidationError({"quantity": "Quantity must be greater than zero."})
 
+    _validate_transaction_type(transaction_type, movement_type=movement_type)
+    ensure_item_unit(item)
+
+    current_stock = locked_stock or get_current_stock(item=item, warehouse=warehouse, lock_for_update=True)
+    available_qty = quantize_stock(current_stock.available_qty)
+
+    if movement_type == "inward":
+        inward_qty = quantity
+        outward_qty = STOCK_ZERO
+        balance_qty = available_qty + quantity
+    elif movement_type == "outward":
+        inward_qty = STOCK_ZERO
+        outward_qty = quantity
+        balance_qty = available_qty - quantity
+        if balance_qty < STOCK_ZERO:
+            raise ValidationError(
+                {
+                    "quantity": (
+                        f"Insufficient stock in {warehouse.code}. "
+                        f"Available quantity is {available_qty} and requested quantity is {quantity}."
+                    )
+                }
+            )
+    else:
+        raise ValidationError({"movement_type": "Invalid stock movement type."})
+
+    current_stock.available_qty = balance_qty
+    current_stock.save(update_fields=["available_qty", "updated_at"])
+
+    stock_transaction = StoreTransaction.objects.create(
+        transaction_date=transaction_date or timezone.localdate(),
+        transaction_type=transaction_type,
+        reference_type=reference_type,
+        reference_id=reference_id or None,
+        item=item,
+        warehouse=warehouse,
+        inward_qty=inward_qty,
+        outward_qty=outward_qty,
+        balance_qty=balance_qty,
+        remarks=remarks or None,
+        metadata=metadata or {},
+        created_by=created_by if getattr(created_by, "pk", None) else None,
+    )
+    assign_transaction_no(stock_transaction)
+    return current_stock, stock_transaction
+
+
+def apply_inward_stock(
+    *,
+    item: Item,
+    warehouse: Warehouse,
+    quantity,
+    transaction_type: str,
+    reference_type: str,
+    reference_id: str | None = None,
+    remarks: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    created_by=None,
+    transaction_date=None,
+) -> tuple[StoreStock, StoreTransaction]:
     with transaction.atomic():
-        item = locked_item or Item.objects.select_for_update().get(pk=item_id)
-        ensure_item_unit(item)
-        store_stock = locked_store_stock or get_store_stock(item.id, item=item, lock_for_update=True)
-        current_stock = quantize_stock(store_stock.quantity)
-
-        if movement_type == "inward":
-            balance = current_stock + quantity
-        elif movement_type == "outward":
-            balance = current_stock - quantity
-        else:
-            raise ValueError("Invalid stock movement type.")
-
-        if balance < STOCK_ZERO:
-            raise ValidationError({"quantity": "Insufficient stock in STORE."})
-
-        store_stock.quantity = balance
-        store_stock.save(update_fields=["quantity", "updated_at"])
-
-        item.current_stock = balance
-        item.save(update_fields=["current_stock", "updated_at"])
-
-        stock_transaction = create_item_stock_transaction(
+        return _apply_stock_movement(
             item=item,
+            warehouse=warehouse,
             quantity=quantity,
-            movement_type=movement_type,
+            movement_type="inward",
+            transaction_type=transaction_type,
+            reference_type=reference_type,
+            reference_id=reference_id,
+            remarks=remarks,
             metadata=metadata,
-            warehouse=STORE_WAREHOUSE,
-            balance=balance,
+            created_by=created_by,
+            transaction_date=transaction_date,
         )
 
-    return item, store_stock, stock_transaction
+
+def apply_outward_stock(
+    *,
+    item: Item,
+    warehouse: Warehouse,
+    quantity,
+    transaction_type: str,
+    reference_type: str,
+    reference_id: str | None = None,
+    remarks: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    created_by=None,
+    transaction_date=None,
+) -> tuple[StoreStock, StoreTransaction]:
+    with transaction.atomic():
+        return _apply_stock_movement(
+            item=item,
+            warehouse=warehouse,
+            quantity=quantity,
+            movement_type="outward",
+            transaction_type=transaction_type,
+            reference_type=reference_type,
+            reference_id=reference_id,
+            remarks=remarks,
+            metadata=metadata,
+            created_by=created_by,
+            transaction_date=transaction_date,
+        )
+
+
+def transfer_stock(
+    *,
+    item: Item,
+    quantity,
+    source_warehouse: Warehouse,
+    destination_warehouse: Warehouse,
+    reference_type: str,
+    reference_id: str,
+    remarks: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    created_by=None,
+    transaction_date=None,
+) -> dict[str, Any]:
+    with transaction.atomic():
+        source_stock = get_current_stock(item=item, warehouse=source_warehouse, lock_for_update=True)
+        destination_stock = get_current_stock(item=item, warehouse=destination_warehouse, lock_for_update=True)
+
+        source_stock, issue_transaction = _apply_stock_movement(
+            item=item,
+            warehouse=source_warehouse,
+            quantity=quantity,
+            movement_type="outward",
+            transaction_type=StoreTransaction.TransactionType.SR_ISSUE,
+            reference_type=reference_type,
+            reference_id=reference_id,
+            remarks=remarks,
+            metadata={
+                **(metadata or {}),
+                "destination_warehouse": destination_warehouse.code,
+            },
+            created_by=created_by,
+            transaction_date=transaction_date,
+            locked_stock=source_stock,
+        )
+        destination_stock, receipt_transaction = _apply_stock_movement(
+            item=item,
+            warehouse=destination_warehouse,
+            quantity=quantity,
+            movement_type="inward",
+            transaction_type=StoreTransaction.TransactionType.SR_RECEIPT,
+            reference_type=reference_type,
+            reference_id=reference_id,
+            remarks=remarks,
+            metadata={
+                **(metadata or {}),
+                "source_warehouse": source_warehouse.code,
+            },
+            created_by=created_by,
+            transaction_date=transaction_date,
+            locked_stock=destination_stock,
+        )
+
+    return {
+        "source_stock": source_stock,
+        "destination_stock": destination_stock,
+        "issue_transaction": issue_transaction,
+        "receipt_transaction": receipt_transaction,
+    }
+
+
+def build_request_line_reference(stock_request: StockRequest, request_item: StockRequestItem) -> str:
+    return f"{stock_request.request_no}:{request_item.id}"
+
+
+def calculate_request_availability(stock_request: StockRequest) -> dict[int, Decimal]:
+    issuing_warehouse = stock_request.issuing_warehouse or get_store_warehouse()
+    item_ids = [request_item.item_id for request_item in stock_request.items.all()]
+    availability: dict[int, Decimal] = {}
+    for stock_row in StoreStock.objects.filter(warehouse=issuing_warehouse, item_id__in=item_ids).values(
+        "item_id",
+        "available_qty",
+    ):
+        availability[stock_row["item_id"]] = stock_row["available_qty"] or STOCK_ZERO
+    return availability
+
+
+def create_store_request(*, requested_by, items: list[dict[str, Any]], remarks: str | None = None) -> StockRequest:
+    require_persisted_user(requested_by, field_name="requested_by")
+    requesting_warehouse = get_blending_warehouse()
+    issuing_warehouse = get_store_warehouse()
+
+    if not items:
+        raise ValidationError({"items": "At least one store request item is required."})
+
+    with transaction.atomic():
+        stock_request = StockRequest.objects.create(
+            requesting_warehouse=requesting_warehouse,
+            issuing_warehouse=issuing_warehouse,
+            remarks=normalize_text(remarks) or None,
+            requested_by=requested_by,
+        )
+        assign_request_no(stock_request)
+
+        request_items = []
+        for row in items:
+            item = row["item"]
+            quantity = quantize_stock(row["quantity"])
+            if quantity <= STOCK_ZERO:
+                raise ValidationError({"quantity": "Quantity must be greater than zero."})
+            ensure_item_unit(item)
+            request_items.append(
+                StockRequestItem(
+                    stock_request=stock_request,
+                    item=item,
+                    requested_qty=quantity,
+                    remarks=normalize_text(row.get("remarks")) or None,
+                )
+            )
+        StockRequestItem.objects.bulk_create(request_items)
+
+    return (
+        StockRequest.objects.select_related(
+            "requesting_warehouse",
+            "issuing_warehouse",
+            "requested_by",
+            "action_by",
+            "cancelled_by",
+        )
+        .prefetch_related("items__item")
+        .get(pk=stock_request.pk)
+    )
+
+
+def request_stock(*, item: Item, quantity: Decimal | int | float | str, user) -> StockRequest:
+    return create_store_request(requested_by=user, items=[{"item": item, "quantity": quantity}], remarks=None)
+
+
+def cancel_store_request(request_id: int, cancelled_by, remarks: str | None = None) -> StockRequest:
+    require_persisted_user(cancelled_by, field_name="cancelled_by")
+
+    with transaction.atomic():
+        stock_request = (
+            StockRequest.objects.select_related("requested_by")
+            .prefetch_related("items__item")
+            .select_for_update()
+            .get(pk=request_id)
+        )
+        if stock_request.status != StockRequest.Status.PENDING:
+            raise ValidationError({"status": "Only pending store requests can be cancelled."})
+
+        if stock_request.requested_by_id != getattr(cancelled_by, "id", None) and not user_has_role(
+            cancelled_by,
+            ADMIN_ROLE_TOKENS,
+        ):
+            raise ValidationError({"detail": "You can cancel only your own pending store requests."})
+
+        stock_request.status = StockRequest.Status.CANCELLED
+        stock_request.cancelled_by = cancelled_by
+        stock_request.cancelled_at = timezone.now()
+        if remarks:
+            stock_request.approval_remarks = normalize_text(remarks)
+        stock_request.save(
+            update_fields=[
+                "status",
+                "cancelled_by",
+                "cancelled_at",
+                "approval_remarks",
+            ]
+        )
+
+    return stock_request
+
+
+def approve_stock_request(request_id: int, approver, approval_remarks: str | None = None) -> dict[str, Any]:
+    require_persisted_user(approver, field_name="action_by")
+
+    with transaction.atomic():
+        stock_request = (
+            StockRequest.objects.select_related("requesting_warehouse", "issuing_warehouse", "requested_by")
+            .prefetch_related("items__item")
+            .select_for_update()
+            .get(pk=request_id)
+        )
+        if stock_request.status != StockRequest.Status.PENDING:
+            raise ValidationError({"status": "Only pending store requests can be approved."})
+
+        issuing_warehouse = stock_request.issuing_warehouse or get_store_warehouse()
+        requesting_warehouse = stock_request.requesting_warehouse or get_blending_warehouse()
+
+        shortages = []
+        locked_source_stocks: dict[int, StoreStock] = {}
+        for request_item in stock_request.items.all():
+            source_stock = get_current_stock(
+                item=request_item.item,
+                warehouse=issuing_warehouse,
+                lock_for_update=True,
+            )
+            locked_source_stocks[request_item.item_id] = source_stock
+            available_qty = quantize_stock(source_stock.available_qty)
+            if available_qty < request_item.requested_qty:
+                shortages.append(
+                    {
+                        "item_id": request_item.item_id,
+                        "item_code": request_item.item.item_code,
+                        "item_name": request_item.item.item_name,
+                        "requested_qty": request_item.requested_qty,
+                        "available_qty": available_qty,
+                        "shortage_qty": request_item.requested_qty - available_qty,
+                    }
+                )
+
+        if shortages:
+            raise ValidationError(
+                {
+                    "items": shortages,
+                    "detail": "Insufficient stock is available for one or more request items.",
+                }
+            )
+
+        issue_transactions: list[StoreTransaction] = []
+        receipt_transactions: list[StoreTransaction] = []
+        source_stocks: list[StoreStock] = []
+        destination_stocks: list[StoreStock] = []
+
+        for request_item in stock_request.items.all():
+            destination_stock = get_current_stock(
+                item=request_item.item,
+                warehouse=requesting_warehouse,
+                lock_for_update=True,
+            )
+            reference_id = build_request_line_reference(stock_request, request_item)
+
+            source_stock, issue_transaction = _apply_stock_movement(
+                item=request_item.item,
+                warehouse=issuing_warehouse,
+                quantity=request_item.requested_qty,
+                movement_type="outward",
+                transaction_type=StoreTransaction.TransactionType.SR_ISSUE,
+                reference_type=StoreTransaction.ReferenceType.STORE_REQUEST,
+                reference_id=reference_id,
+                remarks=approval_remarks,
+                metadata={
+                    "stock_request_id": stock_request.id,
+                    "stock_request_item_id": request_item.id,
+                    "destination_warehouse": requesting_warehouse.code,
+                },
+                created_by=approver,
+                transaction_date=timezone.localdate(),
+                locked_stock=locked_source_stocks[request_item.item_id],
+            )
+            destination_stock, receipt_transaction = _apply_stock_movement(
+                item=request_item.item,
+                warehouse=requesting_warehouse,
+                quantity=request_item.requested_qty,
+                movement_type="inward",
+                transaction_type=StoreTransaction.TransactionType.SR_RECEIPT,
+                reference_type=StoreTransaction.ReferenceType.STORE_REQUEST,
+                reference_id=reference_id,
+                remarks=approval_remarks,
+                metadata={
+                    "stock_request_id": stock_request.id,
+                    "stock_request_item_id": request_item.id,
+                    "source_warehouse": issuing_warehouse.code,
+                },
+                created_by=approver,
+                transaction_date=timezone.localdate(),
+                locked_stock=destination_stock,
+            )
+
+            request_item.approved_qty = request_item.requested_qty
+            request_item.issued_qty = request_item.requested_qty
+            request_item.save(update_fields=["approved_qty", "issued_qty", "updated_at"])
+
+            source_stocks.append(source_stock)
+            destination_stocks.append(destination_stock)
+            issue_transactions.append(issue_transaction)
+            receipt_transactions.append(receipt_transaction)
+
+        stock_request.status = StockRequest.Status.APPROVED
+        stock_request.approval_remarks = normalize_text(approval_remarks) or None
+        stock_request.action_by = approver
+        stock_request.action_at = timezone.now()
+        stock_request.save(update_fields=["status", "approval_remarks", "action_by", "action_at"])
+
+    return {
+        "stock_request": (
+            StockRequest.objects.select_related(
+                "requesting_warehouse",
+                "issuing_warehouse",
+                "requested_by",
+                "action_by",
+                "cancelled_by",
+            )
+            .prefetch_related("items__item")
+            .get(pk=stock_request.pk)
+        ),
+        "source_stocks": source_stocks,
+        "destination_stocks": destination_stocks,
+        "issue_transactions": issue_transactions,
+        "receipt_transactions": receipt_transactions,
+    }
+
+
+def reject_stock_request(request_id: int, approver, approval_remarks: str) -> StockRequest:
+    require_persisted_user(approver, field_name="action_by")
+
+    with transaction.atomic():
+        stock_request = (
+            StockRequest.objects.prefetch_related("items__item")
+            .select_for_update()
+            .get(pk=request_id)
+        )
+        if stock_request.status != StockRequest.Status.PENDING:
+            raise ValidationError({"status": "Only pending store requests can be rejected."})
+
+        stock_request.status = StockRequest.Status.REJECTED
+        stock_request.approval_remarks = normalize_text(approval_remarks) or None
+        stock_request.action_by = approver
+        stock_request.action_at = timezone.now()
+        stock_request.save(update_fields=["status", "approval_remarks", "action_by", "action_at"])
+
+    return stock_request
 
 
 def resolve_grn_identifier(grn_payload: dict[str, Any]) -> str:
@@ -195,14 +624,18 @@ def resolve_item_for_grn_line(grn_payload: dict[str, Any], line_payload: dict[st
         if item_by_external_id is None:
             item_by_external_id = Item.objects.filter(item_code__iexact=external_item_id_text).first()
 
-    name_matches = list(Item.objects.filter(item_name__iexact=product_description).order_by("id")[:2]) if product_description else []
+    name_matches = (
+        list(Item.objects.filter(item_name__iexact=product_description).order_by("id")[:2])
+        if product_description
+        else []
+    )
     item_by_name = name_matches[0] if len(name_matches) == 1 else None
 
     if len(name_matches) > 1 and item_by_external_id is None:
         raise ValidationError(
             {
                 "product_description": (
-                    "Multiple items with this product name already exist in the store app. "
+                    "Multiple items with this product name already exist. "
                     "Use a unique sender item_id to identify the correct product."
                 )
             }
@@ -211,8 +644,8 @@ def resolve_item_for_grn_line(grn_payload: dict[str, Any], line_payload: dict[st
     if item_by_external_id is not None and item_by_name is not None and item_by_external_id.pk != item_by_name.pk:
         raise ValidationError(
             {
-                "item_id": "Sender item ID matches a different store item than the product name provided.",
-                "product_description": "Product name matches a different store item than the sender item ID provided.",
+                "item_id": "Sender item ID matches a different item than the product name provided.",
+                "product_description": "Product name matches a different item than the sender item ID provided.",
             }
         )
 
@@ -224,9 +657,9 @@ def resolve_item_for_grn_line(grn_payload: dict[str, Any], line_payload: dict[st
         return item
 
     if not product_description:
-        raise ValidationError({"product_description": "Product description is required to create a new store item."})
+        raise ValidationError({"product_description": "Product description is required to create a new item."})
     if not unit:
-        raise ValidationError({"unit": "Unit is required to create a new store item."})
+        raise ValidationError({"unit": "Unit is required to create a new item."})
 
     return Item.objects.create(
         product_type=Item.PRODUCT_TYPE_GENERAL,
@@ -246,7 +679,7 @@ def build_grn_reference_id(grn_identifier: str, line_number: int) -> str:
     return f"{grn_identifier}:{line_number}"
 
 
-def add_stock_from_grn(grn_payload: dict[str, Any]) -> dict[str, Any]:
+def add_stock_from_grn(grn_payload: dict[str, Any], *, created_by=None) -> dict[str, Any]:
     grn_identifier = resolve_grn_identifier(grn_payload)
     if not grn_identifier:
         raise ValidationError({"reference_id": "GRN payload must include a stable grn_no, id, or unique_id."})
@@ -258,6 +691,7 @@ def add_stock_from_grn(grn_payload: dict[str, Any]) -> dict[str, Any]:
         or grn_payload.get("trade_name")
         or "GRN Supplier"
     )
+    store_warehouse = get_store_warehouse()
 
     processed_references: list[str] = []
     skipped_references: list[str] = []
@@ -266,16 +700,18 @@ def add_stock_from_grn(grn_payload: dict[str, Any]) -> dict[str, Any]:
     with transaction.atomic():
         for line_number, line_payload in enumerate(extract_grn_lines(grn_payload), start=1):
             reference_id = build_grn_reference_id(grn_identifier, line_number)
+            item = resolve_item_for_grn_line(grn_payload, line_payload)
+            ensure_item_unit(item)
 
             if StoreTransaction.objects.filter(
-                transaction_type=StoreTransaction.TransactionType.GRN_IN,
+                item=item,
+                warehouse=store_warehouse,
+                transaction_type=StoreTransaction.TransactionType.GRN_INWARD,
+                reference_type=StoreTransaction.ReferenceType.GRN,
                 reference_id=reference_id,
             ).exists():
                 skipped_references.append(reference_id)
                 continue
-
-            item = resolve_item_for_grn_line(grn_payload, line_payload)
-            ensure_item_unit(item)
 
             source_unit = line_payload.get("unit") or grn_payload.get("unit")
             if source_unit and normalize_unit(source_unit) != normalize_unit(item.unit):
@@ -301,40 +737,27 @@ def add_stock_from_grn(grn_payload: dict[str, Any]) -> dict[str, Any]:
                 skipped_references.append(reference_id)
                 continue
 
-            metadata = {
-                "date": grn_date,
-                "ref_id": reference_id,
-                "trans_type": "GRN inward",
-                "contact": GRN_CONTACT,
-                "warehouse": STORE_WAREHOUSE,
-                "bin": GRN_BIN,
-                "grn_no": document_details.get("grn_no") or grn_payload.get("grn_no"),
-                "grn_identifier": grn_identifier,
-                "supplier": supplier_name,
-                "line_number": line_number,
-            }
-
-            record_store_stock_movement(
-                item_id=item.id,
-                movement_type="inward",
-                quantity=quantity,
-                metadata=metadata,
-            )
-
-            store_transaction = StoreTransaction.objects.create(
+            _stock_row, stock_transaction = _apply_stock_movement(
                 item=item,
-                transaction_type=StoreTransaction.TransactionType.GRN_IN,
+                warehouse=store_warehouse,
                 quantity=quantity,
+                movement_type="inward",
+                transaction_type=StoreTransaction.TransactionType.GRN_INWARD,
+                reference_type=StoreTransaction.ReferenceType.GRN,
                 reference_id=reference_id,
+                remarks=f"GRN inward from {supplier_name}",
                 metadata={
-                    "grn_no": metadata["grn_no"],
+                    "grn_no": document_details.get("grn_no") or grn_payload.get("grn_no"),
                     "grn_identifier": grn_identifier,
                     "supplier": supplier_name,
                     "line_number": line_number,
                     "raw_line": line_payload,
                 },
+                created_by=created_by,
+                transaction_date=grn_date,
+                locked_stock=get_current_stock(item=item, warehouse=store_warehouse, lock_for_update=True),
             )
-            store_transactions.append(store_transaction)
+            store_transactions.append(stock_transaction)
             processed_references.append(reference_id)
 
     return {
@@ -345,7 +768,7 @@ def add_stock_from_grn(grn_payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def sync_grn_stock(*, grn_no: str | None = None) -> list[dict[str, Any]]:
+def sync_grn_stock(*, grn_no: str | None = None, created_by=None) -> list[dict[str, Any]]:
     client = GRNServiceClient()
     response = client.fetch_grn(grn_no=grn_no)
     payloads = response.get("data") if isinstance(response, dict) else response
@@ -357,111 +780,4 @@ def sync_grn_stock(*, grn_no: str | None = None) -> list[dict[str, Any]]:
     else:
         payload_list = []
 
-    return [add_stock_from_grn(payload) for payload in payload_list if isinstance(payload, dict)]
-
-
-def request_stock(*, item: Item, quantity: Decimal | int | float | str, user) -> StockRequest:
-    require_persisted_user(user, field_name="requested_by")
-    ensure_item_unit(item)
-    quantity = quantize_stock(quantity)
-    if quantity <= STOCK_ZERO:
-        raise ValidationError({"quantity": "Stock quantity must be greater than zero."})
-
-    return StockRequest.objects.create(
-        item=item,
-        quantity=quantity,
-        requested_by=user,
-    )
-
-
-def approve_stock_request(request_id: int, approver) -> dict[str, Any]:
-    from apps.blending.services import add_blending_stock
-
-    require_persisted_user(approver, field_name="approved_by")
-
-    with transaction.atomic():
-        stock_request = (
-            StockRequest.objects.select_related("item", "requested_by", "approved_by")
-            .select_for_update()
-            .get(pk=request_id)
-        )
-        if stock_request.status != StockRequest.Status.PENDING:
-            raise ValidationError({"status": "Only pending stock requests can be approved."})
-
-        item = Item.objects.select_for_update().get(pk=stock_request.item_id)
-        store_stock = get_store_stock(item.id, item=item, lock_for_update=True)
-        if store_stock.quantity < stock_request.quantity:
-            raise ValidationError({"quantity": "Insufficient stock in STORE."})
-
-        reference_id = f"REQ-{stock_request.id}"
-        store_metadata = {
-            "date": timezone.localdate(),
-            "ref_id": reference_id,
-            "trans_type": "Transfer to blending",
-            "contact": TRANSFER_CONTACT,
-            "warehouse": STORE_WAREHOUSE,
-            "bin": TRANSFER_BIN,
-        }
-        blending_metadata = {
-            "date": timezone.localdate(),
-            "ref_id": reference_id,
-            "trans_type": "Transfer from store",
-            "contact": TRANSFER_CONTACT,
-            "warehouse": "BLENDING",
-            "bin": TRANSFER_BIN,
-        }
-
-        item, store_stock, store_item_transaction = record_store_stock_movement(
-            item_id=item.id,
-            movement_type="outward",
-            quantity=stock_request.quantity,
-            metadata=store_metadata,
-            locked_item=item,
-            locked_store_stock=store_stock,
-        )
-        blending_stock, blending_item_transaction = add_blending_stock(
-            item=item,
-            quantity=stock_request.quantity,
-            metadata=blending_metadata,
-            reference_id=reference_id,
-            locked_item=item,
-        )
-
-        stock_request.status = StockRequest.Status.APPROVED
-        stock_request.approved_by = approver
-        stock_request.approved_at = timezone.now()
-        stock_request.save(update_fields=["status", "approved_by", "approved_at"])
-
-        store_transaction = StoreTransaction.objects.create(
-            item=item,
-            transaction_type=StoreTransaction.TransactionType.TRANSFER_OUT,
-            quantity=stock_request.quantity,
-            reference_id=reference_id,
-            metadata={
-                "stock_request_id": stock_request.id,
-                "requested_by": stock_request.requested_by_id,
-                "approved_by": getattr(approver, "id", None),
-            },
-        )
-
-    return {
-        "stock_request": stock_request,
-        "store_stock": store_stock,
-        "blending_stock": blending_stock,
-        "store_transaction": store_transaction,
-        "item_transactions": [store_item_transaction, blending_item_transaction],
-    }
-
-
-def reject_stock_request(request_id: int) -> StockRequest:
-    with transaction.atomic():
-        stock_request = StockRequest.objects.select_for_update().get(pk=request_id)
-        if stock_request.status != StockRequest.Status.PENDING:
-            raise ValidationError({"status": "Only pending stock requests can be rejected."})
-
-        stock_request.status = StockRequest.Status.REJECTED
-        stock_request.approved_by = None
-        stock_request.approved_at = None
-        stock_request.save(update_fields=["status", "approved_by", "approved_at"])
-
-    return stock_request
+    return [add_stock_from_grn(payload, created_by=created_by) for payload in payload_list if isinstance(payload, dict)]
