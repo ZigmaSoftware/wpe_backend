@@ -4,6 +4,7 @@ from .views import (
     ApproveStockRequestAPIView,
     RejectStockRequestAPIView,
     StoreStockListAPIView,
+    StoreStockRequestListAPIView,
     StoreStockRequestAPIView,
     StoreTransactionListAPIView,
 )
@@ -12,6 +13,8 @@ from .views import (
 urlpatterns = [
     path("request-stock/", StoreStockRequestAPIView.as_view(), name="store-request-stock"),
     path("request-stock", StoreStockRequestAPIView.as_view(), name="store-request-stock-no-slash"),
+    path("requests/", StoreStockRequestListAPIView.as_view(), name="store-request-list"),
+    path("requests", StoreStockRequestListAPIView.as_view(), name="store-request-list-no-slash"),
     path("approve-request/<int:pk>/", ApproveStockRequestAPIView.as_view(), name="store-approve-request"),
     path("approve-request/<int:pk>", ApproveStockRequestAPIView.as_view(), name="store-approve-request-no-slash"),
     path("reject-request/<int:pk>/", RejectStockRequestAPIView.as_view(), name="store-reject-request"),
@@ -21,4 +24,3 @@ urlpatterns = [
     path("transactions/", StoreTransactionListAPIView.as_view(), name="store-transaction-list"),
     path("transactions", StoreTransactionListAPIView.as_view(), name="store-transaction-list-no-slash"),
 ]
-

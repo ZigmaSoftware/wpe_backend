@@ -23,10 +23,10 @@ class BlendingStockRequestTests(APITestCase):
 
     def test_request_stock_creates_pending_store_request(self):
         item = Item.objects.create(
-            category="Raw Material",
-            group="polymer",
-            sub_group="ldpe",
-            item_name="Virgin LDPE",
+            category="Additive",
+            group="blend",
+            sub_group="processing additive",
+            item_name="Processing Additive A",
             unit="kg",
         )
 
@@ -35,23 +35,30 @@ class BlendingStockRequestTests(APITestCase):
             {
                 "item_id": item.id,
                 "quantity": "50.000",
+                "requested_for_name": "Blending Supervisor",
+                "request_reason": "Required for additive batch run",
             },
             format="json",
         )
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["request"]["status"], StockRequest.Status.PENDING)
+        self.assertEqual(response.data["request"]["request_type"], StockRequest.RequestType.ADDITIVE)
+        self.assertEqual(response.data["request"]["department"], "BLENDING")
 
         stock_request = StockRequest.objects.get(item=item)
         self.assertEqual(stock_request.quantity, Decimal("50.000"))
         self.assertEqual(stock_request.requested_by, self.user)
+        self.assertEqual(stock_request.request_type, StockRequest.RequestType.ADDITIVE)
+        self.assertEqual(stock_request.requested_for_name, "Blending Supervisor")
+        self.assertEqual(stock_request.request_reason, "Required for additive batch run")
 
     def test_blending_stock_list_returns_items_with_positive_balance(self):
         item = Item.objects.create(
-            category="Raw Material",
-            group="polymer",
-            sub_group="mix",
-            item_name="Mixer Resin",
+            category="Additive",
+            group="blend",
+            sub_group="mix additive",
+            item_name="Mixer Additive",
             unit="kg",
         )
         BlendingStock.objects.create(
@@ -65,3 +72,4 @@ class BlendingStockRequestTests(APITestCase):
         self.assertEqual(len(response.data), 1)
         self.assertEqual(response.data[0]["item"], item.id)
         self.assertEqual(response.data[0]["quantity"], "10.000")
+        self.assertEqual(response.data[0]["department"], "BLENDING")

@@ -22,6 +22,10 @@ class StoreStockRequestAPIView(APIView):
             item=serializer.validated_data["item"],
             quantity=serializer.validated_data["quantity"],
             user=request.user,
+            request_type=serializer.validated_data.get("request_type", StockRequest.RequestType.GENERAL),
+            department=serializer.validated_data.get("department", "BLENDING"),
+            requested_for_name=serializer.validated_data.get("requested_for_name", ""),
+            request_reason=serializer.validated_data.get("request_reason", ""),
         )
         return Response(
             {
@@ -30,6 +34,14 @@ class StoreStockRequestAPIView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+class StoreStockRequestListAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        queryset = StockRequest.objects.select_related("item", "requested_by", "approved_by").order_by("-requested_at", "-id")
+        return Response(StockRequestSerializer(queryset, many=True).data)
 
 
 class ApproveStockRequestAPIView(APIView):

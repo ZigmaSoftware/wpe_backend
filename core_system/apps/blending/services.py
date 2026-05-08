@@ -12,6 +12,19 @@ from .models import BlendingStock
 
 
 BLENDING_WAREHOUSE = "BLENDING"
+BLENDING_DEPARTMENT = "BLENDING"
+
+
+def is_additive_item(item: Item) -> bool:
+    searchable = " ".join(
+        [
+            str(item.category or ""),
+            str(item.group or ""),
+            str(item.sub_group or ""),
+            str(item.item_name or ""),
+        ]
+    ).lower()
+    return "additive" in searchable
 
 
 def get_blending_stock(

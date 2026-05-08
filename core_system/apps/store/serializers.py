@@ -9,6 +9,9 @@ class StoreStockSerializer(serializers.ModelSerializer):
     item_code = serializers.CharField(source="item.item_code", read_only=True)
     item_name = serializers.CharField(source="item.item_name", read_only=True)
     unit = serializers.CharField(source="item.unit", read_only=True)
+    category = serializers.CharField(source="item.category", read_only=True)
+    group = serializers.CharField(source="item.group", read_only=True)
+    sub_group = serializers.CharField(source="item.sub_group", read_only=True)
 
     class Meta:
         model = StoreStock
@@ -17,6 +20,9 @@ class StoreStockSerializer(serializers.ModelSerializer):
             "item",
             "item_code",
             "item_name",
+            "category",
+            "group",
+            "sub_group",
             "unit",
             "quantity",
             "created_at",
@@ -30,6 +36,9 @@ class StockRequestSerializer(serializers.ModelSerializer):
     item_code = serializers.CharField(source="item.item_code", read_only=True)
     item_name = serializers.CharField(source="item.item_name", read_only=True)
     unit = serializers.CharField(source="item.unit", read_only=True)
+    category = serializers.CharField(source="item.category", read_only=True)
+    group = serializers.CharField(source="item.group", read_only=True)
+    sub_group = serializers.CharField(source="item.sub_group", read_only=True)
     requested_by_username = serializers.CharField(source="requested_by.username", read_only=True)
     approved_by_username = serializers.CharField(source="approved_by.username", read_only=True)
 
@@ -41,8 +50,15 @@ class StockRequestSerializer(serializers.ModelSerializer):
             "item_id",
             "item_code",
             "item_name",
+            "category",
+            "group",
+            "sub_group",
             "unit",
             "quantity",
+            "request_type",
+            "department",
+            "requested_for_name",
+            "request_reason",
             "status",
             "requested_by",
             "requested_by_username",
@@ -84,4 +100,3 @@ class StoreTransactionSerializer(serializers.ModelSerializer):
             "metadata",
             "created_at",
         )
-

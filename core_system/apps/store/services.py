@@ -25,6 +25,21 @@ AUTO_CREATED_ITEM_CATEGORY = "GRN Imported"
 AUTO_CREATED_ITEM_GROUP = "Inbound GRN"
 AUTO_CREATED_ITEM_SUB_GROUP = "Auto Created"
 
+REQUEST_TYPE_TO_MOVEMENT = {
+    StockRequest.RequestType.ADDITIVE: {
+        "store_sale_type": "additive_materialout",
+        "blending_sale_type": "additive_materialin",
+        "store_trans_type": "Transfer additive to blending",
+        "blending_trans_type": "Receive additive from store",
+    },
+    StockRequest.RequestType.GENERAL: {
+        "store_sale_type": None,
+        "blending_sale_type": None,
+        "store_trans_type": "Transfer to blending",
+        "blending_trans_type": "Transfer from store",
+    },
+}
+
 
 def quantize_stock(value: Decimal | int | float | str) -> Decimal:
     try:
@@ -360,7 +375,16 @@ def sync_grn_stock(*, grn_no: str | None = None) -> list[dict[str, Any]]:
     return [add_stock_from_grn(payload) for payload in payload_list if isinstance(payload, dict)]
 
 
-def request_stock(*, item: Item, quantity: Decimal | int | float | str, user) -> StockRequest:
+def request_stock(
+    *,
+    item: Item,
+    quantity: Decimal | int | float | str,
+    user,
+    request_type: str = StockRequest.RequestType.GENERAL,
+    department: str = "BLENDING",
+    requested_for_name: str = "",
+    request_reason: str = "",
+) -> StockRequest:
     require_persisted_user(user, field_name="requested_by")
     ensure_item_unit(item)
     quantity = quantize_stock(quantity)
@@ -370,6 +394,10 @@ def request_stock(*, item: Item, quantity: Decimal | int | float | str, user) ->
     return StockRequest.objects.create(
         item=item,
         quantity=quantity,
+        request_type=request_type,
+        department=normalize_text(department) or "BLENDING",
+        requested_for_name=normalize_text(requested_for_name),
+        request_reason=normalize_text(request_reason),
         requested_by=user,
     )
 
@@ -394,10 +422,15 @@ def approve_stock_request(request_id: int, approver) -> dict[str, Any]:
             raise ValidationError({"quantity": "Insufficient stock in STORE."})
 
         reference_id = f"REQ-{stock_request.id}"
+        movement_config = REQUEST_TYPE_TO_MOVEMENT.get(
+            stock_request.request_type,
+            REQUEST_TYPE_TO_MOVEMENT[StockRequest.RequestType.GENERAL],
+        )
         store_metadata = {
             "date": timezone.localdate(),
             "ref_id": reference_id,
-            "trans_type": "Transfer to blending",
+            "trans_type": movement_config["store_trans_type"],
+            "sale_type": movement_config["store_sale_type"],
             "contact": TRANSFER_CONTACT,
             "warehouse": STORE_WAREHOUSE,
             "bin": TRANSFER_BIN,
@@ -405,7 +438,8 @@ def approve_stock_request(request_id: int, approver) -> dict[str, Any]:
         blending_metadata = {
             "date": timezone.localdate(),
             "ref_id": reference_id,
-            "trans_type": "Transfer from store",
+            "trans_type": movement_config["blending_trans_type"],
+            "sale_type": movement_config["blending_sale_type"],
             "contact": TRANSFER_CONTACT,
             "warehouse": "BLENDING",
             "bin": TRANSFER_BIN,
@@ -441,6 +475,10 @@ def approve_stock_request(request_id: int, approver) -> dict[str, Any]:
                 "stock_request_id": stock_request.id,
                 "requested_by": stock_request.requested_by_id,
                 "approved_by": getattr(approver, "id", None),
+                "request_type": stock_request.request_type,
+                "department": stock_request.department,
+                "requested_for_name": stock_request.requested_for_name,
+                "request_reason": stock_request.request_reason,
             },
         )
 

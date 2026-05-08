@@ -24,10 +24,10 @@ class StoreWorkflowTests(APITestCase):
 
     def test_approve_request_transfers_store_stock_to_blending(self):
         item = Item.objects.create(
-            category="Raw Material",
-            group="polymer",
-            sub_group="ldpe",
-            item_name="Virgin LDPE",
+            category="Additive",
+            group="blend",
+            sub_group="processing additive",
+            item_name="Blend Additive A",
             unit="kg",
             opening_stock=Decimal("100.000"),
             current_stock=Decimal("100.000"),
@@ -39,6 +39,10 @@ class StoreWorkflowTests(APITestCase):
             {
                 "item_id": item.id,
                 "quantity": "50.000",
+                "request_type": "ADDITIVE",
+                "department": "BLENDING",
+                "requested_for_name": "Blending Supervisor",
+                "request_reason": "Needed for line additive batch",
             },
             format="json",
         )
@@ -60,6 +64,7 @@ class StoreWorkflowTests(APITestCase):
         self.assertEqual(blending_stock.quantity, Decimal("50.000"))
         self.assertEqual(stock_request.status, StockRequest.Status.APPROVED)
         self.assertEqual(stock_request.approved_by, self.user)
+        self.assertEqual(stock_request.request_type, StockRequest.RequestType.ADDITIVE)
 
         self.assertEqual(
             StoreTransaction.objects.filter(
@@ -72,6 +77,9 @@ class StoreWorkflowTests(APITestCase):
             ItemStockTransaction.objects.filter(item=item, ref_id=f"REQ-{request_id}").count(),
             2,
         )
+        item_transactions = ItemStockTransaction.objects.filter(item=item, ref_id=f"REQ-{request_id}").order_by("id")
+        self.assertEqual(item_transactions[0].sale_type, "additive_materialout")
+        self.assertEqual(item_transactions[1].sale_type, "additive_materialin")
 
     def test_reject_request_leaves_stock_unchanged(self):
         item = Item.objects.create(
@@ -112,6 +120,42 @@ class StoreWorkflowTests(APITestCase):
                 transaction_type=StoreTransaction.TransactionType.TRANSFER_OUT,
             ).exists()
         )
+
+    def test_request_list_returns_additive_metadata(self):
+        item = Item.objects.create(
+            category="Additive",
+            group="blend",
+            sub_group="processing additive",
+            item_name="Heat Stabilizer",
+            unit="kg",
+            opening_stock=Decimal("20.000"),
+            current_stock=Decimal("20.000"),
+        )
+        StoreStock.objects.create(item=item, quantity=Decimal("20.000"))
+
+        create_response = self.client.post(
+            "/api/store/request-stock/",
+            {
+                "item_id": item.id,
+                "quantity": "5.000",
+                "request_type": "ADDITIVE",
+                "department": "BLENDING",
+                "requested_for_name": "Shift Lead",
+                "request_reason": "Batch replenishment",
+            },
+            format="json",
+        )
+
+        self.assertEqual(create_response.status_code, 201)
+
+        list_response = self.client.get("/api/store/requests/")
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(len(list_response.data), 1)
+        self.assertEqual(list_response.data[0]["request_type"], "ADDITIVE")
+        self.assertEqual(list_response.data[0]["department"], "BLENDING")
+        self.assertEqual(list_response.data[0]["requested_for_name"], "Shift Lead")
+        self.assertEqual(list_response.data[0]["request_reason"], "Batch replenishment")
 
     def test_add_stock_from_grn_is_idempotent(self):
         item = Item.objects.create(

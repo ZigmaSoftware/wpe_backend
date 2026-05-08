@@ -71,6 +71,10 @@ class StoreTransaction(models.Model):
 
 
 class StockRequest(models.Model):
+    class RequestType(models.TextChoices):
+        GENERAL = "GENERAL", "General"
+        ADDITIVE = "ADDITIVE", "Additive"
+
     class Status(models.TextChoices):
         PENDING = "PENDING", "Pending"
         APPROVED = "APPROVED", "Approved"
@@ -82,6 +86,14 @@ class StockRequest(models.Model):
         decimal_places=3,
         validators=[MinValueValidator(Decimal("0.001"))],
     )
+    request_type = models.CharField(
+        max_length=20,
+        choices=RequestType.choices,
+        default=RequestType.GENERAL,
+    )
+    department = models.CharField(max_length=100, default="BLENDING")
+    requested_for_name = models.CharField(max_length=255, blank=True)
+    request_reason = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     requested_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
