@@ -64,7 +64,6 @@ INSTALLED_APPS = [
     "apps.login_home.apps.LoginHomeConfig",
     "apps.common_master.apps.CommonMasterConfig",
     "apps.admin_master.apps.AdminMasterConfig",
-    "apps.purchase_master.apps.PurchaseMasterConfig",
     "apps.auth",
     "apps.contacts",
     "apps.items",
