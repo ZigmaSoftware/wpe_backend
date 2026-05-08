@@ -20,7 +20,6 @@ urlpatterns = [
     path("api/contacts/", include("apps.contacts.urls")),
     path("api/users/", include("apps.admin_master.urls")),
     path("api/masters/", include("apps.common_master.urls")),
-    path("api/purchase/", include("apps.purchase_master.urls")),
 ]
 
 if settings.DEBUG:

@@ -1,561 +1,511 @@
-"""Common master APIs for geography, tax, company, and project lookups."""
+"""DRF viewsets for common masters and ERP partner APIs."""
 
-from django.db.models import Q
-from rest_framework import status, viewsets
-from rest_framework.decorators import api_view
+from __future__ import annotations
+
+from django.db.models import Prefetch, ProtectedError, Q
+from rest_framework import filters, status, viewsets
+from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .models import City, CommonMaster, Continent, Country, State, Tax, Company, Project
+from apps.admin_master.pagination import AdminMasterPagination
+
+from .models import (
+    City,
+    CommonMaster,
+    Company,
+    Continent,
+    Country,
+    Currency,
+    Customer,
+    CustomerAddress,
+    CustomerBankDetail,
+    CustomerContactPerson,
+    CustomerDocument,
+    Project,
+    State,
+    Supplier,
+    SupplierAddress,
+    SupplierBankDetail,
+    SupplierContactPerson,
+    SupplierDocument,
+    Tax,
+)
 from .serializers import (
     CitySerializer,
+    CompanySerializer,
     ContinentSerializer,
     CountrySerializer,
+    CurrencySerializer,
+    CustomerDocumentSerializer,
+    CustomerReadSerializer,
+    CustomerWriteSerializer,
+    ProjectSerializer,
     StateSerializer,
+    SupplierDocumentSerializer,
+    SupplierReadSerializer,
+    SupplierWriteSerializer,
     TaxSerializer,
-    CompanySerializer,
-    ProjectSerializer
 )
 
 
-class ContinentViewSet(viewsets.ModelViewSet):
-    queryset = Continent.objects.filter(status=True).order_by("name")
-    serializer_class = ContinentSerializer
+def _coerce_filter_value(value: str):
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    return value
 
 
-class CountryViewSet(viewsets.ModelViewSet):
-    queryset = Country.objects.select_related("continent").all().order_by("id")
-    serializer_class = CountrySerializer
+class QueryParamFilterMixin:
+    filterset_map: dict[str, str] = {}
+
+    def filter_queryset(self, queryset):
+        queryset = super().filter_queryset(queryset)
+        search_value = (
+            self.request.query_params.get("search[value]")
+            if not self.request.query_params.get("search")
+            else None
+        )
+        if search_value:
+            query = Q()
+            for field_name in getattr(self, "search_fields", ()):
+                if field_name.startswith(("^", "=", "@", "$")):
+                    field_name = field_name[1:]
+                query |= Q(**{f"{field_name}__icontains": search_value})
+            queryset = queryset.filter(query)
+
+        for param, lookup in self.filterset_map.items():
+            value = self.request.query_params.get(param)
+            if value in (None, ""):
+                continue
+            queryset = queryset.filter(**{lookup: _coerce_filter_value(value)})
+
+        return queryset
+
+
+class CommonMasterViewSet(QueryParamFilterMixin, viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    pagination_class = AdminMasterPagination
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    resource_name = "Record"
+    status_field = "is_active"
+    response_serializer_class = None
+
+    def get_response_serializer_class(self):
+        return self.response_serializer_class or self.get_serializer_class()
+
+    def serialize_instance(self, instance):
+        serializer_class = self.get_response_serializer_class()
+        serializer = serializer_class(instance, context=self.get_serializer_context())
+        return serializer.data
 
     def list(self, request, *args, **kwargs):
-        search = request.GET.get("search[value]", "")
-        start = int(request.GET.get("start", 0))
-        length = int(request.GET.get("length", 10))
+        base_queryset = self.get_queryset()
+        total_count = base_queryset.count()
+        filtered_queryset = self.filter_queryset(base_queryset)
+        filtered_count = filtered_queryset.count()
 
-        queryset = self.queryset
-        if search:
-            queryset = queryset.filter(
-                Q(name__icontains=search)
-                | Q(code__icontains=search)
-                | Q(continent__name__icontains=search)
-            )
+        page = self.paginate_queryset(filtered_queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+            if getattr(self.paginator, "datatables_mode", False):
+                response.data["recordsTotal"] = total_count
+                response.data["recordsFiltered"] = filtered_count
+            return response
 
-        total = self.queryset.count()
-        filtered = queryset.count()
-        queryset = queryset[start : start + length]
+        serializer = self.get_serializer(filtered_queryset, many=True)
+        return Response(serializer.data)
 
-        data = []
-        for index, obj in enumerate(queryset, start=1):
-            data.append(
-                {
-                    "id": obj.pk,
-                    "sno": start + index,
-                    "country_name": obj.name,
-                    "continent_name": obj.continent.name,
-                    "country_code": obj.code,
-                    "currency": obj.currency or "-",
-                    "status": obj.status,
-                }
-            )
-
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
         return Response(
             {
-                "draw": int(request.GET.get("draw", 1)),
-                "recordsTotal": total,
-                "recordsFiltered": filtered,
-                "data": data,
-            }
+                "message": f"{self.resource_name} created successfully.",
+                "data": self.serialize_instance(serializer.instance),
+            },
+            status=status.HTTP_201_CREATED,
         )
 
-    def partial_update(self, request, *args, **kwargs):
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
         instance = self.get_object()
-        instance.status = request.data.get("status", instance.status)
-        instance.save(update_fields=["status"])
-        return Response({"message": "Status updated"})
-
-
-@api_view(["GET"])
-def country_list(request):
-    draw = int(request.GET.get("draw", 1))
-    start = int(request.GET.get("start", 0))
-    length = int(request.GET.get("length", 10))
-    search = request.GET.get("search[value]", "")
-
-    queryset = Country.objects.select_related("continent").all()
-    total = queryset.count()
-
-    if search:
-        queryset = queryset.filter(
-            Q(name__icontains=search)
-            | Q(code__icontains=search)
-            | Q(continent__name__icontains=search)
-        )
-
-    filtered = queryset.count()
-    serializer = CountrySerializer(queryset[start : start + length], many=True)
-
-    data = []
-    for index, item in enumerate(serializer.data, start=1):
-        data.append(
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(
             {
-                "sno": start + index,
-                "country_name": item["name"],
-                "country_code": item["code"],
-                "continent": item.get("continent_name") or item["continent"],
-                "currency": item["currency"] or "-",
-                "status": "Active" if item["status"] else "Inactive",
-                "id": item["id"],
+                "message": f"{self.resource_name} updated successfully.",
+                "data": self.serialize_instance(serializer.instance),
             }
         )
 
-    return Response(
-        {
-            "draw": draw,
-            "recordsTotal": total,
-            "recordsFiltered": filtered,
-            "data": data,
-        }
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        try:
+            self.perform_destroy(instance)
+        except ProtectedError:
+            raise ValidationError(
+                {"detail": f"{self.resource_name} cannot be deleted because dependent records exist."}
+            )
+        return Response({"message": f"{self.resource_name} deleted successfully."})
+
+    @action(detail=True, methods=["patch"], url_path="toggle-status")
+    def toggle_status(self, request, pk=None):
+        instance = self.get_object()
+        field_name = self.status_field
+        new_value = not bool(getattr(instance, field_name))
+        setattr(instance, field_name, new_value)
+        instance.save(update_fields=[field_name])
+        return Response({"message": f"{self.resource_name} status updated.", "status": new_value})
+
+
+class ContinentViewSet(CommonMasterViewSet):
+    queryset = Continent.objects.all().order_by("order_no", "name", "id")
+    serializer_class = ContinentSerializer
+    resource_name = "Continent"
+    status_field = "status"
+    search_fields = ("name", "code")
+    ordering_fields = ("order_no", "name", "id")
+    filterset_map = {
+        "is_active": "status",
+        "status": "status",
+        "code": "code",
+    }
+
+    @action(detail=False, methods=["get"], url_path="lookup")
+    def lookup(self, request):
+        queryset = self.get_queryset().filter(status=True).values("id", "name", "code", "order_no")
+        return Response(list(queryset))
+
+
+class CountryViewSet(CommonMasterViewSet):
+    queryset = Country.objects.select_related("continent").all().order_by("name", "id")
+    serializer_class = CountrySerializer
+    resource_name = "Country"
+    status_field = "status"
+    search_fields = ("name", "code", "continent__name")
+    ordering_fields = ("name", "code", "continent__name", "id")
+    filterset_map = {
+        "continent": "continent_id",
+        "continent_id": "continent_id",
+        "is_active": "status",
+        "status": "status",
+        "code": "code",
+    }
+
+    @action(detail=False, methods=["get"], url_path="lookup")
+    def lookup(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).filter(status=True).values("id", "name", "code")
+        return Response(list(queryset))
+
+
+class StateViewSet(CommonMasterViewSet):
+    queryset = State.objects.select_related("country").all().order_by("name", "id")
+    serializer_class = StateSerializer
+    resource_name = "State"
+    search_fields = ("name", "country__name")
+    ordering_fields = ("name", "country__name", "id")
+    filterset_map = {
+        "country": "country_id",
+        "country_id": "country_id",
+        "is_active": "is_active",
+    }
+
+    @action(detail=False, methods=["get"], url_path="lookup")
+    def lookup(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True).values("id", "name", "country_id")
+        return Response(list(queryset))
+
+    @action(detail=False, methods=["get"], url_path="by-country/(?P<country_id>[^/.]+)")
+    def by_country(self, request, country_id=None):
+        queryset = self.get_queryset().filter(country_id=country_id, is_active=True).values("id", "name")
+        return Response(list(queryset))
+
+
+class CityViewSet(CommonMasterViewSet):
+    queryset = City.objects.select_related("country", "state", "city_type").all().order_by("name", "id")
+    serializer_class = CitySerializer
+    resource_name = "City"
+    search_fields = ("name", "pincode", "state__name", "country__name")
+    ordering_fields = ("name", "pincode", "state__name", "country__name", "id")
+    filterset_map = {
+        "country": "country_id",
+        "country_id": "country_id",
+        "state": "state_id",
+        "state_id": "state_id",
+        "city_type": "city_type_id",
+        "city_type_id": "city_type_id",
+        "is_active": "is_active",
+    }
+
+    @action(detail=False, methods=["get"], url_path="lookup")
+    def lookup(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True).values("id", "name", "state_id")
+        return Response(list(queryset))
+
+    @action(detail=False, methods=["get"], url_path="types")
+    def types(self, request):
+        queryset = CommonMaster.objects.filter(type="CITY_TYPE", is_active=True).values("id", "name")
+        return Response(list(queryset))
+
+
+class TaxViewSet(CommonMasterViewSet):
+    queryset = Tax.objects.select_related("country").all().order_by("name", "id")
+    serializer_class = TaxSerializer
+    resource_name = "Tax"
+    search_fields = ("name", "country__name", "value")
+    ordering_fields = ("name", "value", "country__name", "id")
+    filterset_map = {
+        "country": "country_id",
+        "country_id": "country_id",
+        "is_active": "is_active",
+    }
+
+    @action(detail=False, methods=["get"], url_path="lookup")
+    def lookup(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True).values("id", "name", "value")
+        return Response(list(queryset))
+
+
+class CurrencyViewSet(CommonMasterViewSet):
+    queryset = Currency.objects.select_related("country").all().order_by("name", "code", "id")
+    serializer_class = CurrencySerializer
+    resource_name = "Currency"
+    search_fields = ("name", "code", "country__name")
+    ordering_fields = ("name", "code", "country__name", "id")
+    filterset_map = {
+        "country": "country_id",
+        "country_id": "country_id",
+        "is_active": "is_active",
+        "code": "code",
+    }
+
+    @action(detail=False, methods=["get"], url_path="lookup")
+    def lookup(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True).values("id", "name", "code")
+        return Response(list(queryset))
+
+
+class CustomerViewSet(CommonMasterViewSet):
+    serializer_class = CustomerWriteSerializer
+    response_serializer_class = CustomerReadSerializer
+    resource_name = "Customer"
+    search_fields = (
+        "customer_no",
+        "customer_name",
+        "email",
+        "mobile_no",
+        "pan_number",
+        "gst_number",
     )
+    ordering_fields = ("customer_no", "customer_name", "customer_since", "created_at", "id")
+    filterset_map = {
+        "customer_group": "customer_group",
+        "customer_status": "customer_status",
+        "currency": "currency_id",
+        "currency_id": "currency_id",
+        "country": "country_id",
+        "country_id": "country_id",
+        "state": "state_id",
+        "state_id": "state_id",
+        "city": "city_id",
+        "city_id": "city_id",
+        "is_active": "is_active",
+    }
 
-
-@api_view(["POST"])
-def create_country(request):
-    serializer = CountrySerializer(data=request.data)
-    if serializer.is_valid():
-        serializer.save()
-        return Response(
-            {"message": "Created successfully", "data": serializer.data},
-            status=status.HTTP_201_CREATED,
+    def get_queryset(self):
+        address_queryset = CustomerAddress.objects.select_related("country", "state", "city").all()
+        return (
+            Customer.objects.select_related("currency", "country", "state", "city", "statutory_detail")
+            .prefetch_related(
+                "contact_persons",
+                "bank_details",
+                "documents",
+                Prefetch("addresses", queryset=address_queryset),
+            )
+            .all()
+            .order_by("customer_name", "customer_no", "id")
         )
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    def get_serializer_class(self):
+        if self.action in {"list", "retrieve"}:
+            return CustomerReadSerializer
+        return CustomerWriteSerializer
 
-@api_view(["PUT"])
-def update_country(request, pk):
-    try:
-        obj = Country.objects.get(pk=pk)
-    except Country.DoesNotExist:
-        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-
-    serializer = CountrySerializer(obj, data=request.data, partial=True)
-    if serializer.is_valid():
-        serializer.save()
-        return Response({"message": "Updated successfully", "data": serializer.data})
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-@api_view(["PATCH"])
-def toggle_country(request, pk):
-    try:
-        obj = Country.objects.get(pk=pk)
-    except Country.DoesNotExist:
-        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-
-    obj.status = not obj.status
-    obj.save(update_fields=["status"])
-    return Response({"message": "Status toggled", "status": obj.status})
-
-
-@api_view(["GET"])
-def continent_list(request):
-    queryset = Continent.objects.filter(status=True).order_by("name")
-    serializer = ContinentSerializer(queryset, many=True)
-    return Response(serializer.data)
-
-
-@api_view(["POST"])
-def create_continent(request):
-    serializer = ContinentSerializer(data=request.data)
-    if serializer.is_valid():
-        serializer.save()
-        return Response(
-            {"message": "Created successfully", "data": serializer.data},
-            status=status.HTTP_201_CREATED,
+    @action(detail=False, methods=["get"], url_path="lookup")
+    def lookup(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True).values(
+            "id",
+            "customer_no",
+            "customer_name",
         )
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return Response(list(queryset))
 
+    @action(detail=True, methods=["patch"], url_path="toggle-status")
+    def toggle_status(self, request, pk=None):
+        instance = self.get_object()
+        if instance.customer_status == Customer.CustomerStatus.BLOCKED:
+            raise ValidationError({"detail": "Blocked customers cannot be toggled. Update the customer status explicitly."})
 
-@api_view(["PUT"])
-def update_continent(request, pk):
-    try:
-        obj = Continent.objects.get(pk=pk)
-    except Continent.DoesNotExist:
-        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-
-    serializer = ContinentSerializer(obj, data=request.data, partial=True)
-    if serializer.is_valid():
-        serializer.save()
-        return Response({"message": "Updated successfully", "data": serializer.data})
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-@api_view(["PATCH"])
-def toggle_continent(request, pk):
-    try:
-        obj = Continent.objects.get(pk=pk)
-    except Continent.DoesNotExist:
-        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-
-    obj.status = not obj.status
-    obj.save(update_fields=["status"])
-    return Response({"message": "Status toggled", "status": obj.status})
-
-
-@api_view(["GET"])
-def get_countries(request):
-    countries = Country.objects.filter(status=True).order_by("name")
-    serializer = CountrySerializer(countries, many=True)
-    return Response(serializer.data)
-
-
-@api_view(["POST"])
-def create_state(request):
-    serializer = StateSerializer(data=request.data)
-    if serializer.is_valid():
-        serializer.save()
-        return Response(
-            {"message": "State created successfully", "data": serializer.data},
-            status=status.HTTP_201_CREATED,
+        instance.customer_status = (
+            Customer.CustomerStatus.INACTIVE
+            if instance.customer_status == Customer.CustomerStatus.ACTIVE
+            else Customer.CustomerStatus.ACTIVE
         )
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-@api_view(["GET"])
-def list_states(request):
-    states = State.objects.select_related("country").all().order_by("id")
-
-    data = []
-    for index, state_obj in enumerate(states, start=1):
-        data.append(
+        instance.is_active = instance.customer_status == Customer.CustomerStatus.ACTIVE
+        instance.save(update_fields=["customer_status", "is_active", "updated_at"])
+        return Response(
             {
-                "id": state_obj.pk,
-                "sno": index,
-                "country": state_obj.country.name,
-                "state_name": state_obj.name,
-                "is_active": state_obj.is_active,
+                "message": "Customer status updated.",
+                "status": instance.customer_status,
+                "is_active": instance.is_active,
             }
         )
 
-    return Response({"data": data})
 
-
-@api_view(["POST"])
-def toggle_state(request, pk):
-    try:
-        state_obj = State.objects.get(id=pk)
-    except State.DoesNotExist:
-        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-
-    state_obj.is_active = not state_obj.is_active
-    state_obj.save(update_fields=["is_active"])
-    return Response({"message": "Status updated"})
-
-
-@api_view(["GET"])
-def get_city_types(request):
-    data = CommonMaster.objects.filter(type="CITY_TYPE", is_active=True).values("id", "name")
-    return Response(list(data))
-
-
-@api_view(["GET"])
-def get_states_by_country(request, country_id):
-    states = State.objects.filter(country_id=country_id, is_active=True).values("id", "name")
-    return Response(list(states))
-
-
-@api_view(["POST"])
-def create_city(request):
-    serializer = CitySerializer(data=request.data)
-    if serializer.is_valid():
-        serializer.save()
-        return Response({"status": True, "message": "City created"}, status=status.HTTP_201_CREATED)
-    return Response({"status": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
-
-
-@api_view(["GET"])
-def list_city(request):
-    search = request.GET.get("search[value]", "")
-    start = int(request.GET.get("start", 0))
-    length = int(request.GET.get("length", 10))
-    draw = int(request.GET.get("draw", 1))
-
-    base_queryset = City.objects.select_related("country", "state", "city_type")
-    queryset = base_queryset
-
-    if search:
-        queryset = queryset.filter(
-            Q(name__icontains=search)
-            | Q(pincode__icontains=search)
-            | Q(state__name__icontains=search)
-            | Q(country__name__icontains=search)
-        )
-
-    total = base_queryset.count()
-    filtered = queryset.count()
-    cities = queryset[start : start + length]
-
-    data = []
-    for index, city in enumerate(cities, start=1):
-        data.append(
-            {
-                "sno": start + index,
-                "city": city.name,
-                "state": city.state.name,
-                "country": city.country.name,
-                "pincode": city.pincode,
-                "status": city.is_active,
-                "id": city.pk,
-            }
-        )
-
-    return Response(
-        {
-            "draw": draw,
-            "recordsTotal": total,
-            "recordsFiltered": filtered,
-            "data": data,
-        }
+class SupplierViewSet(CommonMasterViewSet):
+    serializer_class = SupplierWriteSerializer
+    response_serializer_class = SupplierReadSerializer
+    resource_name = "Supplier"
+    search_fields = (
+        "supplier_no",
+        "supplier_name",
+        "email",
+        "mobile_no",
+        "pan_number",
+        "gst_number",
     )
+    ordering_fields = ("supplier_no", "supplier_name", "created_at", "id")
+    filterset_map = {
+        "supplier_group": "supplier_group",
+        "currency": "currency_id",
+        "currency_id": "currency_id",
+        "country": "country_id",
+        "country_id": "country_id",
+        "state": "state_id",
+        "state_id": "state_id",
+        "city": "city_id",
+        "city_id": "city_id",
+        "gst_status": "gst_status",
+        "is_active": "is_active",
+        "msme_type": "msme_type",
+    }
 
-
-@api_view(["POST"])
-def toggle_city(request, pk):
-    try:
-        city = City.objects.get(id=pk)
-    except City.DoesNotExist:
-        return Response(
-            {"status": False, "message": "City not found"},
-            status=status.HTTP_404_NOT_FOUND,
+    def get_queryset(self):
+        address_queryset = SupplierAddress.objects.select_related("country", "state", "city").all()
+        return (
+            Supplier.objects.select_related("currency", "country", "state", "city", "statutory_detail")
+            .prefetch_related(
+                "contact_persons",
+                "bank_details",
+                "documents",
+                Prefetch("addresses", queryset=address_queryset),
+            )
+            .all()
+            .order_by("supplier_name", "supplier_no", "id")
         )
 
-    city.is_active = not city.is_active
-    city.save(update_fields=["is_active"])
-    return Response({"status": True})
+    def get_serializer_class(self):
+        if self.action in {"list", "retrieve"}:
+            return SupplierReadSerializer
+        return SupplierWriteSerializer
 
-
-@api_view(["GET"])
-def get_city(request, pk):
-    try:
-        city = City.objects.get(id=pk)
-    except City.DoesNotExist:
-        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-
-    serializer = CitySerializer(city)
-    return Response(serializer.data)
-
-
-@api_view(["POST"])
-def create_tax(request):
-    serializer = TaxSerializer(data=request.data)
-    if serializer.is_valid():
-        serializer.save()
-        return Response({"status": True, "message": "Tax created"}, status=status.HTTP_201_CREATED)
-    return Response({"status": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
-
-
-@api_view(["GET"])
-def list_tax(request):
-    search = request.GET.get("search[value]", "")
-    start = int(request.GET.get("start", 0))
-    length = int(request.GET.get("length", 10))
-    draw = int(request.GET.get("draw", 1))
-
-    base_queryset = Tax.objects.select_related("country")
-    queryset = base_queryset
-
-    if search:
-        queryset = queryset.filter(
-            Q(name__icontains=search)
-            | Q(country__name__icontains=search)
-            | Q(value__icontains=search)
+    @action(detail=False, methods=["get"], url_path="lookup")
+    def lookup(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True).values(
+            "id",
+            "supplier_no",
+            "supplier_name",
         )
-
-    total = base_queryset.count()
-    filtered = queryset.count()
-    taxes = queryset[start : start + length]
-
-    data = []
-    for index, tax in enumerate(taxes, start=1):
-        data.append(
-            {
-                "sno": start + index,
-                "tax_name": tax.name,
-                "tax_value": float(tax.value),
-                "country": tax.country.name if tax.country else "-",
-                "status": tax.is_active,
-                "id": tax.pk,
-            }
-        )
-
-    return Response(
-        {
-            "draw": draw,
-            "recordsTotal": total,
-            "recordsFiltered": filtered,
-            "data": data,
-        }
-    )
+        return Response(list(queryset))
 
 
-@api_view(["POST"])
-def toggle_tax(request, pk):
-    try:
-        tax = Tax.objects.get(id=pk)
-    except Tax.DoesNotExist:
-        return Response({"status": False, "message": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-
-    tax.is_active = not tax.is_active
-    tax.save(update_fields=["is_active"])
-    return Response({"status": True})
-
-
-@api_view(["GET"])
-def get_tax(request, pk):
-    try:
-        tax = Tax.objects.get(id=pk)
-    except Tax.DoesNotExist:
-        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-
-    serializer = TaxSerializer(tax)
-    return Response(serializer.data)
+class CustomerDocumentViewSet(CommonMasterViewSet):
+    queryset = CustomerDocument.objects.select_related("customer").all().order_by("-created_at", "-id")
+    serializer_class = CustomerDocumentSerializer
+    resource_name = "Customer document"
+    search_fields = ("document_type", "remarks", "customer__customer_no", "customer__customer_name")
+    ordering_fields = ("created_at", "document_type", "customer__customer_no", "id")
+    filterset_map = {
+        "customer": "customer_id",
+        "customer_id": "customer_id",
+        "document_type": "document_type",
+        "is_active": "is_active",
+    }
 
 
-# Company Creation
-@api_view(["GET"])
-def list_company(request):
-    search = request.GET.get("search[value]", "")
-    start = int(request.GET.get("start", 0))
-    length = int(request.GET.get("length", 10))
-    draw = int(request.GET.get("draw", 1))
-
-    base_queryset = Company.objects.select_related("country", "state", "city")
-    queryset = base_queryset
-
-    if search:
-        queryset = queryset.filter(
-            Q(name__icontains=search) |
-            Q(code__icontains=search) |
-            Q(city__name__icontains=search)
-        )
-
-    total = base_queryset.count()
-    filtered = queryset.count()
-
-    companies = queryset[start:start+length]
-
-    data = []
-    for i, obj in enumerate(companies, start=1):
-        data.append({
-            "sno": start + i,
-            "company_name": obj.name,
-            "company_code": obj.code,
-            "state": obj.state.name if obj.state else "",
-            "city": obj.city.name if obj.city else "",
-            "pincode": obj.pincode,
-            "latitude": obj.latitude,
-            "longitude": obj.longitude,
-            "logo": obj.logo.url if obj.logo else "",
-            "document": obj.document.url if obj.document else "",
-            "status": "Active" if obj.is_active else "Inactive",
-            "id": obj.pk
-        })
-
-    return Response({
-        "draw": draw,
-        "recordsTotal": total,
-        "recordsFiltered": filtered,
-        "data": data
-    })
-
-@api_view(["POST"])
-def create_company(request):
-    serializer = CompanySerializer(data=request.data)
-    if serializer.is_valid():
-        serializer.save()
-        return Response({"status": True, "message": "Created"})
-    return Response({"status": False, "errors": serializer.errors})
+class SupplierDocumentViewSet(CommonMasterViewSet):
+    queryset = SupplierDocument.objects.select_related("supplier").all().order_by("-created_at", "-id")
+    serializer_class = SupplierDocumentSerializer
+    resource_name = "Supplier document"
+    search_fields = ("document_type", "remarks", "supplier__supplier_no", "supplier__supplier_name")
+    ordering_fields = ("created_at", "document_type", "supplier__supplier_no", "id")
+    filterset_map = {
+        "supplier": "supplier_id",
+        "supplier_id": "supplier_id",
+        "document_type": "document_type",
+        "is_active": "is_active",
+    }
 
 
-@api_view(["PATCH"])
-def toggle_company(request, pk):
-    obj = Company.objects.get(pk=pk)
-    obj.is_active = not obj.is_active
-    obj.save(update_fields=["is_active"])
-    return Response({"status": True})
+class CompanyViewSet(CommonMasterViewSet):
+    queryset = Company.objects.select_related("country", "state", "city").all().order_by("-id")
+    serializer_class = CompanySerializer
+    resource_name = "Company"
+    search_fields = ("name", "code", "city__name", "state__name")
+    ordering_fields = ("name", "code", "created_at", "id")
+    filterset_map = {
+        "country": "country_id",
+        "country_id": "country_id",
+        "state": "state_id",
+        "state_id": "state_id",
+        "city": "city_id",
+        "city_id": "city_id",
+        "is_active": "is_active",
+        "code": "code",
+    }
 
-# Project Creation
-@api_view(["GET"])
-def list_project(request):
-    search = request.GET.get("search[value]", "")
-    start = int(request.GET.get("start", 0))
-    length = int(request.GET.get("length", 10))
-    draw = int(request.GET.get("draw", 1))
-
-    base_queryset = Project.objects.select_related(
-        "company", "state", "city", "application_type"
-    )
-
-    queryset = base_queryset
-
-    if search:
-        queryset = queryset.filter(
-            Q(name__icontains=search) |
-            Q(code__icontains=search) |
-            Q(company__name__icontains=search)
-        )
-
-    total = base_queryset.count()
-    filtered = queryset.count()
-
-    projects = queryset[start:start+length]
-
-    data = []
-    for i, obj in enumerate(projects, start=1):
-        data.append({
-            "sno": start + i,
-            "company_name": obj.company.name,
-            "project_name": obj.name,
-            "project_code": obj.code,
-            "client_name": obj.client_name,
-            "application_type": obj.application_type.name if obj.application_type else "",
-            "capacity": obj.capacity,
-            "state": obj.state.name if obj.state else "",
-            "city": obj.city.name if obj.city else "",
-            "contact_person": obj.contact_person,
-            "contact_number": obj.contact_number,
-            "status": "Active" if obj.is_active else "Inactive",
-            "id": obj.pk
-        })
-
-    return Response({
-        "draw": draw,
-        "recordsTotal": total,
-        "recordsFiltered": filtered,
-        "data": data
-    })
-
-@api_view(["POST"])
-def create_project(request):
-    serializer = ProjectSerializer(data=request.data)
-    if serializer.is_valid():
-        serializer.save()
-        return Response({"status": True, "message": "Project created"})
-    return Response({"status": False, "errors": serializer.errors})
+    @action(detail=False, methods=["get"], url_path="lookup")
+    def lookup(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True).values("id", "name", "code")
+        return Response(list(queryset))
 
 
-@api_view(["PATCH"])
-def toggle_project(request, pk):
-    obj = Project.objects.get(pk=pk)
-    obj.is_active = not obj.is_active
-    obj.save(update_fields=["is_active"])
-    return Response({"status": True})
+class ProjectViewSet(CommonMasterViewSet):
+    queryset = Project.objects.select_related(
+        "company",
+        "country",
+        "state",
+        "city",
+        "application_type",
+    ).all().order_by("-id")
+    serializer_class = ProjectSerializer
+    resource_name = "Project"
+    search_fields = ("name", "code", "company__name", "client_name")
+    ordering_fields = ("project_date", "name", "code", "created_at", "id")
+    filterset_map = {
+        "company": "company_id",
+        "company_id": "company_id",
+        "country": "country_id",
+        "country_id": "country_id",
+        "state": "state_id",
+        "state_id": "state_id",
+        "city": "city_id",
+        "city_id": "city_id",
+        "application_type": "application_type_id",
+        "application_type_id": "application_type_id",
+        "is_active": "is_active",
+    }
 
-@api_view(["GET"])
-def get_companies(request):
-    data = Company.objects.filter(is_active=True).values("id", "name")
-    return Response(list(data))
-
-
-@api_view(["GET"])
-def get_application_types(request):
-    data = CommonMaster.objects.filter(type="APPLICATION_TYPE", is_active=True).values("id", "name")
-    return Response(list(data))
+    @action(detail=False, methods=["get"], url_path="application-types")
+    def application_types(self, request):
+        queryset = CommonMaster.objects.filter(type="APPLICATION_TYPE", is_active=True).values("id", "name")
+        return Response(list(queryset))
