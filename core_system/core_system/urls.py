@@ -1,3 +1,5 @@
+from django.conf import settings
+from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 from rest_framework_simplejwt.views import TokenRefreshView, TokenVerifyView
@@ -16,4 +18,10 @@ urlpatterns = [
     path("api/store/", include("apps.store.urls")),
     path("api/presales/", include("apps.presales.urls")),
     path("api/contacts/", include("apps.contacts.urls")),
+    path("api/users/", include("apps.admin_master.urls")),
+    path("api/masters/", include("apps.common_master.urls")),
+    path("api/purchase/", include("apps.purchase_master.urls")),
 ]
+
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

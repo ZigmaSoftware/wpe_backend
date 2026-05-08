@@ -1,0 +1,1 @@
+"""Admin master app package."""

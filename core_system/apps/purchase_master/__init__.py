@@ -1,0 +1,1 @@
+"""Purchase master app package."""
