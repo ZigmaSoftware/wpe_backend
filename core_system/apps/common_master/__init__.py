@@ -1,0 +1,1 @@
+"""Common master app package."""

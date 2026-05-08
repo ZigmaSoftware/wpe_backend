@@ -61,6 +61,10 @@ INSTALLED_APPS = [
     "rest_framework",
     "corsheaders",
     "rest_framework_simplejwt.token_blacklist",
+    "apps.login_home.apps.LoginHomeConfig",
+    "apps.common_master.apps.CommonMasterConfig",
+    "apps.admin_master.apps.AdminMasterConfig",
+    "apps.purchase_master.apps.PurchaseMasterConfig",
     "apps.auth",
     "apps.contacts",
     "apps.items",
@@ -130,6 +134,8 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 SESSION_COOKIE_HTTPONLY = True
