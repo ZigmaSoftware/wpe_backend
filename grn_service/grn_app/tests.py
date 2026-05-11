@@ -158,6 +158,23 @@ class GRNAPIViewTests(APITestCase):
             self.second_grn.product_description,
         )
 
+    def test_get_grn_list_exposes_flat_department_compatibility_fields(self):
+        grn = GRN.objects.create(
+            grn_no="GRN-003",
+            trade_name="Compat Supplier",
+            product_description="Compat Item",
+            req_department="Stores",
+            accepted_qty="25.00",
+        )
+
+        response = self.client.get(self.url, {"grn_no": grn.grn_no})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        row = response.data["data"][0]
+        self.assertEqual(row["req_department"], "Stores")
+        self.assertEqual(row["department"], "Stores")
+        self.assertEqual(str(row["accepted_qty"]), "25.00")
+
     def test_get_grn_list_can_filter_by_grn_no(self):
         response = self.client.get(self.url, {"grn_no": self.first_grn.grn_no})
 

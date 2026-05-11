@@ -289,18 +289,18 @@ def _build_effective_permission_map(permission_rows: list[UserTypePermission], s
     }
 
 
-def resolve_user_type_permissions(user_type: UserType) -> dict[str, Any]:
-    permission_rows = list(
-        UserTypePermission.objects.select_related(
-            "main_screen",
-            "screen_section",
-            "user_screen",
-        )
-        .filter(user_type=user_type)
-        .order_by("main_screen__order_no", "screen_section__order_no", "user_screen__order_no", "id")
-    )
+def _build_full_access_permission_map(screen: UserScreen) -> dict[str, bool]:
+    return {
+        "all": True,
+        **{
+            action: action in screen.available_actions
+            for action in SCREEN_ACTIONS
+        },
+    }
 
-    active_screens = list(
+
+def _active_user_screens() -> list[UserScreen]:
+    return list(
         UserScreen.objects.select_related("main_screen", "screen_section")
         .filter(
             is_active=True,
@@ -310,10 +310,17 @@ def resolve_user_type_permissions(user_type: UserType) -> dict[str, Any]:
         .order_by("main_screen__order_no", "screen_section__order_no", "order_no", "id")
     )
 
+
+def _build_menu_payload(
+    *,
+    active_screens: list[UserScreen],
+    permission_builder,
+    subject: dict[str, Any],
+) -> dict[str, Any]:
     menu_map: dict[int, dict[str, Any]] = {}
 
     for screen in active_screens:
-        effective_permissions = _build_effective_permission_map(permission_rows, screen)
+        effective_permissions = permission_builder(screen)
         if not has_any_granted_action(effective_permissions, available_actions=screen.available_actions):
             continue
 
@@ -363,17 +370,51 @@ def resolve_user_type_permissions(user_type: UserType) -> dict[str, Any]:
         ordered_menu.append(main_bucket)
 
     return {
-        "user_type": {
-            "id": user_type.id,
-            "name": user_type.name,
-            "code": user_type.code,
-        },
+        "user_type": subject,
         "menu": ordered_menu,
     }
 
 
+def resolve_user_type_permissions(user_type: UserType) -> dict[str, Any]:
+    permission_rows = list(
+        UserTypePermission.objects.select_related(
+            "main_screen",
+            "screen_section",
+            "user_screen",
+        )
+        .filter(user_type=user_type)
+        .order_by("main_screen__order_no", "screen_section__order_no", "user_screen__order_no", "id")
+    )
+
+    return _build_menu_payload(
+        active_screens=_active_user_screens(),
+        permission_builder=lambda screen: _build_effective_permission_map(permission_rows, screen),
+        subject={
+            "id": user_type.id,
+            "name": user_type.name,
+            "code": user_type.code,
+        },
+    )
+
+
+def resolve_full_access_permissions(user) -> dict[str, Any]:
+    return _build_menu_payload(
+        active_screens=_active_user_screens(),
+        permission_builder=_build_full_access_permission_map,
+        subject={
+            "id": getattr(user, "id", None),
+            "name": getattr(user, "username", "") or getattr(user, "get_username", lambda: "")(),
+            "code": "full-access",
+        },
+    )
+
+
 def resolve_subject_permissions(*, user_type=None, user=None) -> dict[str, Any]:
     resolved_user_type = user_type
+
+    if resolved_user_type is None and user is not None:
+        if getattr(user, "is_superuser", False) or getattr(user, "is_staff", False):
+            return resolve_full_access_permissions(user)
 
     if resolved_user_type is None:
         profile = getattr(user, "admin_profile", None)
