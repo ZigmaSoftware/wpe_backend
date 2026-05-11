@@ -715,6 +715,7 @@ def schema_sync_response() -> Response:
 def get_compatible_grn_payload() -> list[dict[str, Any]]:
     rows = list(GRN.objects.values(*GRN_LEGACY_VALUE_FIELDS).order_by("-id"))
     for row in rows:
+        row["department"] = row.get("req_department")
         row["process_status"] = "GRN Process"
         row["moved_to_qcr_at"] = None
         row["moved_to_qcr_by"] = None

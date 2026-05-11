@@ -350,7 +350,16 @@ def calculate_request_availability(stock_request: StockRequest) -> dict[int, Dec
     return availability
 
 
-def create_store_request(*, requested_by, items: list[dict[str, Any]], remarks: str | None = None) -> StockRequest:
+def create_store_request(
+    *,
+    requested_by,
+    items: list[dict[str, Any]],
+    remarks: str | None = None,
+    request_type: str = StockRequest.RequestType.GENERAL,
+    department: str = "BLENDING",
+    requested_for_name: str = "",
+    request_reason: str = "",
+) -> StockRequest:
     require_persisted_user(requested_by, field_name="requested_by")
     requesting_warehouse = get_blending_warehouse()
     issuing_warehouse = get_store_warehouse()
@@ -362,6 +371,10 @@ def create_store_request(*, requested_by, items: list[dict[str, Any]], remarks: 
         stock_request = StockRequest.objects.create(
             requesting_warehouse=requesting_warehouse,
             issuing_warehouse=issuing_warehouse,
+            request_type=request_type,
+            department=normalize_text(department) or "BLENDING",
+            requested_for_name=normalize_text(requested_for_name),
+            request_reason=normalize_text(request_reason),
             remarks=normalize_text(remarks) or None,
             requested_by=requested_by,
         )
@@ -397,8 +410,104 @@ def create_store_request(*, requested_by, items: list[dict[str, Any]], remarks: 
     )
 
 
-def request_stock(*, item: Item, quantity: Decimal | int | float | str, user) -> StockRequest:
-    return create_store_request(requested_by=user, items=[{"item": item, "quantity": quantity}], remarks=None)
+def request_stock(
+    *,
+    item: Item,
+    quantity: Decimal | int | float | str,
+    user,
+    request_type: str = StockRequest.RequestType.GENERAL,
+    department: str = "BLENDING",
+    requested_for_name: str = "",
+    request_reason: str = "",
+) -> StockRequest:
+    return create_store_request(
+        requested_by=user,
+        items=[{"item": item, "quantity": quantity}],
+        remarks=None,
+        request_type=request_type,
+        department=department,
+        requested_for_name=requested_for_name,
+        request_reason=request_reason,
+    )
+
+
+def update_store_request(
+    request_id: int,
+    *,
+    requested_by,
+    items: list[dict[str, Any]],
+    remarks: str | None = None,
+    request_type: str = StockRequest.RequestType.GENERAL,
+    department: str = "BLENDING",
+    requested_for_name: str = "",
+    request_reason: str = "",
+) -> StockRequest:
+    require_persisted_user(requested_by, field_name="requested_by")
+
+    if not items:
+        raise ValidationError({"items": "At least one store request item is required."})
+
+    with transaction.atomic():
+        stock_request = (
+            StockRequest.objects.select_related("requested_by")
+            .prefetch_related("items__item")
+            .select_for_update()
+            .get(pk=request_id)
+        )
+        if stock_request.status != StockRequest.Status.PENDING:
+            raise ValidationError({"status": "Only pending store requests can be edited."})
+
+        if stock_request.requested_by_id != getattr(requested_by, "id", None) and not user_has_role(
+            requested_by,
+            ADMIN_ROLE_TOKENS,
+        ):
+            raise ValidationError({"detail": "You can edit only your own pending store requests."})
+
+        request_items = []
+        for row in items:
+            item = row["item"]
+            quantity = quantize_stock(row["quantity"])
+            if quantity <= STOCK_ZERO:
+                raise ValidationError({"quantity": "Quantity must be greater than zero."})
+            ensure_item_unit(item)
+            request_items.append(
+                StockRequestItem(
+                    stock_request=stock_request,
+                    item=item,
+                    requested_qty=quantity,
+                    remarks=normalize_text(row.get("remarks")) or None,
+                )
+            )
+
+        stock_request.request_type = request_type
+        stock_request.department = normalize_text(department) or "BLENDING"
+        stock_request.requested_for_name = normalize_text(requested_for_name)
+        stock_request.request_reason = normalize_text(request_reason)
+        stock_request.remarks = normalize_text(remarks) or None
+        stock_request.save(
+            update_fields=[
+                "request_type",
+                "department",
+                "requested_for_name",
+                "request_reason",
+                "remarks",
+            ]
+        )
+
+        stock_request.items.all().delete()
+        StockRequestItem.objects.bulk_create(request_items)
+
+    return (
+        StockRequest.objects.select_related(
+            "requesting_warehouse",
+            "issuing_warehouse",
+            "requested_by",
+            "action_by",
+            "cancelled_by",
+        )
+        .prefetch_related("items__item")
+        .get(pk=request_id)
+    )
 
 
 def cancel_store_request(request_id: int, cancelled_by, remarks: str | None = None) -> StockRequest:
@@ -567,7 +676,7 @@ def approve_stock_request(request_id: int, approver, approval_remarks: str | Non
     }
 
 
-def reject_stock_request(request_id: int, approver, approval_remarks: str) -> StockRequest:
+def reject_stock_request(request_id: int, approver, approval_remarks: str | None = None) -> StockRequest:
     require_persisted_user(approver, field_name="action_by")
 
     with transaction.atomic():

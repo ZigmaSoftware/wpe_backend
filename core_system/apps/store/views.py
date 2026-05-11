@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from rest_framework import filters, generics, status
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 
 from common.drf import QueryParamFilterMixin, StandardResultsSetPagination, success_response
 
@@ -15,6 +16,7 @@ from .selectors import (
     store_request_queryset,
 )
 from .serializers import (
+    LegacyStockRequestCreateSerializer,
     StockMovementSerializer,
     StockRequestApproveSerializer,
     StockRequestRejectSerializer,
@@ -28,7 +30,9 @@ from .services import (
     apply_outward_stock,
     approve_stock_request,
     reject_stock_request,
+    request_stock,
 )
+
 
 class WrappedListAPIView(QueryParamFilterMixin, generics.ListAPIView):
     permission_classes = [IsAuthenticated, IsStoreUser]
@@ -53,6 +57,35 @@ class WrappedListAPIView(QueryParamFilterMixin, generics.ListAPIView):
         )
 
 
+class StoreStockRequestAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = LegacyStockRequestCreateSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        stock_request = request_stock(
+            item=serializer.validated_data["item"],
+            quantity=serializer.validated_data["quantity"],
+            user=request.user,
+            request_type=serializer.validated_data.get("request_type", StockRequest.RequestType.GENERAL),
+            department=serializer.validated_data.get("department", "BLENDING"),
+            requested_for_name=serializer.validated_data.get("requested_for_name", ""),
+            request_reason=serializer.validated_data.get("request_reason", ""),
+        )
+        return Response(
+            {
+                "detail": "Stock request submitted to store.",
+                "request": StockRequestSerializer(
+                    stock_request,
+                    context={"availability_map": availability_map_for_requests([stock_request])},
+                ).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
 class StoreRequestApprovalListAPIView(WrappedListAPIView):
     serializer_class = StockRequestSerializer
     search_fields = ("request_no", "requested_by__username", "items__item__item_name", "items__item__item_code")
@@ -62,6 +95,8 @@ class StoreRequestApprovalListAPIView(WrappedListAPIView):
         "requested_by": "requested_by_id",
         "requesting_warehouse": "requesting_warehouse_id",
         "issuing_warehouse": "issuing_warehouse_id",
+        "request_type": "request_type",
+        "department": "department",
     }
     list_message = "Store request queue fetched successfully."
 
@@ -160,7 +195,7 @@ class RejectStockRequestAPIView(generics.GenericAPIView):
         stock_request = reject_stock_request(
             pk,
             request.user,
-            approval_remarks=serializer.validated_data["approval_remarks"],
+            approval_remarks=serializer.validated_data.get("approval_remarks"),
         )
         return success_response(
             message="Store request rejected successfully",
@@ -174,6 +209,7 @@ class RejectStockRequestAPIView(generics.GenericAPIView):
 
 
 class StoreStockListAPIView(WrappedListAPIView):
+    permission_classes = [IsAuthenticated]
     serializer_class = StoreStockSerializer
     search_fields = (
         "item__item_code",

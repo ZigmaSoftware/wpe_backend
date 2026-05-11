@@ -10,11 +10,14 @@ from .views import (
     StoreRequestApprovalListAPIView,
     StoreRequestDetailAPIView,
     StoreStockListAPIView,
+    StoreStockRequestAPIView,
     StoreTransactionListAPIView,
 )
 
 
 urlpatterns = [
+    path("request-stock/", StoreStockRequestAPIView.as_view(), name="store-request-stock"),
+    path("request-stock", StoreStockRequestAPIView.as_view(), name="store-request-stock-no-slash"),
     path("requests/", StoreRequestApprovalListAPIView.as_view(), name="store-request-list"),
     path("requests", StoreRequestApprovalListAPIView.as_view(), name="store-request-list-no-slash"),
     path("requests/<int:pk>/", StoreRequestDetailAPIView.as_view(), name="store-request-detail"),
@@ -23,10 +26,18 @@ urlpatterns = [
     path("requests/<int:pk>/approve", ApproveStockRequestAPIView.as_view(), name="store-request-approve-no-slash"),
     path("requests/<int:pk>/reject/", RejectStockRequestAPIView.as_view(), name="store-request-reject"),
     path("requests/<int:pk>/reject", RejectStockRequestAPIView.as_view(), name="store-request-reject-no-slash"),
+    path("approve-request/<int:pk>/", ApproveStockRequestAPIView.as_view(), name="store-approve-request"),
+    path("approve-request/<int:pk>", ApproveStockRequestAPIView.as_view(), name="store-approve-request-no-slash"),
+    path("reject-request/<int:pk>/", RejectStockRequestAPIView.as_view(), name="store-reject-request"),
+    path("reject-request/<int:pk>", RejectStockRequestAPIView.as_view(), name="store-reject-request-no-slash"),
     path("dashboard/", StockDashboardAPIView.as_view(), name="store-dashboard"),
     path("dashboard", StockDashboardAPIView.as_view(), name="store-dashboard-no-slash"),
+    path("stock/", StoreStockListAPIView.as_view(), name="store-stock-list"),
+    path("stock", StoreStockListAPIView.as_view(), name="store-stock-list-no-slash"),
     path("stock/current/", StoreStockListAPIView.as_view(), name="store-current-stock"),
     path("stock/current", StoreStockListAPIView.as_view(), name="store-current-stock-no-slash"),
+    path("transactions/", StoreTransactionListAPIView.as_view(), name="store-transaction-list"),
+    path("transactions", StoreTransactionListAPIView.as_view(), name="store-transaction-list-no-slash"),
     path("stock/ledger/", StoreTransactionListAPIView.as_view(), name="store-stock-ledger"),
     path("stock/ledger", StoreTransactionListAPIView.as_view(), name="store-stock-ledger-no-slash"),
     path("stock/inward/", StockInwardAPIView.as_view(), name="store-stock-inward"),

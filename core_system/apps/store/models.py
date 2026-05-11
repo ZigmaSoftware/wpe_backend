@@ -89,6 +89,10 @@ class StoreStock(models.Model):
         net_available = self.available_qty - self.reserved_qty
         return net_available if net_available > STOCK_ZERO else STOCK_ZERO
 
+    @property
+    def quantity(self):
+        return self.available_qty
+
     def __str__(self):
         return f"{self.item.item_code} {self.warehouse.code} {self.available_qty}"
 
@@ -180,11 +184,19 @@ class StoreTransaction(models.Model):
     def movement_qty(self):
         return self.inward_qty if self.inward_qty > STOCK_ZERO else self.outward_qty
 
+    @property
+    def quantity(self):
+        return self.movement_qty
+
     def __str__(self):
         return f"{self.transaction_no or 'PENDING'} {self.item.item_code} {self.transaction_type}"
 
 
 class StockRequest(models.Model):
+    class RequestType(models.TextChoices):
+        GENERAL = "GENERAL", "General"
+        ADDITIVE = "ADDITIVE", "Additive"
+
     class Status(models.TextChoices):
         PENDING = "PENDING", "Pending"
         APPROVED = "APPROVED", "Approved"
@@ -201,6 +213,15 @@ class StockRequest(models.Model):
         null=True,
         blank=True,
     )
+    request_type = models.CharField(
+        max_length=20,
+        choices=RequestType.choices,
+        default=RequestType.GENERAL,
+        db_index=True,
+    )
+    department = models.CharField(max_length=100, default="BLENDING")
+    requested_for_name = models.CharField(max_length=255, blank=True)
+    request_reason = models.TextField(blank=True)
     issuing_warehouse = models.ForeignKey(
         Warehouse,
         on_delete=models.PROTECT,
@@ -238,10 +259,29 @@ class StockRequest(models.Model):
         indexes = [
             models.Index(fields=["status", "requested_at"], name="store_request_status_date_idx"),
             models.Index(fields=["request_no"], name="store_request_no_idx"),
+            models.Index(fields=["request_type", "department"], name="store_request_type_dept_idx"),
         ]
 
     def __str__(self):
         return self.request_no or f"SR-{self.pk or 'NEW'}"
+
+    @property
+    def item(self):
+        first_item = self.items.order_by("id").select_related("item").first()
+        return first_item.item if first_item else None
+
+    @property
+    def quantity(self):
+        first_item = self.items.order_by("id").first()
+        return first_item.requested_qty if first_item else STOCK_ZERO
+
+    @property
+    def approved_by(self):
+        return self.action_by
+
+    @property
+    def approved_at(self):
+        return self.action_at
 
 
 class StockRequestItem(UUIDAuditMixin):

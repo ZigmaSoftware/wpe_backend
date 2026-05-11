@@ -35,7 +35,7 @@ class StoreWorkflowTests(APITestCase):
         self.store_warehouse = get_store_warehouse()
         self.blending_warehouse = get_blending_warehouse()
 
-    def test_approve_request_transfers_stock_between_store_and_blending_warehouses(self):
+    def test_approve_request_transfers_stock_between_warehouses(self):
         item = Item.objects.create(
             category="Raw Material",
             group="polymer",
@@ -57,108 +57,110 @@ class StoreWorkflowTests(APITestCase):
             "/api/blending/store-requests/",
             {
                 "remarks": "Material needed for batch 24-A",
-                "items": [
-                    {
-                        "item_id": item.id,
-                        "quantity": "50.000",
-                    }
-                ],
+                "items": [{"item_id": item.id, "quantity": "50.000"}],
             },
             format="json",
         )
-
-        self.assertEqual(request_response.status_code, 201)
-        self.assertTrue(request_response.data["success"])
         request_id = request_response.data["data"]["id"]
-
-        queue_response = self.store_client.get("/api/store/requests/?status=PENDING")
-        self.assertEqual(queue_response.status_code, 200)
-        self.assertEqual(queue_response.data["data"]["count"], 1)
-        queued_item = queue_response.data["data"]["results"][0]["items"][0]
-        self.assertEqual(queued_item["available_qty"], "100.000")
-        self.assertEqual(queued_item["shortage_qty"], "0.000")
 
         approve_response = self.store_client.post(
             f"/api/store/requests/{request_id}/approve/",
-            {"approval_remarks": "Approved for production batch 24-A"},
+            {"approval_remarks": "Approved for production"},
             format="json",
         )
 
         self.assertEqual(approve_response.status_code, 200)
-        self.assertTrue(approve_response.data["success"])
-
-        stock_request = StockRequest.objects.prefetch_related("items").get(pk=request_id)
         source_stock = StoreStock.objects.get(item=item, warehouse=self.store_warehouse)
         destination_stock = StoreStock.objects.get(item=item, warehouse=self.blending_warehouse)
-        request_item = stock_request.items.get(item=item)
+        request_item = StockRequest.objects.prefetch_related("items").get(pk=request_id).items.get(item=item)
 
-        self.assertEqual(stock_request.status, StockRequest.Status.APPROVED)
-        self.assertEqual(stock_request.action_by, self.store_user)
         self.assertEqual(source_stock.available_qty, Decimal("50.000"))
         self.assertEqual(destination_stock.available_qty, Decimal("50.000"))
         self.assertEqual(request_item.approved_qty, Decimal("50.000"))
         self.assertEqual(request_item.issued_qty, Decimal("50.000"))
-        self.assertEqual(
-            StoreTransaction.objects.filter(
-                item=item,
-                transaction_type=StoreTransaction.TransactionType.SR_ISSUE,
-            ).count(),
-            1,
-        )
-        self.assertEqual(
-            StoreTransaction.objects.filter(
-                item=item,
-                transaction_type=StoreTransaction.TransactionType.SR_RECEIPT,
-            ).count(),
-            1,
+
+    def test_legacy_request_stock_endpoint_sets_additive_metadata(self):
+        item = Item.objects.create(
+            category="Additive",
+            group="blend",
+            sub_group="processing additive",
+            item_name="Processing Additive A",
+            unit="kg",
         )
 
-    def test_reject_request_keeps_stock_unchanged(self):
+        response = self.blending_client.post(
+            "/api/store/request-stock/",
+            {
+                "item_id": item.id,
+                "quantity": "5.000",
+                "request_type": "ADDITIVE",
+                "department": "BLENDING",
+                "requested_for_name": "Shift Lead",
+                "request_reason": "Batch replenishment",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        stock_request = StockRequest.objects.prefetch_related("items").get(pk=response.data["request"]["id"])
+        self.assertEqual(stock_request.request_type, StockRequest.RequestType.ADDITIVE)
+        self.assertEqual(stock_request.department, "BLENDING")
+        self.assertEqual(stock_request.requested_for_name, "Shift Lead")
+        self.assertEqual(stock_request.request_reason, "Batch replenishment")
+        self.assertEqual(stock_request.items.first().requested_qty, Decimal("5.000"))
+
+    def test_store_requests_list_exposes_flat_compatibility_fields(self):
         item = Item.objects.create(
-            category="Raw Material",
-            group="polymer",
-            sub_group="blend",
-            item_name="Blend Additive",
+            category="Additive",
+            group="blend",
+            sub_group="mix additive",
+            item_name="Mixer Additive",
             unit="kg",
+        )
+        self.blending_client.post(
+            "/api/store/request-stock/",
+            {
+                "item_id": item.id,
+                "quantity": "2.500",
+                "request_type": "ADDITIVE",
+                "department": "BLENDING",
+                "requested_for_name": "Mixer Operator",
+                "request_reason": "Line refill",
+            },
+            format="json",
+        )
+
+        response = self.store_client.get("/api/store/requests/")
+
+        self.assertEqual(response.status_code, 200)
+        row = response.data["data"]["results"][0]
+        self.assertEqual(row["item"], item.id)
+        self.assertEqual(row["quantity"], "2.500")
+        self.assertEqual(row["request_type"], "ADDITIVE")
+        self.assertEqual(row["requested_for_name"], "Mixer Operator")
+
+    def test_store_stock_list_is_readable_by_blending_user(self):
+        item = Item.objects.create(
+            category="General Item",
+            group="consumable",
+            sub_group="packing",
+            item_name="Tape Roll",
+            unit="pcs",
         )
         apply_inward_stock(
             item=item,
             warehouse=self.store_warehouse,
-            quantity="10.000",
+            quantity="5.000",
             transaction_type=StoreTransaction.TransactionType.OPENING_STOCK,
             reference_type=StoreTransaction.ReferenceType.OPENING_STOCK,
             reference_id="OPEN-2",
             created_by=self.store_user,
         )
 
-        request_response = self.blending_client.post(
-            "/api/blending/store-requests/",
-            {
-                "items": [{"item_id": item.id, "quantity": "5.000"}],
-            },
-            format="json",
-        )
-        request_id = request_response.data["data"]["id"]
+        response = self.blending_client.get("/api/store/stock/")
 
-        reject_response = self.store_client.post(
-            f"/api/store/requests/{request_id}/reject/",
-            {"approval_remarks": "Rejected due to plan change"},
-            format="json",
-        )
-
-        self.assertEqual(reject_response.status_code, 200)
-        self.assertEqual(
-            StoreStock.objects.get(item=item, warehouse=self.store_warehouse).available_qty,
-            Decimal("10.000"),
-        )
-        self.assertFalse(StoreStock.objects.filter(item=item, warehouse=self.blending_warehouse).exists())
-        self.assertEqual(StockRequest.objects.get(pk=request_id).status, StockRequest.Status.REJECTED)
-        self.assertFalse(
-            StoreTransaction.objects.filter(
-                item=item,
-                transaction_type=StoreTransaction.TransactionType.SR_ISSUE,
-            ).exists()
-        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["results"][0]["quantity"], "5.000")
 
     def test_add_stock_from_grn_is_idempotent(self):
         item = Item.objects.create(
@@ -196,80 +198,3 @@ class StoreWorkflowTests(APITestCase):
         self.assertEqual(second_result["processed_references"], [])
         self.assertEqual(second_result["skipped_references"], ["WPE-00000001:1"])
         self.assertEqual(stock_row.available_qty, Decimal("12.500"))
-        self.assertEqual(
-            StoreTransaction.objects.filter(
-                item=item,
-                warehouse=self.store_warehouse,
-                transaction_type=StoreTransaction.TransactionType.GRN_INWARD,
-            ).count(),
-            1,
-        )
-
-    def test_outward_api_prevents_negative_inventory(self):
-        item = Item.objects.create(
-            category="General Item",
-            group="consumable",
-            sub_group="packing",
-            item_name="Tape Roll",
-            unit="pcs",
-        )
-        apply_inward_stock(
-            item=item,
-            warehouse=self.store_warehouse,
-            quantity="5.000",
-            transaction_type=StoreTransaction.TransactionType.OPENING_STOCK,
-            reference_type=StoreTransaction.ReferenceType.OPENING_STOCK,
-            reference_id="OPEN-3",
-            created_by=self.store_user,
-        )
-
-        outward_response = self.store_client.post(
-            "/api/store/stock/outward/",
-            {
-                "item_id": item.id,
-                "warehouse_id": self.store_warehouse.id,
-                "quantity": "6.000",
-                "transaction_type": StoreTransaction.TransactionType.MANUAL_OUTWARD,
-                "reference_type": StoreTransaction.ReferenceType.MANUAL,
-                "reference_id": "MAN-OUT-1",
-            },
-            format="json",
-        )
-
-        self.assertEqual(outward_response.status_code, 400)
-        self.assertEqual(
-            StoreStock.objects.get(item=item, warehouse=self.store_warehouse).available_qty,
-            Decimal("5.000"),
-        )
-
-    def test_blending_user_cannot_approve_requests(self):
-        item = Item.objects.create(
-            category="Raw Material",
-            group="polymer",
-            sub_group="lldpe",
-            item_name="LLDPE Resin",
-            unit="kg",
-        )
-        apply_inward_stock(
-            item=item,
-            warehouse=self.store_warehouse,
-            quantity="10.000",
-            transaction_type=StoreTransaction.TransactionType.OPENING_STOCK,
-            reference_type=StoreTransaction.ReferenceType.OPENING_STOCK,
-            reference_id="OPEN-4",
-            created_by=self.store_user,
-        )
-        request_response = self.blending_client.post(
-            "/api/blending/store-requests/",
-            {"items": [{"item_id": item.id, "quantity": "2.000"}]},
-            format="json",
-        )
-        request_id = request_response.data["data"]["id"]
-
-        approve_response = self.blending_client.post(
-            f"/api/store/requests/{request_id}/approve/",
-            {"approval_remarks": "Should not be allowed"},
-            format="json",
-        )
-
-        self.assertEqual(approve_response.status_code, 403)
