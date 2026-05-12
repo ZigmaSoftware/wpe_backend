@@ -20,6 +20,7 @@ BLENDING_WAREHOUSE_CODE = "BLENDING"
 AUTO_CREATED_ITEM_CATEGORY = "GRN Imported"
 AUTO_CREATED_ITEM_GROUP = "Inbound GRN"
 AUTO_CREATED_ITEM_SUB_GROUP = "Auto Created"
+MOVED_TO_GRN_SCOPES = {"moved to grn", "moved_to_grn", "moved-grn", "grn", "approved"}
 
 INWARD_TRANSACTION_TYPES = {
     StoreTransaction.TransactionType.GRN_INWARD,
@@ -708,6 +709,37 @@ def resolve_grn_identifier(grn_payload: dict[str, Any]) -> str:
     ).strip()
 
 
+def resolve_grn_process_status(grn_payload: dict[str, Any]) -> str:
+    if not isinstance(grn_payload, dict):
+        return ""
+
+    document_details = grn_payload.get("document_details")
+    qcr_details = grn_payload.get("qcr")
+    status_candidates = [
+        grn_payload.get("process_status"),
+        grn_payload.get("qcr_status"),
+        qcr_details.get("status") if isinstance(qcr_details, dict) else None,
+        document_details.get("process_status") if isinstance(document_details, dict) else None,
+    ]
+
+    for status_value in status_candidates:
+        normalized_status = normalize_text(status_value).lower()
+        if normalized_status:
+            return normalized_status
+
+    return ""
+
+
+def ensure_grn_ready_for_store_sync(grn_payload: dict[str, Any]) -> None:
+    process_status = resolve_grn_process_status(grn_payload)
+    if process_status not in MOVED_TO_GRN_SCOPES:
+        raise ValidationError(
+            {
+                "process_status": "Store stock can only be synced after QCR is moved to GRN.",
+            }
+        )
+
+
 def extract_grn_lines(grn_payload: dict[str, Any]) -> list[dict[str, Any]]:
     lines = grn_payload.get("items")
     if isinstance(lines, list) and lines:
@@ -789,6 +821,11 @@ def build_grn_reference_id(grn_identifier: str, line_number: int) -> str:
 
 
 def add_stock_from_grn(grn_payload: dict[str, Any], *, created_by=None) -> dict[str, Any]:
+    if not isinstance(grn_payload, dict):
+        raise ValidationError({"payload": "GRN payload must be a JSON object."})
+
+    ensure_grn_ready_for_store_sync(grn_payload)
+
     grn_identifier = resolve_grn_identifier(grn_payload)
     if not grn_identifier:
         raise ValidationError({"reference_id": "GRN payload must include a stable grn_no, id, or unique_id."})

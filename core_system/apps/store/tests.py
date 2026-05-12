@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.test import override_settings
+from rest_framework.exceptions import ValidationError
 from rest_framework.test import APIClient, APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -172,6 +173,7 @@ class StoreWorkflowTests(APITestCase):
         )
         payload = {
             "unique_id": "WPE-00000001",
+            "process_status": "Moved to GRN",
             "document_details": {
                 "grn_no": "GRN-1001",
                 "grn_date": "2026-05-05",
@@ -198,3 +200,26 @@ class StoreWorkflowTests(APITestCase):
         self.assertEqual(second_result["processed_references"], [])
         self.assertEqual(second_result["skipped_references"], ["WPE-00000001:1"])
         self.assertEqual(stock_row.available_qty, Decimal("12.500"))
+
+    def test_add_stock_from_grn_requires_moved_to_grn_status(self):
+        payload = {
+            "unique_id": "WPE-00000002",
+            "process_status": "Moved to QCR",
+            "document_details": {
+                "grn_no": "GRN-1002",
+                "grn_date": "2026-05-05",
+            },
+            "items": [
+                {
+                    "item_id": "ITEM-UNREADY-1",
+                    "product_description": "Unready Resin",
+                    "unit": "kg",
+                    "accepted_qty": "1.000",
+                }
+            ],
+        }
+
+        with self.assertRaises(ValidationError) as exc:
+            add_stock_from_grn(payload, created_by=self.store_user)
+
+        self.assertIn("process_status", exc.exception.detail)

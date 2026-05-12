@@ -63,10 +63,10 @@ class BlendingStoreRequestTests(APITestCase):
 
     def test_legacy_additive_request_endpoint_still_works(self):
         item = Item.objects.create(
-            category="Additive",
-            group="blend",
-            sub_group="mix additive",
-            item_name="Mixer Additive",
+            category="Raw Material",
+            group="polymer",
+            sub_group="lldpe",
+            item_name="Legacy Requestable Resin",
             unit="kg",
         )
 
@@ -84,12 +84,19 @@ class BlendingStoreRequestTests(APITestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["request"]["request_type"], "ADDITIVE")
 
-    def test_request_stock_get_returns_requestable_additive_store_stock_for_dropdown(self):
+    def test_request_stock_get_returns_requestable_store_stock_for_dropdown(self):
         additive_item = Item.objects.create(
             category="Additive",
             group="blend",
             sub_group="mix additive",
             item_name="Dropdown Additive",
+            unit="kg",
+        )
+        non_additive_item = Item.objects.create(
+            category="Raw Material",
+            group="polymer",
+            sub_group="lldpe",
+            item_name="Dropdown Resin",
             unit="kg",
         )
         apply_inward_stock(
@@ -101,13 +108,28 @@ class BlendingStoreRequestTests(APITestCase):
             reference_id="STORE-DD-1",
             created_by=self.store_user,
         )
+        apply_inward_stock(
+            item=non_additive_item,
+            warehouse=self.store_warehouse,
+            quantity="7.000",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_INWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="STORE-DD-2",
+            created_by=self.store_user,
+        )
 
         response = self.client.get("/api/blending/request-stock/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["data"]["count"], 1)
-        self.assertEqual(response.data["data"]["results"][0]["item"], additive_item.id)
-        self.assertEqual(response.data["data"]["results"][0]["warehouse_code"], self.store_warehouse.code)
+        self.assertEqual(response.data["data"]["count"], 2)
+        self.assertEqual(
+            {row["item"] for row in response.data["data"]["results"]},
+            {additive_item.id, non_additive_item.id},
+        )
+        self.assertEqual(
+            {row["warehouse_code"] for row in response.data["data"]["results"]},
+            {self.store_warehouse.code},
+        )
 
     def test_request_stock_get_supports_search_against_store_dropdown_data(self):
         matching_item = Item.objects.create(
@@ -288,9 +310,15 @@ class BlendingStoreRequestTests(APITestCase):
         response = self.client.get("/api/blending/requestable-additive-stock/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["data"]["count"], 1)
-        self.assertEqual(response.data["data"]["results"][0]["item"], additive_item.id)
-        self.assertEqual(response.data["data"]["results"][0]["warehouse_code"], self.store_warehouse.code)
+        self.assertEqual(response.data["data"]["count"], 2)
+        self.assertEqual(
+            {row["item"] for row in response.data["data"]["results"]},
+            {additive_item.id, non_additive_item.id},
+        )
+        self.assertEqual(
+            {row["warehouse_code"] for row in response.data["data"]["results"]},
+            {self.store_warehouse.code},
+        )
 
     def test_blending_stock_list_supports_requestable_additive_scope(self):
         additive_item = Item.objects.create(
@@ -298,6 +326,13 @@ class BlendingStoreRequestTests(APITestCase):
             group="blend",
             sub_group="mix additive",
             item_name="Mixer Additive",
+            unit="kg",
+        )
+        non_additive_item = Item.objects.create(
+            category="Raw Material",
+            group="polymer",
+            sub_group="hdpe",
+            item_name="Scope Resin",
             unit="kg",
         )
         apply_inward_stock(
@@ -309,13 +344,28 @@ class BlendingStoreRequestTests(APITestCase):
             reference_id="STORE-ADD-2",
             created_by=self.store_user,
         )
+        apply_inward_stock(
+            item=non_additive_item,
+            warehouse=self.store_warehouse,
+            quantity="5.000",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_INWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="STORE-RM-2",
+            created_by=self.store_user,
+        )
 
         response = self.client.get("/api/blending/stock/?stock_scope=requestable")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["data"]["count"], 1)
-        self.assertEqual(response.data["data"]["results"][0]["item"], additive_item.id)
-        self.assertEqual(response.data["data"]["results"][0]["warehouse_code"], self.store_warehouse.code)
+        self.assertEqual(response.data["data"]["count"], 2)
+        self.assertEqual(
+            {row["item"] for row in response.data["data"]["results"]},
+            {additive_item.id, non_additive_item.id},
+        )
+        self.assertEqual(
+            {row["warehouse_code"] for row in response.data["data"]["results"]},
+            {self.store_warehouse.code},
+        )
 
     def test_blending_user_cannot_approve_requests(self):
         item = Item.objects.create(

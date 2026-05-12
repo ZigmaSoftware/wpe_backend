@@ -693,6 +693,61 @@ def serialize_grn_snapshot(grn: GRN) -> dict[str, Any]:
     return snapshot
 
 
+def build_store_sync_payload(*, grn: GRN, qcr_status: str | None = None) -> dict[str, Any]:
+    payload = deepcopy(grn.raw_payload if isinstance(grn.raw_payload, dict) else {})
+    document_details = payload.get("document_details")
+    if not isinstance(document_details, dict):
+        document_details = {}
+        payload["document_details"] = document_details
+    supplier_details = payload.get("supplier_details")
+    if not isinstance(supplier_details, dict):
+        supplier_details = {}
+        payload["supplier_details"] = supplier_details
+
+    document_details.setdefault("grn_no", grn.grn_no)
+    if grn.grn_date:
+        document_details.setdefault("grn_date", grn.grn_date.isoformat())
+    supplier_details.setdefault("trade_name", grn.trade_name)
+
+    raw_items = payload.get("items")
+    item_lines = [item for item in raw_items if isinstance(item, dict)] if isinstance(raw_items, list) else []
+    if not item_lines:
+        item_lines = [{}]
+        payload["items"] = item_lines
+
+    first_item = item_lines[0]
+    first_item.setdefault("item_id", grn.item_id)
+    first_item.setdefault("product_description", grn.product_description)
+    first_item.setdefault("hsn_code", grn.hsn_code)
+    first_item.setdefault("unit", grn.unit)
+    if grn.total_quantity is not None:
+        first_item.setdefault("total_quantity", str(grn.total_quantity))
+    if grn.quantity is not None:
+        first_item.setdefault("quantity", str(grn.quantity))
+    if grn.accepted_qty is not None:
+        first_item.setdefault("accepted_qty", str(grn.accepted_qty))
+
+    payload["id"] = grn.id
+    payload["unique_id"] = grn.unique_id
+    payload["grn_no"] = grn.grn_no
+    payload.setdefault("item_id", grn.item_id)
+    payload.setdefault("product_description", grn.product_description)
+    payload.setdefault("unit", grn.unit)
+    payload.setdefault("trade_name", grn.trade_name)
+    payload["process_status"] = grn.process_status
+    if qcr_status:
+        payload["qcr_status"] = qcr_status
+    if grn.grn_date:
+        payload.setdefault("grn_date", grn.grn_date.isoformat())
+    if grn.accepted_qty is not None:
+        payload.setdefault("accepted_qty", str(grn.accepted_qty))
+    if grn.quantity is not None:
+        payload.setdefault("quantity", str(grn.quantity))
+    if grn.total_quantity is not None:
+        payload.setdefault("total_quantity", str(grn.total_quantity))
+    return payload
+
+
 def is_missing_schema_error(exc: Exception) -> bool:
     if not isinstance(exc, (ProgrammingError, OperationalError)):
         return False
@@ -953,24 +1008,6 @@ class GRNReceiverCreateAPIView(APIView):
             errors={"non_field_errors": ["Unexpected server error."]},
         )
 
-    def build_store_sync_payload(self, *, grn: GRN) -> dict[str, Any]:
-        payload = deepcopy(grn.raw_payload if isinstance(grn.raw_payload, dict) else {})
-        document_details = payload.get("document_details")
-        if not isinstance(document_details, dict):
-            document_details = {}
-            payload["document_details"] = document_details
-
-        document_details.setdefault("grn_no", grn.grn_no)
-        if grn.grn_date:
-            document_details.setdefault("grn_date", grn.grn_date.isoformat())
-
-        payload["id"] = grn.id
-        payload["unique_id"] = grn.unique_id
-        payload["grn_no"] = grn.grn_no
-        if grn.grn_date:
-            payload.setdefault("grn_date", grn.grn_date.isoformat())
-        return payload
-
     def post(self, request):
         idempotency_key = self.normalize_text(request.headers.get("Idempotency-Key"))
         grn_no = idempotency_key
@@ -999,7 +1036,6 @@ class GRNReceiverCreateAPIView(APIView):
             try:
                 with transaction.atomic():
                     saved_grn = serializer.save()
-                    add_stock_from_grn(self.build_store_sync_payload(grn=saved_grn))
             except IntegrityError:
                 existing_grn = self.find_existing_grn(grn_no=grn_no, idempotency_key=idempotency_key)
                 if existing_grn is not None:
@@ -1309,6 +1345,11 @@ class QCRStatusUpdateAPIView(APIView):
                     message = "QCR record rejected successfully."
 
                 grn.save(update_fields=["process_status", "status", "updated_at"])
+                if action == "move_to_grn":
+                    add_stock_from_grn(
+                        build_store_sync_payload(grn=grn, qcr_status=qcr_record.status),
+                        created_by=getattr(request, "user", None),
+                    )
 
             return Response(
                 {
@@ -1318,6 +1359,15 @@ class QCRStatusUpdateAPIView(APIView):
                     "qcr": QCRSerializer(qcr_record).data,
                 },
                 status=status.HTTP_200_OK,
+            )
+        except DRFValidationError as exc:
+            return Response(
+                {
+                    "status": "error",
+                    "message": "Store stock could not be synced from this GRN.",
+                    "errors": exc.detail,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
             )
         except (ProgrammingError, OperationalError) as exc:
             if is_missing_schema_error(exc):

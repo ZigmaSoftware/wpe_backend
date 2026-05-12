@@ -3,7 +3,6 @@ from __future__ import annotations
 from rest_framework import filters, generics, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError
 
 from common.drf import QueryParamFilterMixin, StandardResultsSetPagination, success_response
 
@@ -24,7 +23,6 @@ from .services import (
     cancel_blending_store_request,
     create_blending_store_request,
     get_blending_warehouse,
-    is_additive_item,
     requestable_additive_stock_queryset,
     update_blending_store_request,
 )
@@ -81,12 +79,12 @@ class RequestBlendingStockAPIView(generics.GenericAPIView):
 
         if page is not None:
             return success_response(
-                message="Requestable additive stock fetched successfully.",
+                message="Requestable store stock fetched successfully.",
                 data=self.paginator.get_paginated_data(serializer.data),
             )
 
         return success_response(
-            message="Requestable additive stock fetched successfully.",
+            message="Requestable store stock fetched successfully.",
             data={"count": len(serializer.data), "results": serializer.data},
         )
 
@@ -95,9 +93,6 @@ class RequestBlendingStockAPIView(generics.GenericAPIView):
         serializer.is_valid(raise_exception=True)
 
         item = serializer.validated_data["item"]
-        if not is_additive_item(item):
-            raise ValidationError({"item_id": "Only additive items can be requested through the blending additive flow."})
-
         stock_request = request_stock(
             item=item,
             quantity=serializer.validated_data["quantity"],
@@ -110,7 +105,7 @@ class RequestBlendingStockAPIView(generics.GenericAPIView):
 
         return Response(
             {
-                "detail": "Additive store request submitted to store.",
+                "detail": "Store request submitted to store.",
                 "request": StockRequestSerializer(
                     stock_request,
                     context={"availability_map": availability_map_for_requests([stock_request])},
@@ -304,7 +299,7 @@ class BlendingRequestableAdditiveStockListAPIView(WrappedBlendingListAPIView):
         "item": "item_id",
         "item_id": "item_id",
     }
-    list_message = "Requestable additive stock fetched successfully."
+    list_message = "Requestable store stock fetched successfully."
 
     def get_queryset(self):
         return requestable_additive_stock_queryset()
