@@ -45,6 +45,58 @@ class Warehouse(UUIDAuditMixin):
         return f"{self.code} - {self.name}"
 
 
+class StoreInventoryMovementBase(models.Model):
+    item = models.ForeignKey(Item, on_delete=models.CASCADE)
+    quantity = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        validators=[MinValueValidator(Decimal("0.001"))],
+    )
+    unit = models.CharField(max_length=50)
+    date = models.DateField(default=timezone.localdate, db_index=True)
+    reference_number = models.CharField(max_length=100, blank=True, null=True)
+    remarks = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        abstract = True
+        ordering = ["-date", "-id"]
+        indexes = [
+            models.Index(fields=["item", "date"]),
+            models.Index(fields=["reference_number"]),
+        ]
+
+
+class StoreInward(StoreInventoryMovementBase):
+    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="store_inward_entries")
+
+    class Meta(StoreInventoryMovementBase.Meta):
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(quantity__gt=STOCK_ZERO),
+                name="store_inward_quantity_gt_zero",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.item.item_code} STORE IN {self.quantity}"
+
+
+class StoreOutward(StoreInventoryMovementBase):
+    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="store_outward_entries")
+
+    class Meta(StoreInventoryMovementBase.Meta):
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(quantity__gt=STOCK_ZERO),
+                name="store_outward_quantity_gt_zero",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.item.item_code} STORE OUT {self.quantity}"
+
+
 class StoreStock(models.Model):
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="inventory_stocks")
     warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name="current_stocks")

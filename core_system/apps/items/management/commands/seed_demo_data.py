@@ -8,12 +8,17 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 
-from apps.blending.models import DepartmentStock
-from apps.blending.services import transfer_stock
 from apps.contacts.models import Contact
-from apps.items.models import Item, ItemStockTransaction
-from apps.items.views import create_or_update_item_with_stock, extract_stock_quantity, record_stock_movement
+from apps.items.models import Item
 from apps.presales.models import PreSales
+from apps.store.models import StoreTransaction
+from apps.store.services import (
+    apply_inward_stock,
+    apply_outward_stock,
+    get_blending_warehouse,
+    get_store_warehouse,
+    transfer_stock,
+)
 
 
 CONTACTS = [
@@ -216,7 +221,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         with transaction.atomic():
-            self._seed_user()
+            self.admin_user = self._seed_user()
             contacts = self._seed_contacts()
             items = self._seed_items()
             self._seed_stock_movements(items, contacts)
@@ -242,6 +247,7 @@ class Command(BaseCommand):
             user.is_superuser = True
             user.is_active = True
             user.save()
+        return user
 
     def _seed_contacts(self):
         records = []
@@ -255,61 +261,99 @@ class Command(BaseCommand):
 
     def _seed_items(self):
         records = []
+        store_warehouse = get_store_warehouse()
         for payload in ITEMS:
-            stock_quantity = extract_stock_quantity(payload)
-            item, _, _ = create_or_update_item_with_stock(
-                validated_data=payload,
-                raw_payload=payload,
-                stock_quantity=stock_quantity,
+            item, _created = Item.objects.update_or_create(
+                item_name=payload["item_name"],
+                category=payload["category"],
+                group=payload["group"],
+                sub_group=payload["sub_group"],
+                unit=payload["unit"],
+                defaults={
+                    "product_type": payload["product_type"],
+                    "hsn_code": payload.get("hsn_code") or None,
+                    "product_details": payload.get("product_details") or None,
+                    "description": payload.get("description") or None,
+                    "min_max_status": payload.get("min_max_status", False),
+                    "status": payload.get("status", True),
+                },
             )
+            opening_stock = Decimal(str(payload.get("opening_stock") or "0"))
+            reference_id = str(payload.get("ref_id") or f"OPEN-{item.id}")
+
+            if opening_stock > 0 and not StoreTransaction.objects.filter(
+                item=item,
+                warehouse=store_warehouse,
+                transaction_type=StoreTransaction.TransactionType.OPENING_STOCK,
+                reference_type=StoreTransaction.ReferenceType.OPENING_STOCK,
+                reference_id=reference_id,
+            ).exists():
+                apply_inward_stock(
+                    item=item,
+                    warehouse=store_warehouse,
+                    quantity=opening_stock,
+                    transaction_type=StoreTransaction.TransactionType.OPENING_STOCK,
+                    reference_type=StoreTransaction.ReferenceType.OPENING_STOCK,
+                    reference_id=reference_id,
+                    remarks=payload.get("description"),
+                    created_by=self.admin_user,
+                    transaction_date=payload.get("date"),
+                )
             records.append(item)
         return records
 
     def _seed_stock_movements(self, items, contacts):
         hdpe, wood_flour, deck_board = items
+        store_warehouse = get_store_warehouse()
+        blending_warehouse = get_blending_warehouse()
 
-        if not ItemStockTransaction.objects.filter(item=hdpe, ref_id="IN-HDPE-001").exists():
-            record_stock_movement(
-                item_id=hdpe.id,
-                movement_type="inward",
+        if not StoreTransaction.objects.filter(reference_id="IN-HDPE-001").exists():
+            apply_inward_stock(
+                item=hdpe,
+                warehouse=store_warehouse,
                 quantity=Decimal("120.000"),
+                transaction_type=StoreTransaction.TransactionType.MANUAL_INWARD,
+                reference_type=StoreTransaction.ReferenceType.MANUAL,
+                reference_id="IN-HDPE-001",
+                remarks=f"Seeded supplier receipt from {contacts[1].name}",
                 metadata={
-                    "date": "2026-05-03",
-                    "ref_id": "IN-HDPE-001",
-                    "trans_type": "stock movement inward",
-                    "sale_type": "purchase",
                     "doc_id": "PO-7781",
                     "contact": contacts[1].name,
-                    "warehouse": "STORE",
                     "bin": "A1",
                 },
+                created_by=self.admin_user,
+                transaction_date="2026-05-03",
             )
 
-        if not ItemStockTransaction.objects.filter(item=deck_board, ref_id="OUT-DECK-001").exists():
-            record_stock_movement(
-                item_id=deck_board.id,
-                movement_type="outward",
+        if not StoreTransaction.objects.filter(reference_id="OUT-DECK-001").exists():
+            apply_outward_stock(
+                item=deck_board,
+                warehouse=store_warehouse,
                 quantity=Decimal("18.000"),
+                transaction_type=StoreTransaction.TransactionType.MANUAL_OUTWARD,
+                reference_type=StoreTransaction.ReferenceType.MANUAL,
+                reference_id="OUT-DECK-001",
+                remarks=f"Seeded sales issue for {contacts[0].name}",
                 metadata={
-                    "date": "2026-05-04",
-                    "ref_id": "OUT-DECK-001",
-                    "trans_type": "stock movement outward",
-                    "sale_type": "sales",
                     "doc_id": "INV-2201",
                     "contact": contacts[0].name,
-                    "warehouse": "STORE",
                     "bin": "FG1",
                 },
+                created_by=self.admin_user,
+                transaction_date="2026-05-04",
             )
 
-        if not ItemStockTransaction.objects.filter(item=wood_flour, trans_type__icontains="TRANSFER IN").exists():
-            transfer_stock(item_id=wood_flour.id, quantity=Decimal("150.000"))
-
-        if not DepartmentStock.objects.filter(item=hdpe, department=DepartmentStock.Department.STORE).exists():
-            DepartmentStock.objects.create(
-                item=hdpe,
-                department=DepartmentStock.Department.STORE,
-                quantity=hdpe.current_stock,
+        if not StoreTransaction.objects.filter(reference_id="TRF-WOOD-001").exists():
+            transfer_stock(
+                item=wood_flour,
+                quantity=Decimal("150.000"),
+                source_warehouse=store_warehouse,
+                destination_warehouse=blending_warehouse,
+                reference_type=StoreTransaction.ReferenceType.ADJUSTMENT,
+                reference_id="TRF-WOOD-001",
+                remarks="Seeded transfer to blending",
+                created_by=self.admin_user,
+                transaction_date="2026-05-05",
             )
 
     def _seed_presales(self):
