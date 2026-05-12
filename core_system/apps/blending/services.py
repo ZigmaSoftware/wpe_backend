@@ -16,24 +16,15 @@ BLENDING_DEPARTMENT = "BLENDING"
 
 
 def is_additive_item(item) -> bool:
-    searchable = " ".join(
-        [
-            str(item.category or ""),
-            str(item.group or ""),
-            str(item.sub_group or ""),
-            str(item.item_name or ""),
-        ]
-    ).lower()
-    return "additive" in searchable
+    # Legacy helper kept for backward compatibility. Blending requests are no
+    # longer restricted to additive-tagged items.
+    return True
 
 
 def additive_item_query() -> Q:
-    return (
-        Q(item__category__icontains="additive")
-        | Q(item__group__icontains="additive")
-        | Q(item__sub_group__icontains="additive")
-        | Q(item__item_name__icontains="additive")
-    )
+    # Legacy helper kept for backward compatibility. Requestable stock now
+    # includes all available store stock items.
+    return Q()
 
 
 def create_blending_store_request(
@@ -98,6 +89,5 @@ def requestable_additive_stock_queryset():
     return (
         StoreStock.objects.select_related("item", "warehouse")
         .filter(warehouse=store_warehouse, available_qty__gt=0)
-        .filter(additive_item_query())
         .order_by("item__item_name", "id")
     )

@@ -4,7 +4,7 @@ from io import BytesIO
 from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from openpyxl import Workbook
@@ -16,8 +16,10 @@ from apps.store.models import StoreStock, StoreTransaction
 from .models import GRN, QCR
 
 
+@override_settings(INTERNAL_API_KEY="test-internal-key")
 class GRNAPIViewTests(APITestCase):
     def setUp(self):
+        self.client.credentials(HTTP_X_API_KEY="test-internal-key")
         self.url = reverse("grn-create")
         self.receiver_url = reverse("grn-receiver-create")
         self.view_url = reverse("grn-view-list")
@@ -240,21 +242,9 @@ class GRNAPIViewTests(APITestCase):
         self.assertEqual(grn.item_id, "ITEM-RCV-001")
         self.assertEqual(grn.raw_payload["items"][1]["item_id"], "ITEM-RCV-002")
         self.assertTrue(re.fullmatch(r"WPE-\d{8}", grn.unique_id))
-
-        first_item = Item.objects.get(external_item_id="ITEM-RCV-001")
-        second_item = Item.objects.get(external_item_id="ITEM-RCV-002")
-        self.assertEqual(first_item.item_name, "Receiver Item 1")
-        self.assertEqual(second_item.item_name, "Receiver Item 2")
-        self.assertEqual(str(first_item.current_stock), "10.000")
-        self.assertEqual(str(second_item.current_stock), "5.000")
-        self.assertEqual(str(StoreStock.objects.get(item=first_item).quantity), "10.000")
-        self.assertEqual(str(StoreStock.objects.get(item=second_item).quantity), "5.000")
-        self.assertEqual(
-            StoreTransaction.objects.filter(
-                transaction_type=StoreTransaction.TransactionType.GRN_IN,
-            ).count(),
-            2,
-        )
+        self.assertEqual(Item.objects.filter(external_item_id__in=["ITEM-RCV-001", "ITEM-RCV-002"]).count(), 0)
+        self.assertEqual(StoreStock.objects.count(), 0)
+        self.assertEqual(StoreTransaction.objects.count(), 0)
 
     def test_grn_receiver_duplicate_returns_200_without_creating_duplicate(self):
         payload = self.build_receiver_payload("GRN-RCV-DUP")
@@ -278,13 +268,9 @@ class GRNAPIViewTests(APITestCase):
             },
         )
         self.assertEqual(GRN.objects.filter(grn_no="GRN-RCV-DUP").count(), 1)
-        self.assertEqual(Item.objects.filter(external_item_id__in=["ITEM-RCV-001", "ITEM-RCV-002"]).count(), 2)
-        self.assertEqual(
-            StoreTransaction.objects.filter(
-                transaction_type=StoreTransaction.TransactionType.GRN_IN,
-            ).count(),
-            2,
-        )
+        self.assertEqual(Item.objects.filter(external_item_id__in=["ITEM-RCV-001", "ITEM-RCV-002"]).count(), 0)
+        self.assertEqual(StoreStock.objects.count(), 0)
+        self.assertEqual(StoreTransaction.objects.count(), 0)
 
     def test_grn_receiver_invalid_payload_returns_400(self):
         payload = self.build_receiver_payload("GRN-RCV-BAD")
@@ -347,7 +333,7 @@ class GRNAPIViewTests(APITestCase):
             },
         )
 
-    def test_grn_receiver_reuses_existing_item_by_product_name_and_backfills_external_item_id(self):
+    def test_grn_receiver_does_not_touch_store_items_before_qcr_move(self):
         existing_item = Item.objects.create(
             category="GRN Imported",
             group="Inbound GRN",
@@ -363,12 +349,14 @@ class GRNAPIViewTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         existing_item.refresh_from_db()
-        self.assertEqual(existing_item.external_item_id, "ITEM-RCV-001")
-        self.assertEqual(str(existing_item.current_stock), "10.000")
+        self.assertIsNone(existing_item.external_item_id)
+        self.assertEqual(str(existing_item.current_stock), "0.000")
         self.assertEqual(Item.objects.filter(item_name="Receiver Item 1").count(), 1)
-        self.assertEqual(Item.objects.filter(external_item_id="ITEM-RCV-002").count(), 1)
+        self.assertEqual(Item.objects.filter(external_item_id="ITEM-RCV-002").count(), 0)
+        self.assertEqual(StoreStock.objects.count(), 0)
+        self.assertEqual(StoreTransaction.objects.count(), 0)
 
-    def test_grn_receiver_returns_400_when_item_id_and_product_name_map_to_different_store_items(self):
+    def test_grn_receiver_does_not_validate_store_item_resolution_before_qcr_move(self):
         Item.objects.create(
             category="GRN Imported",
             group="Inbound GRN",
@@ -392,21 +380,10 @@ class GRNAPIViewTests(APITestCase):
 
         response = self.client.post(self.receiver_url, payload, format="json")
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data["status"], "error")
-        self.assertEqual(response.data["message"], "Payload validation failed.")
-        self.assertEqual(response.data["response_code"], "WPE-VAL-000400")
-        self.assertEqual(response.data["grn_no"], "GRN-RCV-CONFLICT")
-        self.assertEqual(
-            response.data["errors"],
-            {
-                "item_id": ["Sender item ID matches a different store item than the product name provided."],
-                "product_description": [
-                    "Product name matches a different store item than the sender item ID provided."
-                ],
-            },
-        )
-        self.assertFalse(GRN.objects.filter(grn_no="GRN-RCV-CONFLICT").exists())
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["status"], "sent")
+        self.assertTrue(GRN.objects.filter(grn_no="GRN-RCV-CONFLICT").exists())
+        self.assertEqual(StoreStock.objects.count(), 0)
         self.assertEqual(StoreTransaction.objects.count(), 0)
 
     def test_grn_receiver_invalid_json_returns_structured_400(self):
@@ -480,9 +457,11 @@ class GRNAPIViewTests(APITestCase):
         self.assertEqual(grn.req_date, "2026-04-30")
 
 
+@override_settings(INTERNAL_API_KEY="test-internal-key")
 class GRNQCRFlowTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        self.client.credentials(HTTP_X_API_KEY="test-internal-key")
 
     def test_moved_grn_is_removed_from_grn_list(self):
         grn = GRN.objects.create(grn_no="GRN-101")
@@ -501,7 +480,34 @@ class GRNQCRFlowTests(TestCase):
         self.assertEqual(list_response.json()["data"], [])
 
     def test_qcr_move_to_grn_reenables_record_in_grn_list(self):
-        grn = GRN.objects.create(grn_no="GRN-102", status=False, process_status="Moved to QCR")
+        grn = GRN.objects.create(
+            grn_no="GRN-102",
+            grn_date=date(2026, 5, 5),
+            trade_name="Acme Polymers",
+            item_id="ITEM-GRN-102",
+            product_description="Reenabled GRN Item",
+            accepted_qty="8.00",
+            unit="kg",
+            raw_payload={
+                "document_details": {
+                    "grn_no": "GRN-102",
+                    "grn_date": "2026-05-05",
+                },
+                "supplier_details": {
+                    "trade_name": "Acme Polymers",
+                },
+                "items": [
+                    {
+                        "item_id": "ITEM-GRN-102",
+                        "product_description": "Reenabled GRN Item",
+                        "unit": "kg",
+                        "accepted_qty": "8.000",
+                    }
+                ],
+            },
+            status=False,
+            process_status="Moved to QCR",
+        )
         qcr = QCR.objects.create(
             source_grn=grn,
             grn_reference_no=grn.grn_no,
@@ -538,6 +544,67 @@ class GRNQCRFlowTests(TestCase):
         self.assertEqual(moved_response.status_code, 200)
         self.assertEqual(len(moved_response.json()), 1)
         self.assertEqual(moved_response.json()[0]["id"], qcr.id)
+
+    def test_qcr_move_to_grn_syncs_store_stock(self):
+        payload = {
+            "document_details": {
+                "grn_no": "GRN-107",
+                "grn_date": "2026-05-05",
+            },
+            "supplier_details": {
+                "trade_name": "Acme Polymers",
+            },
+            "items": [
+                {
+                    "item_id": "ITEM-MOVE-001",
+                    "product_description": "QCR Move Item",
+                    "unit": "kg",
+                    "accepted_qty": "12.500",
+                }
+            ],
+        }
+        grn = GRN.objects.create(
+            grn_no="GRN-107",
+            grn_date=date(2026, 5, 5),
+            trade_name="Acme Polymers",
+            item_id="ITEM-MOVE-001",
+            product_description="QCR Move Item",
+            accepted_qty="12.50",
+            unit="kg",
+            raw_payload=payload,
+            status=False,
+            process_status="Moved to QCR",
+        )
+        qcr = QCR.objects.create(
+            source_grn=grn,
+            grn_reference_no=grn.grn_no,
+            snapshot={"grn_no": grn.grn_no},
+            status="Active",
+            moved_to_qcr_at=grn.created_at,
+        )
+
+        self.assertEqual(StoreStock.objects.count(), 0)
+        self.assertEqual(StoreTransaction.objects.count(), 0)
+
+        update_response = self.client.post(
+            f"/api/qcr/{qcr.id}/status/",
+            {"action": "move_to_grn"},
+            format="json",
+        )
+
+        self.assertEqual(update_response.status_code, 200)
+
+        item = Item.objects.get(external_item_id="ITEM-MOVE-001")
+        stock_row = StoreStock.objects.get(item=item)
+
+        self.assertEqual(item.item_name, "QCR Move Item")
+        self.assertEqual(str(stock_row.quantity), "12.500")
+        self.assertEqual(
+            StoreTransaction.objects.filter(
+                transaction_type=StoreTransaction.TransactionType.GRN_INWARD,
+            ).count(),
+            1,
+        )
 
     def test_qcr_list_shows_only_active_records_by_default(self):
         active_grn = GRN.objects.create(grn_no="GRN-103", status=False, process_status="Moved to QCR")
