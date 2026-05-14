@@ -2,13 +2,14 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.test import override_settings
+from rest_framework.exceptions import ValidationError
 from rest_framework.test import APIClient, APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.admin_master.models import Staff, UserCreation, UserType
 from apps.items.models import Item
 from apps.store.models import StockRequest, StoreTransaction
-from apps.store.services import apply_inward_stock, get_blending_warehouse, get_store_warehouse
+from apps.store.services import apply_inward_stock, apply_outward_stock, get_blending_warehouse, get_store_warehouse
 
 
 @override_settings(INTERNAL_API_KEY="test-internal-key")
@@ -398,3 +399,156 @@ class BlendingStoreRequestTests(APITestCase):
         )
 
         self.assertEqual(approve_response.status_code, 403)
+
+    def test_blending_inventory_summary_api_returns_current_stock_totals(self):
+        primary_item = Item.objects.create(
+            category="Additive",
+            group="blend",
+            sub_group="mix additive",
+            item_name="Primary Blending Item",
+            unit="kg",
+        )
+        secondary_item = Item.objects.create(
+            category="Additive",
+            group="blend",
+            sub_group="processing additive",
+            item_name="Secondary Blending Item",
+            unit="kg",
+        )
+        apply_inward_stock(
+            item=primary_item,
+            warehouse=self.blending_warehouse,
+            quantity="8.000",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_INWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="BLEND-IN-1",
+            created_by=self.store_user,
+            transaction_date="2026-05-08",
+        )
+        apply_outward_stock(
+            item=primary_item,
+            warehouse=self.blending_warehouse,
+            quantity="2.500",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_OUTWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="BLEND-OUT-1",
+            created_by=self.store_user,
+            transaction_date="2026-05-09",
+        )
+        apply_inward_stock(
+            item=secondary_item,
+            warehouse=self.blending_warehouse,
+            quantity="6.000",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_INWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="BLEND-IN-2",
+            created_by=self.store_user,
+            transaction_date="2026-05-01",
+        )
+
+        summary_response = self.client.get(
+            f"/api/blending/inventory/summary/?item_id={primary_item.id}&search=Primary&page=1&page_size=10"
+        )
+
+        self.assertEqual(summary_response.status_code, 200)
+        self.assertEqual(summary_response.data["data"]["count"], 1)
+        self.assertEqual(summary_response.data["data"]["results"][0]["item_id"], primary_item.id)
+        self.assertEqual(summary_response.data["data"]["results"][0]["item_name"], primary_item.item_name)
+        self.assertEqual(summary_response.data["data"]["results"][0]["total_inward"], "8.000")
+        self.assertEqual(summary_response.data["data"]["results"][0]["total_outward"], "2.500")
+        self.assertEqual(summary_response.data["data"]["results"][0]["current_stock"], "5.500")
+        self.assertTrue(summary_response.data["data"]["results"][0]["last_updated"])
+
+    def test_blending_inventory_history_api_returns_latest_first(self):
+        item = Item.objects.create(
+            category="Additive",
+            group="blend",
+            sub_group="history additive",
+            item_name="History Blending Item",
+            unit="kg",
+        )
+        apply_inward_stock(
+            item=item,
+            warehouse=self.blending_warehouse,
+            quantity="5.000",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_INWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="BLEND-HIST-IN-1",
+            created_by=self.store_user,
+            transaction_date="2026-05-08",
+        )
+        apply_outward_stock(
+            item=item,
+            warehouse=self.blending_warehouse,
+            quantity="1.500",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_OUTWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="BLEND-HIST-OUT-1",
+            created_by=self.store_user,
+            transaction_date="2026-05-09",
+        )
+        apply_inward_stock(
+            item=item,
+            warehouse=self.blending_warehouse,
+            quantity="2.000",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_INWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="BLEND-HIST-IN-2",
+            created_by=self.store_user,
+            transaction_date="2026-05-10",
+        )
+
+        response = self.client.get(f"/api/blending/inventory/{item.id}/history/?page=1&page_size=10")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["count"], 3)
+        latest_row = response.data["data"]["results"][0]
+        self.assertEqual(latest_row["transaction_type"], "INWARD")
+        self.assertEqual(latest_row["quantity"], "2.000")
+        self.assertEqual(latest_row["opening_stock"], "3.500")
+        self.assertEqual(latest_row["closing_stock"], "5.500")
+        self.assertEqual(latest_row["reference_no"], "BLEND-HIST-IN-2")
+        self.assertEqual(latest_row["module"], "MANUAL")
+        self.assertEqual(latest_row["created_by"], self.store_user.username)
+
+    def test_blending_inventory_legacy_monitoring_endpoints_are_removed(self):
+        response = self.client.get("/api/blending/stock/current/")
+        self.assertEqual(response.status_code, 404)
+
+        response = self.client.post("/api/blending/stock/inward/", {}, format="json")
+        self.assertEqual(response.status_code, 404)
+
+        response = self.client.post("/api/blending/stock/outward/", {}, format="json")
+        self.assertEqual(response.status_code, 404)
+
+    def test_blending_inventory_outward_rejects_quantity_above_current_stock(self):
+        item = Item.objects.create(
+            category="Additive",
+            group="blend",
+            sub_group="stabilizer",
+            item_name="Constrained Blending Item",
+            unit="kg",
+        )
+        apply_inward_stock(
+            item=item,
+            warehouse=self.blending_warehouse,
+            quantity="1.500",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_INWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="BLEND-IN-3",
+            created_by=self.store_user,
+            transaction_date="2026-05-12",
+        )
+
+        with self.assertRaises(ValidationError) as exc:
+            apply_outward_stock(
+                item=item,
+                warehouse=self.blending_warehouse,
+                quantity="2.000",
+                transaction_type=StoreTransaction.TransactionType.MANUAL_OUTWARD,
+                reference_type=StoreTransaction.ReferenceType.MANUAL,
+                reference_id="BLEND-OUT-2",
+                created_by=self.store_user,
+                transaction_date="2026-05-12",
+            )
+        self.assertIn("quantity", exc.exception.detail)
