@@ -847,7 +847,7 @@ class GRNAPIViewMixin:
         try:
             data = request.data
             if any(key in data for key in RECEIVER_NESTED_KEYS):
-                payload = map_nested_grn_payload(data)
+                payload = build_receiver_grn_payload(data)
             elif hasattr(data, "dict"):
                 payload = data.dict()
             else:

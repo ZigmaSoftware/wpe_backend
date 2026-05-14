@@ -11,6 +11,7 @@ from .permissions import IsStoreUser
 from .selectors import (
     availability_map_for_requests,
     current_stock_queryset,
+    stock_source_map_for_stock_rows,
     stock_dashboard_summary,
     stock_ledger_queryset,
     store_request_queryset,
@@ -44,13 +45,15 @@ class WrappedListAPIView(QueryParamFilterMixin, generics.ListAPIView):
         queryset = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(queryset)
         if page is not None:
+            self._serializer_rows = list(page)
             serializer = self.get_serializer(page, many=True)
             return success_response(
                 message=self.list_message,
                 data=self.paginator.get_paginated_data(serializer.data),
             )
 
-        serializer = self.get_serializer(queryset, many=True)
+        self._serializer_rows = list(queryset)
+        serializer = self.get_serializer(self._serializer_rows, many=True)
         return success_response(
             message=self.list_message,
             data={"count": len(serializer.data), "results": serializer.data},
@@ -242,6 +245,13 @@ class StoreStockListAPIView(WrappedListAPIView):
         if warehouse_code:
             queryset = queryset.filter(warehouse__code__iexact=warehouse_code)
         return queryset
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        rows = getattr(self, "_serializer_rows", None)
+        if rows is not None:
+            context["stock_source_map"] = stock_source_map_for_stock_rows(rows)
+        return context
 
 
 class StoreTransactionListAPIView(WrappedListAPIView):

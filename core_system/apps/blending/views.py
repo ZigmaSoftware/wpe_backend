@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from common.drf import QueryParamFilterMixin, StandardResultsSetPagination, success_response
 
 from apps.store.models import StockRequest
-from apps.store.selectors import availability_map_for_requests, store_request_queryset
+from apps.store.selectors import availability_map_for_requests, stock_source_map_for_stock_rows, store_request_queryset
 from apps.store.serializers import (
     StockRequestCancelSerializer,
     StockRequestCreateSerializer,
@@ -38,13 +38,15 @@ class WrappedBlendingListAPIView(QueryParamFilterMixin, generics.ListAPIView):
         queryset = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(queryset)
         if page is not None:
+            self._serializer_rows = list(page)
             serializer = self.get_serializer(page, many=True)
             return success_response(
                 message=self.list_message,
                 data=self.paginator.get_paginated_data(serializer.data),
             )
 
-        serializer = self.get_serializer(queryset, many=True)
+        self._serializer_rows = list(queryset)
+        serializer = self.get_serializer(self._serializer_rows, many=True)
         return success_response(
             message=self.list_message,
             data={"count": len(serializer.data), "results": serializer.data},
@@ -75,7 +77,8 @@ class RequestBlendingStockAPIView(generics.GenericAPIView):
     def get(self, request, *args, **kwargs):
         queryset = self.filter_queryset(requestable_additive_stock_queryset())
         page = self.paginate_queryset(queryset)
-        serializer = self.get_serializer(page if page is not None else queryset, many=True)
+        self._serializer_rows = list(page) if page is not None else list(queryset)
+        serializer = self.get_serializer(self._serializer_rows, many=True)
 
         if page is not None:
             return success_response(
@@ -87,6 +90,13 @@ class RequestBlendingStockAPIView(generics.GenericAPIView):
             message="Requestable store stock fetched successfully.",
             data={"count": len(serializer.data), "results": serializer.data},
         )
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        rows = getattr(self, "_serializer_rows", None)
+        if rows is not None:
+            context["stock_source_map"] = stock_source_map_for_stock_rows(rows)
+        return context
 
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -282,6 +292,13 @@ class BlendingStockListAPIView(WrappedBlendingListAPIView):
             return requestable_additive_stock_queryset()
         return blending_stock_queryset()
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        rows = getattr(self, "_serializer_rows", None)
+        if rows is not None:
+            context["stock_source_map"] = stock_source_map_for_stock_rows(rows)
+        return context
+
 
 class BlendingRequestableAdditiveStockListAPIView(WrappedBlendingListAPIView):
     serializer_class = BlendingStockSerializer
@@ -303,3 +320,10 @@ class BlendingRequestableAdditiveStockListAPIView(WrappedBlendingListAPIView):
 
     def get_queryset(self):
         return requestable_additive_stock_queryset()
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        rows = getattr(self, "_serializer_rows", None)
+        if rows is not None:
+            context["stock_source_map"] = stock_source_map_for_stock_rows(rows)
+        return context

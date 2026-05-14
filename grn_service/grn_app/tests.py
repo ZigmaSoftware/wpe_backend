@@ -212,6 +212,53 @@ class GRNAPIViewTests(APITestCase):
         self.assertEqual(response.data["grn_no"], "GRN-003")
         self.assertTrue(GRN.objects.filter(grn_no="GRN-003").exists())
 
+    def test_grn_create_accepts_nested_payload_with_blank_numeric_and_date_fields(self):
+        payload = {
+            "document_details": {
+                "grn_no": "GRN-EMPTY-001",
+                "po_date": "",
+                "grn_date": "",
+                "supplier_invoice_date": "",
+                "gateentry_bookdate": "",
+            },
+            "supplier_details": {
+                "email": "",
+            },
+            "items": [
+                {
+                    "item_id": "ITEM-EMPTY-001",
+                    "item_serial_number": "",
+                    "total_quantity": "",
+                    "quantity": "",
+                    "free_quantity": "",
+                    "accepted_qty": "",
+                    "rejected_qty": "",
+                    "unit_price": "",
+                    "total_amount": "",
+                    "assessable_value": "",
+                    "gst_rate": "",
+                    "igst_amount": "",
+                    "cgst_amount": "",
+                    "sgst_amount": "",
+                    "total_item_value": "",
+                }
+            ],
+            "value_details": {
+                "freight_charge": "",
+                "total_before_tax": "",
+                "total_tax_amount": "",
+                "total_after_tax": "",
+            },
+        }
+
+        response = self.client.post(self.url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        grn = GRN.objects.get(grn_no="GRN-EMPTY-001")
+        self.assertIsNone(grn.grn_date)
+        self.assertIsNone(grn.quantity)
+        self.assertEqual(grn.raw_payload["items"][0]["item_id"], "ITEM-EMPTY-001")
+
     def test_grn_receiver_creates_grn_from_sender_payload(self):
         payload = self.build_receiver_payload()
         response = self.client.post(
