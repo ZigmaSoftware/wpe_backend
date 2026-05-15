@@ -6,6 +6,7 @@ from rest_framework.response import Response
 
 from common.drf import QueryParamFilterMixin, StandardResultsSetPagination, success_response
 
+from .inventory_monitoring import BaseInventoryHistoryAPIView, BaseInventorySummaryAPIView
 from .models import StockRequest, StoreStock, StoreTransaction
 from .permissions import IsStoreUser
 from .selectors import (
@@ -30,6 +31,7 @@ from .services import (
     apply_inward_stock,
     apply_outward_stock,
     approve_stock_request,
+    get_store_warehouse,
     reject_stock_request,
     request_stock,
 )
@@ -303,6 +305,22 @@ class StockDashboardAPIView(generics.GenericAPIView):
             "warehouses": StoreStock.objects.values("warehouse_id").distinct().count(),
         }
         return success_response(message="Stock dashboard fetched successfully.", data=data)
+
+
+class StoreInventorySummaryAPIView(BaseInventorySummaryAPIView):
+    permission_classes = [IsAuthenticated, IsStoreUser]
+    list_message = "Store inventory summary fetched successfully."
+
+    def get_warehouse(self):
+        return get_store_warehouse()
+
+
+class StoreInventoryHistoryAPIView(BaseInventoryHistoryAPIView):
+    permission_classes = [IsAuthenticated, IsStoreUser]
+    list_message = "Store inventory history fetched successfully."
+
+    def get_warehouse(self):
+        return get_store_warehouse()
 
 
 class StockInwardAPIView(generics.GenericAPIView):

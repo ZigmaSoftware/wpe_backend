@@ -10,7 +10,7 @@ from apps.admin_master.models import Staff, UserCreation, UserType
 from apps.items.models import Item
 
 from .models import StockRequest, StoreStock, StoreTransaction
-from .services import add_stock_from_grn, apply_inward_stock, get_blending_warehouse, get_store_warehouse
+from .services import add_stock_from_grn, apply_inward_stock, apply_outward_stock, get_blending_warehouse, get_store_warehouse
 
 
 @override_settings(INTERNAL_API_KEY="test-internal-key")
@@ -276,3 +276,158 @@ class StoreWorkflowTests(APITestCase):
             add_stock_from_grn(payload, created_by=self.store_user)
 
         self.assertIn("process_status", exc.exception.detail)
+
+    def test_store_inventory_summary_api_returns_current_stock_totals(self):
+        primary_item = Item.objects.create(
+            category="Raw Material",
+            group="polymer",
+            sub_group="hdpe",
+            item_name="Primary Store Item",
+            unit="kg",
+        )
+        secondary_item = Item.objects.create(
+            category="Consumable",
+            group="packing",
+            sub_group="labels",
+            item_name="Secondary Store Item",
+            unit="pcs",
+        )
+        apply_inward_stock(
+            item=primary_item,
+            warehouse=self.store_warehouse,
+            quantity="10.000",
+            transaction_type=StoreTransaction.TransactionType.OPENING_STOCK,
+            reference_type=StoreTransaction.ReferenceType.OPENING_STOCK,
+            reference_id="STORE-OPEN-1",
+            created_by=self.store_user,
+            transaction_date="2026-05-10",
+        )
+        apply_outward_stock(
+            item=primary_item,
+            warehouse=self.store_warehouse,
+            quantity="4.000",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_OUTWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="STORE-OUT-1",
+            created_by=self.store_user,
+            transaction_date="2026-05-11",
+        )
+        apply_inward_stock(
+            item=secondary_item,
+            warehouse=self.store_warehouse,
+            quantity="2.000",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_INWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="STORE-IN-2",
+            created_by=self.store_user,
+            transaction_date="2026-05-01",
+        )
+
+        summary_response = self.store_client.get(
+            f"/api/store/inventory/summary/?item_id={primary_item.id}&search=Primary&page=1&page_size=10"
+        )
+
+        self.assertEqual(summary_response.status_code, 200)
+        self.assertEqual(summary_response.data["data"]["count"], 1)
+        self.assertEqual(summary_response.data["data"]["results"][0]["item_id"], primary_item.id)
+        self.assertEqual(summary_response.data["data"]["results"][0]["item_name"], primary_item.item_name)
+        self.assertEqual(summary_response.data["data"]["results"][0]["total_inward"], "10.000")
+        self.assertEqual(summary_response.data["data"]["results"][0]["total_outward"], "4.000")
+        self.assertEqual(summary_response.data["data"]["results"][0]["current_stock"], "6.000")
+        self.assertTrue(summary_response.data["data"]["results"][0]["last_updated"])
+
+    def test_store_inventory_history_api_returns_latest_first(self):
+        item = Item.objects.create(
+            category="Raw Material",
+            group="polymer",
+            sub_group="lldpe",
+            item_name="History Store Item",
+            unit="kg",
+        )
+        apply_inward_stock(
+            item=item,
+            warehouse=self.store_warehouse,
+            quantity="10.000",
+            transaction_type=StoreTransaction.TransactionType.OPENING_STOCK,
+            reference_type=StoreTransaction.ReferenceType.OPENING_STOCK,
+            reference_id="STORE-HIST-OPEN",
+            created_by=self.store_user,
+            transaction_date="2026-05-10",
+        )
+        apply_outward_stock(
+            item=item,
+            warehouse=self.store_warehouse,
+            quantity="3.000",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_OUTWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="STORE-HIST-OUT",
+            created_by=self.store_user,
+            transaction_date="2026-05-11",
+        )
+        apply_inward_stock(
+            item=item,
+            warehouse=self.store_warehouse,
+            quantity="2.000",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_INWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="STORE-HIST-IN",
+            created_by=self.store_user,
+            transaction_date="2026-05-12",
+        )
+
+        response = self.store_client.get(f"/api/store/inventory/{item.id}/history/?page=1&page_size=10")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["count"], 3)
+        latest_row = response.data["data"]["results"][0]
+        self.assertEqual(latest_row["transaction_type"], "INWARD")
+        self.assertEqual(latest_row["quantity"], "2.000")
+        self.assertEqual(latest_row["opening_stock"], "7.000")
+        self.assertEqual(latest_row["closing_stock"], "9.000")
+        self.assertEqual(latest_row["reference_no"], "STORE-HIST-IN")
+        self.assertEqual(latest_row["module"], "MANUAL")
+        self.assertEqual(latest_row["created_by"], self.store_user.username)
+
+    def test_store_inventory_legacy_monitoring_endpoints_are_removed(self):
+        response = self.store_client.get("/api/store/stock/current/")
+        self.assertEqual(response.status_code, 404)
+
+        response = self.store_client.post("/api/store/stock/inward/", {}, format="json")
+        self.assertEqual(response.status_code, 404)
+
+        response = self.store_client.post("/api/store/stock/outward/", {}, format="json")
+        self.assertEqual(response.status_code, 404)
+
+    def test_store_inventory_outward_rejects_quantity_above_current_stock(self):
+        item = Item.objects.create(
+            category="Raw Material",
+            group="polymer",
+            sub_group="pp",
+            item_name="Constrained Store Item",
+            unit="kg",
+        )
+        apply_inward_stock(
+            item=item,
+            warehouse=self.store_warehouse,
+            quantity="3.000",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_INWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="STORE-IN-3",
+            created_by=self.store_user,
+            transaction_date="2026-05-10",
+        )
+
+        with self.assertRaises(ValidationError) as exc:
+            apply_outward_stock(
+                item=item,
+                warehouse=self.store_warehouse,
+                quantity="5.000",
+                transaction_type=StoreTransaction.TransactionType.MANUAL_OUTWARD,
+                reference_type=StoreTransaction.ReferenceType.MANUAL,
+                reference_id="STORE-OUT-2",
+                created_by=self.store_user,
+                transaction_date="2026-05-11",
+            )
+
+        self.assertIn("quantity", exc.exception.detail)
+        self.assertEqual(StoreTransaction.objects.filter(item=item, warehouse=self.store_warehouse).count(), 1)

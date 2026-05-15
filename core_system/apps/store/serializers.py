@@ -10,8 +10,7 @@ from .models import StockRequest, StockRequestItem, StoreStock, StoreTransaction
 
 
 def serialize_quantity(value) -> str:
-    decimal_value = value if value is not None else STOCK_ZERO
-    return f"{decimal_value:.3f}"
+    return f"{(value or STOCK_ZERO):.3f}"
 
 
 class WarehouseSerializer(serializers.ModelSerializer):

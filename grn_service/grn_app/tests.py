@@ -21,6 +21,7 @@ class GRNAPIViewTests(APITestCase):
     def setUp(self):
         self.client.credentials(HTTP_X_API_KEY="test-internal-key")
         self.url = reverse("grn-create")
+        self.detail_url = lambda pk: reverse("grn-detail", kwargs={"pk": pk})
         self.receiver_url = reverse("grn-receiver-create")
         self.view_url = reverse("grn-view-list")
         self.import_url = reverse("grn-import")
@@ -159,6 +160,7 @@ class GRNAPIViewTests(APITestCase):
             response.data["data"][0]["items"][0]["product_description"],
             self.second_grn.product_description,
         )
+        self.assertEqual(response.data["data"][0]["raw_payload"], {})
 
     def test_get_grn_list_exposes_flat_department_compatibility_fields(self):
         grn = GRN.objects.create(
@@ -212,52 +214,111 @@ class GRNAPIViewTests(APITestCase):
         self.assertEqual(response.data["grn_no"], "GRN-003")
         self.assertTrue(GRN.objects.filter(grn_no="GRN-003").exists())
 
-    def test_grn_create_accepts_nested_payload_with_blank_numeric_and_date_fields(self):
-        payload = {
-            "document_details": {
-                "grn_no": "GRN-EMPTY-001",
-                "po_date": "",
-                "grn_date": "",
-                "supplier_invoice_date": "",
-                "gateentry_bookdate": "",
-            },
-            "supplier_details": {
-                "email": "",
-            },
-            "items": [
-                {
-                    "item_id": "ITEM-EMPTY-001",
-                    "item_serial_number": "",
-                    "total_quantity": "",
-                    "quantity": "",
-                    "free_quantity": "",
-                    "accepted_qty": "",
-                    "rejected_qty": "",
-                    "unit_price": "",
-                    "total_amount": "",
-                    "assessable_value": "",
-                    "gst_rate": "",
-                    "igst_amount": "",
-                    "cgst_amount": "",
-                    "sgst_amount": "",
-                    "total_item_value": "",
-                }
-            ],
-            "value_details": {
-                "freight_charge": "",
-                "total_before_tax": "",
-                "total_tax_amount": "",
-                "total_after_tax": "",
-            },
-        }
+    def test_grn_detail_patch_updates_only_allowed_nested_fields(self):
+        payload = self.build_receiver_payload("GRN-EDIT-001")
+        grn = GRN.objects.create(
+            grn_no="GRN-EDIT-001",
+            po_no="PO-RCV-001",
+            po_date=date(2026, 4, 30),
+            grn_date=date(2026, 4, 30),
+            supplier_invoice_no="INV-001",
+            supplier_invoice_date=date(2026, 4, 30),
+            gateentry_bookno="GATE-001",
+            gateentry_bookdate=date(2026, 4, 30),
+            tolerance="0",
+            req_date="2026-04-30",
+            req_person_name="Requester",
+            req_person_id="REQ-001",
+            req_department="Purchase",
+            req_reason="Stock",
+            supplier_id="SUP-RCV-001",
+            trade_name="Receiver Supplier",
+            item_id="ITEM-RCV-001",
+            item_serial_number=1,
+            product_description="Receiver Item 1",
+            accepted_qty="10.00",
+            rejected_qty="0.00",
+            free_quantity="0.00",
+            raw_payload=payload,
+        )
 
-        response = self.client.post(self.url, payload, format="json")
+        response = self.client.patch(
+            self.detail_url(grn.id),
+            {
+                "document_details": {
+                    "po_no": "PO-ATTEMPTED-CHANGE",
+                    "gateentry_bookno": "GATE-EDIT-100",
+                    "gateentry_bookdate": "2026-05-02",
+                    "tolerance": "2",
+                },
+                "document_requirement_details": {
+                    "req_department": "Stores",
+                    "req_reason": "Physical inward correction",
+                },
+                "supplier_details": {
+                    "trade_name": "Attempted Supplier Change",
+                },
+                "items": [
+                    {
+                        "item_id": "ITEM-ATTEMPTED-CHANGE",
+                        "item_serial_number": 3,
+                        "accepted_qty": "8.50",
+                        "rejected_qty": "1.50",
+                    },
+                    {
+                        "accepted_qty": "4.00",
+                        "rejected_qty": "1.00",
+                    },
+                ],
+            },
+            format="json",
+        )
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        grn = GRN.objects.get(grn_no="GRN-EMPTY-001")
-        self.assertIsNone(grn.grn_date)
-        self.assertIsNone(grn.quantity)
-        self.assertEqual(grn.raw_payload["items"][0]["item_id"], "ITEM-EMPTY-001")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "success")
+        self.assertEqual(response.data["data"]["document_details"]["gateentry_bookno"], "GATE-EDIT-100")
+        self.assertEqual(response.data["data"]["document_requirement_details"]["req_department"], "Stores")
+        self.assertEqual(response.data["data"]["items"][0]["accepted_qty"], "8.50")
+        self.assertEqual(response.data["data"]["items"][1]["accepted_qty"], "4.00")
+
+        grn.refresh_from_db()
+        self.assertEqual(grn.po_no, "PO-RCV-001")
+        self.assertEqual(grn.gateentry_bookno, "GATE-EDIT-100")
+        self.assertEqual(str(grn.gateentry_bookdate), "2026-05-02")
+        self.assertEqual(grn.req_department, "Stores")
+        self.assertEqual(grn.req_reason, "Physical inward correction")
+        self.assertEqual(grn.trade_name, "Receiver Supplier")
+        self.assertEqual(grn.item_id, "ITEM-RCV-001")
+        self.assertEqual(grn.item_serial_number, 3)
+        self.assertEqual(str(grn.accepted_qty), "8.50")
+        self.assertEqual(str(grn.rejected_qty), "1.50")
+        self.assertEqual(grn.raw_payload["document_details"]["po_no"], "PO-RCV-001")
+        self.assertEqual(grn.raw_payload["document_details"]["gateentry_bookno"], "GATE-EDIT-100")
+        self.assertEqual(grn.raw_payload["supplier_details"]["trade_name"], "Receiver Supplier")
+        self.assertEqual(grn.raw_payload["items"][0]["item_id"], "ITEM-RCV-001")
+        self.assertEqual(grn.raw_payload["items"][0]["item_serial_number"], 3)
+        self.assertEqual(grn.raw_payload["items"][1]["accepted_qty"], "4.00")
+
+    def test_grn_detail_patch_rejects_inactive_records(self):
+        grn = GRN.objects.create(
+            grn_no="GRN-EDIT-LOCKED",
+            status=False,
+            process_status="Moved to QCR",
+        )
+
+        response = self.client.patch(
+            self.detail_url(grn.id),
+            {
+                "document_requirement_details": {
+                    "req_department": "Stores",
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["status"], "error")
+        self.assertIn("Only active GRN Process records can be updated", response.data["message"])
 
     def test_grn_receiver_creates_grn_from_sender_payload(self):
         payload = self.build_receiver_payload()

@@ -175,6 +175,43 @@ INTEGER_FIELDS = {"item_serial_number"}
 BOOLEAN_FIELDS = {"status"}
 REQUIRED_FIELDS = ("grn_no",)
 RECEIVER_NESTED_KEYS = {"document_details", "document_requirement_details", "supplier_details", "items", "value_details"}
+EDITABLE_DOCUMENT_DETAILS_FIELDS = {
+    "gateentry_bookno",
+    "gateentry_bookdate",
+    "tolerance",
+}
+EDITABLE_REQUIREMENT_DETAILS_FIELDS = {
+    "req_date",
+    "req_person_name",
+    "req_person_id",
+    "req_department",
+    "req_reason",
+}
+EDITABLE_ITEM_FIELDS = {
+    "item_serial_number",
+    "free_quantity",
+    "accepted_qty",
+    "rejected_qty",
+}
+EDITABLE_NESTED_FIELD_MAP = {
+    "document_details": EDITABLE_DOCUMENT_DETAILS_FIELDS,
+    "document_requirement_details": EDITABLE_REQUIREMENT_DETAILS_FIELDS,
+    "items": EDITABLE_ITEM_FIELDS,
+}
+EDITABLE_FLAT_FIELDS = {
+    "gateentry_bookno",
+    "gateentry_bookdate",
+    "tolerance",
+    "req_date",
+    "req_person_name",
+    "req_person_id",
+    "req_department",
+    "req_reason",
+    "item_serial_number",
+    "free_quantity",
+    "accepted_qty",
+    "rejected_qty",
+}
 RECEIVER_REQUIRED_FIELDS = (
     "document_details.grn_no",
     "document_details.po_no",
@@ -592,6 +629,100 @@ def build_receiver_grn_payload(data: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def build_grn_edit_payload(grn: GRN) -> dict[str, Any]:
+    payload = deepcopy(grn.raw_payload if isinstance(grn.raw_payload, dict) else {})
+    serialized = GRNReadSerializer(grn).data
+
+    for section_name in RECEIVER_NESTED_KEYS:
+        default_value = deepcopy(serialized.get(section_name))
+
+        if section_name == "items":
+            current_items = payload.get(section_name)
+            if isinstance(current_items, list):
+                normalized_items = [deepcopy(item) if isinstance(item, dict) else {} for item in current_items]
+                if not normalized_items and isinstance(default_value, list):
+                    normalized_items = default_value
+            else:
+                normalized_items = default_value if isinstance(default_value, list) else []
+            payload[section_name] = normalized_items
+            continue
+
+        current_section = payload.get(section_name)
+        if not isinstance(current_section, dict):
+            current_section = {}
+
+        if isinstance(default_value, dict):
+            for field_name, field_value in default_value.items():
+                current_section.setdefault(field_name, field_value)
+
+        payload[section_name] = current_section
+
+    return payload
+
+
+def merge_grn_update_payload(grn: GRN, data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise DRFValidationError({"payload": "Expected a JSON object."})
+
+    payload = build_grn_edit_payload(grn)
+
+    for section_name, editable_fields in EDITABLE_NESTED_FIELD_MAP.items():
+        if section_name == "items":
+            continue
+
+        section_updates = data.get(section_name)
+        if section_updates is None:
+            continue
+        if not isinstance(section_updates, dict):
+            raise DRFValidationError({section_name: "This object must be provided as a JSON object."})
+
+        target_section = payload.get(section_name)
+        if not isinstance(target_section, dict):
+            target_section = {}
+            payload[section_name] = target_section
+
+        for field_name in editable_fields:
+            if field_name in section_updates:
+                target_section[field_name] = section_updates.get(field_name)
+
+    item_updates = data.get("items")
+    if item_updates is not None:
+        if not isinstance(item_updates, list):
+            raise DRFValidationError({"items": "This field must be provided as a list."})
+        if not all(isinstance(item, dict) for item in item_updates):
+            raise DRFValidationError({"items": "Each item must be an object."})
+
+        existing_items = payload.get("items")
+        normalized_items = [deepcopy(item) if isinstance(item, dict) else {} for item in existing_items] if isinstance(existing_items, list) else []
+        target_length = max(len(normalized_items), len(item_updates))
+        merged_items: list[dict[str, Any]] = []
+
+        for index in range(target_length):
+            merged_item = deepcopy(normalized_items[index]) if index < len(normalized_items) else {}
+            section_updates = item_updates[index] if index < len(item_updates) else {}
+
+            if isinstance(section_updates, dict):
+                for field_name in EDITABLE_ITEM_FIELDS:
+                    if field_name in section_updates:
+                        merged_item[field_name] = section_updates.get(field_name)
+
+            merged_items.append(merged_item)
+
+        payload["items"] = merged_items
+
+    return payload
+
+
+def build_grn_update_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    flat_payload = map_nested_grn_payload(payload)
+    update_payload = {"raw_payload": payload}
+
+    for field_name in EDITABLE_FLAT_FIELDS:
+        update_payload[field_name] = clean_model_value(field_name, flat_payload.get(field_name))
+
+    return update_payload
+
+
 def receiver_error_key(field_name: str | None) -> str:
     if is_blank(field_name):
         return "non_field_errors"
@@ -903,6 +1034,84 @@ class GRNCreateAPIView(GRNAPIViewMixin, APIView):
 
     def post(self, request):
         return self.create_grn_response(request)
+
+
+class GRNDetailAPIView(APIView):
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+
+    def patch(self, request, pk: int):
+        try:
+            grn = GRN.objects.filter(pk=pk).first()
+            if grn is None:
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "GRN not found",
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            if not grn.status or grn.process_status != "GRN Process":
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "Only active GRN Process records can be updated.",
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            merged_payload = merge_grn_update_payload(grn, request.data)
+            serializer = GRNSerializer(
+                grn,
+                data=build_grn_update_fields(merged_payload),
+                partial=True,
+            )
+            if not serializer.is_valid():
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "Validation failed",
+                        "errors": serializer.errors,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            saved_grn = serializer.save()
+            return Response(
+                {
+                    "status": "success",
+                    "message": "GRN updated successfully",
+                    "data": GRNReadSerializer(saved_grn).data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except DRFValidationError as exc:
+            return Response(
+                {
+                    "status": "error",
+                    "message": "Validation failed",
+                    "errors": exc.detail,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except (ProgrammingError, OperationalError) as exc:
+            if is_missing_schema_error(exc):
+                return schema_sync_response()
+            return Response(
+                {
+                    "status": "error",
+                    "message": str(exc),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        except Exception as exc:
+            return Response(
+                {
+                    "status": "error",
+                    "message": str(exc),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class GRNReceiverCreateAPIView(APIView):

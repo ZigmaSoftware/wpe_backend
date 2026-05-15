@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     GRNCreateAPIView,
+    GRNDetailAPIView,
     GRNImportAPIView,
     GRNMoveToQCRAPIView,
     GRNReceiverCreateAPIView,
@@ -17,6 +18,7 @@ router.register(r"grnview", GRNViewSet, basename="grn-view")
 urlpatterns = [
     path("grn/grncreate/", GRNReceiverCreateAPIView.as_view(), name="grn-receiver-create"),
     path("grn/", GRNCreateAPIView.as_view(), name="grn-create"),
+    path("grn/<int:pk>/", GRNDetailAPIView.as_view(), name="grn-detail"),
     path("grnview/", include(router.urls)),
     path("grn/moved/", GRNCreateAPIView.as_view(tab_scope="grn"), name="grn-moved-list"),
     path("grn/import/", GRNImportAPIView.as_view(), name="grn-import"),

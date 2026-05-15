@@ -6,6 +6,7 @@ from rest_framework.response import Response
 
 from common.drf import QueryParamFilterMixin, StandardResultsSetPagination, success_response
 
+from apps.store.inventory_monitoring import BaseInventoryHistoryAPIView, BaseInventorySummaryAPIView
 from apps.store.models import StockRequest
 from apps.store.selectors import availability_map_for_requests, stock_source_map_for_stock_rows, store_request_queryset
 from apps.store.serializers import (
@@ -16,7 +17,10 @@ from apps.store.serializers import (
 from apps.store.services import request_stock
 
 from .permissions import IsBlendingUser
-from .serializers import BlendingAdditiveRequestSerializer, BlendingStockSerializer
+from .serializers import (
+    BlendingAdditiveRequestSerializer,
+    BlendingStockSerializer,
+)
 from .services import (
     BLENDING_DEPARTMENT,
     blending_stock_queryset,
@@ -274,6 +278,22 @@ class CancelBlendingStoreRequestAPIView(generics.GenericAPIView):
             message="Store request cancelled successfully.",
             data=response_serializer.data,
         )
+
+
+class BlendingInventorySummaryAPIView(BaseInventorySummaryAPIView):
+    permission_classes = [IsAuthenticated, IsBlendingUser]
+    list_message = "Blending inventory summary fetched successfully."
+
+    def get_warehouse(self):
+        return get_blending_warehouse()
+
+
+class BlendingInventoryHistoryAPIView(BaseInventoryHistoryAPIView):
+    permission_classes = [IsAuthenticated, IsBlendingUser]
+    list_message = "Blending inventory history fetched successfully."
+
+    def get_warehouse(self):
+        return get_blending_warehouse()
 
 
 class BlendingStockListAPIView(WrappedBlendingListAPIView):
