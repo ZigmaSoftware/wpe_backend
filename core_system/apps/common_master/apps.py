@@ -9,8 +9,19 @@ class CommonMasterConfig(AppConfig):
     label = "common_master"
 
     def ready(self):
-        try:
-            from .bootstrap import ensure_dev_common_master_data
-            ensure_dev_common_master_data()
-        except Exception:
-            return
+        from django.db.models.signals import post_migrate
+
+        def run_dev_bootstrap(**kwargs):
+            try:
+                from .bootstrap import ensure_dev_common_master_data
+
+                ensure_dev_common_master_data()
+            except Exception:
+                return
+
+        post_migrate.connect(
+            run_dev_bootstrap,
+            sender=self,
+            dispatch_uid="common_master.run_dev_bootstrap",
+            weak=False,
+        )

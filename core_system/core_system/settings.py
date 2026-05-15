@@ -10,10 +10,12 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = BASE_DIR.parent
-BASE_DIR_STRING = str(BASE_DIR)
+GRN_SERVICE_DIR = PROJECT_ROOT / "grn_service"
 
-if BASE_DIR_STRING not in sys.path:
-    sys.path.insert(0, BASE_DIR_STRING)
+for project_path in (BASE_DIR, GRN_SERVICE_DIR):
+    project_path_string = str(project_path)
+    if project_path_string not in sys.path:
+        sys.path.insert(0, project_path_string)
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -70,6 +72,7 @@ INSTALLED_APPS = [
     "apps.store",
     "apps.blending",
     "apps.presales",
+    "grn_app.apps.PurchasesIwardsConfig",
 ]
 
 MIDDLEWARE = [
@@ -105,17 +108,16 @@ TEMPLATES = [
 WSGI_APPLICATION = "core_system.wsgi.application"
 ASGI_APPLICATION = "core_system.asgi.application"
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.mysql",
-        "NAME": os.getenv("DB_NAME", "wpe_db"),
-        "USER": os.getenv("DB_USER", "root"),
-        "PASSWORD": os.getenv("DB_PASSWORD", ""),
-        "HOST": os.getenv("DB_HOST", "127.0.0.1"),
-        "PORT": os.getenv("DB_PORT", "3306"),
-        "OPTIONS": {
-            "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
-            "charset": "utf8mb4",
+DATABASES = {   
+    'default': {
+        'ENGINE': os.getenv("DB_ENGINE", "django.db.backends.mysql"),
+        'NAME': os.getenv("DB_NAME", "wpedb"), 
+        'USER': os.getenv("DB_USER", "root"),
+        'PASSWORD': os.getenv("DB_PASSWORD", "admin@123"),
+        'HOST': os.getenv("DB_HOST", "127.0.0.1"),
+        'PORT': os.getenv("DB_PORT", "3306"),
+        'OPTIONS': {
+            'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
         },
     }
 }
