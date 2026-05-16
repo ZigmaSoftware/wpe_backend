@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "corsheaders",
     "rest_framework_simplejwt.token_blacklist",
+    "django_filters",
     "apps.login_home.apps.LoginHomeConfig",
     "apps.common_master.apps.CommonMasterConfig",
     "apps.admin_master.apps.AdminMasterConfig",
@@ -72,6 +73,8 @@ INSTALLED_APPS = [
     "apps.store",
     "apps.blending",
     "apps.presales",
+    "apps.production.apps.ProductionConfig",
+    "apps.wpe_masters.apps.WpeMastersConfig",
     "grn_app.apps.PurchasesIwardsConfig",
 ]
 

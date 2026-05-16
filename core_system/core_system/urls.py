@@ -20,6 +20,8 @@ urlpatterns = [
     path("api/contacts/", include("apps.contacts.urls")),
     path("api/users/", include("apps.admin_master.urls")),
     path("api/masters/", include("apps.common_master.urls")),
+    path("api/production/", include("apps.production.urls")),
+    path("api/wpe-masters/", include("apps.wpe_masters.urls")),
     path("api/", include("grn_app.urls")),
 ]
 
