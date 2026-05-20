@@ -175,3 +175,105 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
                     {"end_date_time": "End time must be after start time."}
                 )
         return data
+
+
+# ===== NEW OIMS SERIALIZERS =====
+
+from .models import ProductionMachine, BOMVariant, BOMVariantComponent, ProductionBatch, BatchWeightEntry, RegrindMaterialEntry
+
+
+class ProductionMachineSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductionMachine
+        fields = ("id", "machine_code", "name", "machine_type", "applicable_stages", "is_active", "location", "notes", "created_at", "updated_at")
+
+
+class BOMVariantComponentSerializer(serializers.ModelSerializer):
+    item_code = serializers.CharField(source="item.item_code", read_only=True)
+    item_name = serializers.CharField(source="item.item_name", read_only=True)
+    category = serializers.CharField(source="item.category", read_only=True)
+
+    class Meta:
+        model = BOMVariantComponent
+        fields = ("id", "item", "item_code", "item_name", "category", "target_weight_grams", "min_weight_grams", "max_weight_grams", "sequence", "is_regrind", "unit")
+
+
+class BOMVariantListSerializer(serializers.ModelSerializer):
+    product_item_name = serializers.CharField(source="product_item.item_name", read_only=True, default=None)
+    component_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BOMVariant
+        fields = ("id", "variant_code", "name", "product_item", "product_item_name", "revision", "is_active", "notes", "component_count", "created_at", "updated_at")
+
+    def get_component_count(self, obj):
+        return obj.components.count()
+
+
+class BOMVariantDetailSerializer(serializers.ModelSerializer):
+    product_item_name = serializers.CharField(source="product_item.item_name", read_only=True, default=None)
+    components = BOMVariantComponentSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = BOMVariant
+        fields = ("id", "variant_code", "name", "product_item", "product_item_name", "revision", "is_active", "notes", "components", "created_at", "updated_at")
+
+
+class BatchWeightEntrySerializer(serializers.ModelSerializer):
+    item_code = serializers.CharField(source="item.item_code", read_only=True)
+    item_name = serializers.CharField(source="item.item_name", read_only=True)
+    min_weight_grams = serializers.DecimalField(source="bom_component.min_weight_grams", max_digits=10, decimal_places=3, read_only=True)
+    max_weight_grams = serializers.DecimalField(source="bom_component.max_weight_grams", max_digits=10, decimal_places=3, read_only=True)
+    entered_by_username = serializers.CharField(source="entered_by.username", read_only=True, default=None)
+
+    class Meta:
+        model = BatchWeightEntry
+        fields = ("id", "batch", "bom_component", "item", "item_code", "item_name",
+                  "target_weight_grams", "min_weight_grams", "max_weight_grams",
+                  "entered_weight_grams", "is_valid", "validation_notes", "source",
+                  "entered_by", "entered_by_username", "entered_at")
+        read_only_fields = ("id", "is_valid", "validation_notes", "entered_by", "entered_at", "batch", "item", "target_weight_grams")
+
+
+class RegrindMaterialEntrySerializer(serializers.ModelSerializer):
+    item_code = serializers.CharField(source="item.item_code", read_only=True)
+    item_name = serializers.CharField(source="item.item_name", read_only=True)
+    added_by_username = serializers.CharField(source="added_by.username", read_only=True, default=None)
+
+    class Meta:
+        model = RegrindMaterialEntry
+        fields = ("id", "production_order", "batch", "stage", "item", "item_code", "item_name",
+                  "quantity_grams", "source_lot_no", "is_valid", "validation_notes", "notes",
+                  "added_by", "added_by_username", "added_at")
+        read_only_fields = ("id", "is_valid", "validation_notes", "added_by", "added_at", "production_order")
+
+
+class ProductionBatchSerializer(serializers.ModelSerializer):
+    weight_entries = BatchWeightEntrySerializer(many=True, read_only=True)
+    regrind_entries = RegrindMaterialEntrySerializer(many=True, read_only=True)
+    machine_name = serializers.CharField(source="machine.name", read_only=True, default=None)
+    bom_variant_code = serializers.CharField(source="bom_variant.variant_code", read_only=True, default=None)
+    bom_variant_name = serializers.CharField(source="bom_variant.name", read_only=True, default=None)
+    operator_username = serializers.CharField(source="operator.username", read_only=True, default=None)
+    total_weight_grams = serializers.SerializerMethodField()
+    all_weights_valid = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProductionBatch
+        fields = ("id", "batch_no", "production_order", "bom_variant", "bom_variant_code", "bom_variant_name",
+                  "stage", "machine", "machine_name", "status",
+                  "started_at", "completed_at", "operator", "operator_username",
+                  "notes", "total_weight_grams", "all_weights_valid",
+                  "weight_entries", "regrind_entries", "created_at", "updated_at")
+        read_only_fields = ("id", "batch_no", "created_at", "updated_at")
+
+    def get_total_weight_grams(self, obj):
+        entries = obj.weight_entries.all()
+        total = sum(float(e.entered_weight_grams) for e in entries if e.entered_weight_grams is not None)
+        return round(total, 3)
+
+    def get_all_weights_valid(self, obj):
+        entries = list(obj.weight_entries.all())
+        if not entries:
+            return False
+        return all(e.is_valid for e in entries)

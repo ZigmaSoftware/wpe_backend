@@ -2,6 +2,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    GRNAuditLogAPIView,
     GRNCreateAPIView,
     GRNDetailAPIView,
     GRNImportAPIView,
@@ -27,4 +28,5 @@ urlpatterns = [
     path("qcr/grn/", QCRListAPIView.as_view(tab_scope="grn"), name="qcr-grn-list"),
     path("qcr/cancelled/", QCRListAPIView.as_view(tab_scope="cancelled"), name="qcr-cancelled-list"),
     path("qcr/<int:pk>/status/", QCRStatusUpdateAPIView.as_view(), name="qcr-status-update"),
+    path("grn/<int:pk>/audit-log/", GRNAuditLogAPIView.as_view(), name="grn-audit-log"),
 ]

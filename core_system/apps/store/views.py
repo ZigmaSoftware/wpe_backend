@@ -92,6 +92,7 @@ class StoreStockRequestAPIView(generics.GenericAPIView):
 
 
 class StoreRequestApprovalListAPIView(WrappedListAPIView):
+    permission_classes = [IsAuthenticated]
     serializer_class = StockRequestSerializer
     search_fields = ("request_no", "requested_by__username", "items__item__item_name", "items__item__item_code")
     ordering_fields = ("requested_at", "request_no", "status", "id")
@@ -257,6 +258,7 @@ class StoreStockListAPIView(WrappedListAPIView):
 
 
 class StoreTransactionListAPIView(WrappedListAPIView):
+    permission_classes = [IsAuthenticated]
     serializer_class = StoreTransactionSerializer
     search_fields = (
         "transaction_no",

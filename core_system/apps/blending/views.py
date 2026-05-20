@@ -58,7 +58,6 @@ class WrappedBlendingListAPIView(QueryParamFilterMixin, generics.ListAPIView):
 
 
 class RequestBlendingStockAPIView(generics.GenericAPIView):
-    permission_classes = [IsAuthenticated, IsBlendingUser]
     serializer_class = BlendingAdditiveRequestSerializer
     pagination_class = StandardResultsSetPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -72,6 +71,11 @@ class RequestBlendingStockAPIView(generics.GenericAPIView):
         "warehouse__name",
     )
     ordering_fields = ("available_qty", "updated_at", "item__item_name", "id")
+
+    def get_permissions(self):
+        if self.request.method in ("GET", "HEAD", "OPTIONS"):
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsBlendingUser()]
 
     def get_serializer_class(self):
         if self.request.method == "GET":
@@ -140,6 +144,11 @@ class BlendingStoreRequestListCreateAPIView(WrappedBlendingListAPIView, generics
         "department": "department",
     }
     list_message = "Blending store requests fetched successfully."
+
+    def get_permissions(self):
+        if self.request.method in ("GET", "HEAD", "OPTIONS"):
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsBlendingUser()]
 
     def get_queryset(self):
         queryset = store_request_queryset().filter(requesting_warehouse=get_blending_warehouse())
@@ -297,6 +306,7 @@ class BlendingInventoryHistoryAPIView(BaseInventoryHistoryAPIView):
 
 
 class BlendingStockListAPIView(WrappedBlendingListAPIView):
+    permission_classes = [IsAuthenticated]
     serializer_class = BlendingStockSerializer
     search_fields = ("item__item_code", "item__item_name", "warehouse__code", "warehouse__name")
     ordering_fields = ("available_qty", "updated_at", "item__item_name", "id")
@@ -321,6 +331,7 @@ class BlendingStockListAPIView(WrappedBlendingListAPIView):
 
 
 class BlendingRequestableAdditiveStockListAPIView(WrappedBlendingListAPIView):
+    permission_classes = [IsAuthenticated]
     serializer_class = BlendingStockSerializer
     search_fields = (
         "item__item_code",

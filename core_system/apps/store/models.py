@@ -25,6 +25,8 @@ class Warehouse(UUIDAuditMixin):
         STORE = "STORE", "Store"
         BLENDING = "BLENDING", "Blending"
         GENERAL = "GENERAL", "General"
+        QC_PENDING = "QC_PENDING", "QC Pending"
+        REJECTED = "REJECTED", "Rejected"
 
     code = models.CharField(max_length=30, unique=True, db_index=True)
     name = models.CharField(max_length=120, db_index=True)
