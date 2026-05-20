@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
@@ -20,9 +19,7 @@ from .models import (
     WPERolePermission,
     WPEUserScreenPermission,
 )
-
-
-UserModel = get_user_model()
+from .services import upsert_wpe_user_creation
 
 
 class BaseMasterSerializer(serializers.ModelSerializer):
@@ -181,8 +178,6 @@ class WPEUserCreationWriteSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        from django.db import transaction
-
         username = validated_data.pop("username")
         password = validated_data.pop("password", None)
         m2m_fields = {
@@ -193,23 +188,26 @@ class WPEUserCreationWriteSerializer(serializers.ModelSerializer):
             "authorized_sale_types": validated_data.pop("authorized_sale_types", []),
             "authorized_purchase_types": validated_data.pop("authorized_purchase_types", []),
         }
-
-        with transaction.atomic():
-            django_user = UserModel.objects.create_user(
-                username=username,
-                password=password,
-                email=validated_data.get("email", ""),
-                first_name=validated_data.get("full_name", "").split()[0] if validated_data.get("full_name") else "",
-            )
-            instance = WPEUserCreation.objects.create(user=django_user, **validated_data)
-            for field, items in m2m_fields.items():
-                getattr(instance, field).set(items)
-
-        return instance
+        return upsert_wpe_user_creation(
+            username=username,
+            password=password,
+            full_name=validated_data.get("full_name", ""),
+            job_title=validated_data.get("job_title"),
+            email=validated_data.get("email"),
+            phone_no=validated_data.get("phone_no"),
+            location=validated_data.get("location"),
+            default_branch=validated_data.get("default_branch"),
+            role=validated_data.get("role"),
+            is_active=validated_data.get("is_active", True),
+            authorized_branches=m2m_fields["authorized_branches"],
+            authorized_price_books=m2m_fields["authorized_price_books"],
+            authorized_warehouses=m2m_fields["authorized_warehouses"],
+            authorized_production_types=m2m_fields["authorized_production_types"],
+            authorized_sale_types=m2m_fields["authorized_sale_types"],
+            authorized_purchase_types=m2m_fields["authorized_purchase_types"],
+        )
 
     def update(self, instance, validated_data):
-        from django.db import transaction
-
         username = validated_data.pop("username", None)
         password = validated_data.pop("password", None)
         m2m_fields = {
@@ -220,26 +218,25 @@ class WPEUserCreationWriteSerializer(serializers.ModelSerializer):
             "authorized_sale_types": validated_data.pop("authorized_sale_types", None),
             "authorized_purchase_types": validated_data.pop("authorized_purchase_types", None),
         }
-
-        with transaction.atomic():
-            if instance.user_id:
-                django_user = instance.user
-                if username:
-                    django_user.username = username
-                if password:
-                    django_user.set_password(password)
-                if username or password:
-                    django_user.save()
-
-            for attr, value in validated_data.items():
-                setattr(instance, attr, value)
-            instance.save()
-
-            for field, items in m2m_fields.items():
-                if items is not None:
-                    getattr(instance, field).set(items)
-
-        return instance
+        return upsert_wpe_user_creation(
+            instance=instance,
+            username=username or instance.user.username,
+            password=password,
+            full_name=validated_data.get("full_name", instance.full_name),
+            job_title=validated_data.get("job_title", instance.job_title),
+            email=validated_data.get("email", instance.email),
+            phone_no=validated_data.get("phone_no", instance.phone_no),
+            location=validated_data.get("location", instance.location),
+            default_branch=validated_data.get("default_branch", instance.default_branch),
+            role=validated_data.get("role", instance.role),
+            is_active=validated_data.get("is_active", instance.is_active),
+            authorized_branches=m2m_fields["authorized_branches"],
+            authorized_price_books=m2m_fields["authorized_price_books"],
+            authorized_warehouses=m2m_fields["authorized_warehouses"],
+            authorized_production_types=m2m_fields["authorized_production_types"],
+            authorized_sale_types=m2m_fields["authorized_sale_types"],
+            authorized_purchase_types=m2m_fields["authorized_purchase_types"],
+        )
 
 
 PERMISSION_FIELDS = (

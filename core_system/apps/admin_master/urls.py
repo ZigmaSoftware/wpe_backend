@@ -9,6 +9,7 @@ from django.urls import include, path
 from core_system.api_router import ExtendedDefaultRouter
 
 from .views import (
+    DepartmentLookupViewSet,
     MainScreenViewSet,
     ScreenSectionViewSet,
     StaffViewSet,
@@ -106,6 +107,11 @@ screen_patterns = [
         "screen-sections/lookup/",
         ScreenSectionViewSet.as_view({"get": "lookup"}),
         name="screen-section-lookup",
+    ),
+    path(
+        "departments/lookup/",
+        DepartmentLookupViewSet.as_view({"get": "list"}),
+        name="department-lookup",
     ),
 ]
 

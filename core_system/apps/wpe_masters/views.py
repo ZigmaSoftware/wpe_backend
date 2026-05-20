@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 from django.db import transaction
-from django.db.models import ProtectedError
 from rest_framework import filters, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.admin_master.models import MainScreen, UserScreen
+from common.drf import (
+    LookupQuerysetMixin,
+    ProtectedDestroyMixin,
+    QueryParamFilterMixin,
+    RawMutationMixin,
+    ResponseSerializerMixin,
+    StandardizedListMixin,
+    ToggleStatusMixin,
+)
 
 from .models import (
     BranchMaster,
@@ -40,48 +48,35 @@ from .serializers import (
     PERMISSION_FIELDS,
 )
 from .pagination import WpeMasterPagination
+from .services import delete_wpe_user_creation, toggle_wpe_user_creation_status
 
 
-class BaseMasterViewSet(viewsets.ModelViewSet):
+class BaseMasterViewSet(
+    StandardizedListMixin,
+    RawMutationMixin,
+    ProtectedDestroyMixin,
+    ToggleStatusMixin,
+    LookupQuerysetMixin,
+    QueryParamFilterMixin,
+    ResponseSerializerMixin,
+    viewsets.ModelViewSet,
+):
     permission_classes = [IsAuthenticated]
     pagination_class = WpeMasterPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ["name"]
     ordering_fields = ["name", "created_at", "is_active"]
     ordering = ["name"]
-
-    def list(self, request, *args, **kwargs):
-        queryset = self.filter_queryset(self.get_queryset())
-        page = self.paginate_queryset(queryset)
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-        serializer = self.get_serializer(queryset, many=True)
-        return Response(serializer.data)
+    destroy_success_status = status.HTTP_204_NO_CONTENT
+    protected_error_message = "Cannot delete: this record is referenced by other data."
 
     @action(detail=False, methods=["get"])
     def lookup(self, request):
-        qs = self.get_queryset().filter(is_active=True).values("id", "name")
-        return Response(list(qs))
+        return self.build_lookup_response("id", "name")
 
     @action(detail=True, methods=["patch"], url_path="toggle")
     def toggle_status(self, request, pk=None):
-        instance = self.get_object()
-        instance.is_active = not instance.is_active
-        instance.save(update_fields=["is_active", "updated_at"])
-        serializer = self.get_serializer(instance)
-        return Response(serializer.data)
-
-    def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
-        try:
-            instance.delete()
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        except ProtectedError:
-            return Response(
-                {"detail": "Cannot delete: this record is referenced by other data."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        return self.perform_toggle_status(update_fields=["is_active", "updated_at"], response_mode="serializer")
 
 
 class LocationMasterViewSet(BaseMasterViewSet):
@@ -129,13 +124,22 @@ class DepartmentMasterViewSet(BaseMasterViewSet):
     serializer_class = DepartmentMasterSerializer
 
 
-class WPEUserCreationViewSet(viewsets.ModelViewSet):
+class WPEUserCreationViewSet(
+    StandardizedListMixin,
+    RawMutationMixin,
+    ProtectedDestroyMixin,
+    ResponseSerializerMixin,
+    viewsets.ModelViewSet,
+):
     permission_classes = [IsAuthenticated]
     pagination_class = WpeMasterPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ["full_name", "email", "phone_no", "user__username"]
     ordering_fields = ["full_name", "created_at", "is_active"]
     ordering = ["-created_at"]
+    response_serializer_class = WPEUserCreationReadSerializer
+    destroy_success_status = status.HTTP_204_NO_CONTENT
+    protected_error_message = "Cannot delete: this user is referenced by other data."
 
     def get_queryset(self):
         return WPEUserCreation.objects.select_related(
@@ -154,46 +158,14 @@ class WPEUserCreationViewSet(viewsets.ModelViewSet):
             return WPEUserCreationWriteSerializer
         return WPEUserCreationReadSerializer
 
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        instance = serializer.save()
-        read_serializer = WPEUserCreationReadSerializer(instance, context=self.get_serializer_context())
-        return Response(read_serializer.data, status=status.HTTP_201_CREATED)
-
-    def update(self, request, *args, **kwargs):
-        partial = kwargs.pop("partial", False)
-        instance = self.get_object()
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
-        serializer.is_valid(raise_exception=True)
-        instance = serializer.save()
-        read_serializer = WPEUserCreationReadSerializer(instance, context=self.get_serializer_context())
-        return Response(read_serializer.data)
-
     @action(detail=True, methods=["patch"], url_path="toggle")
     def toggle_status(self, request, pk=None):
         instance = self.get_object()
-        instance.is_active = not instance.is_active
-        instance.save(update_fields=["is_active", "updated_at"])
-        if instance.user_id:
-            instance.user.is_active = instance.is_active
-            instance.user.save(update_fields=["is_active"])
-        read_serializer = WPEUserCreationReadSerializer(instance, context=self.get_serializer_context())
-        return Response(read_serializer.data)
+        instance = toggle_wpe_user_creation_status(instance)
+        return Response(self.serialize_instance(instance))
 
-    def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
-        try:
-            if instance.user_id:
-                instance.user.delete()
-            else:
-                instance.delete()
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        except ProtectedError:
-            return Response(
-                {"detail": "Cannot delete: this user is referenced by other data."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+    def perform_destroy(self, instance):
+        delete_wpe_user_creation(instance)
 
 
 class RolePermissionMatrixView(viewsets.ViewSet):

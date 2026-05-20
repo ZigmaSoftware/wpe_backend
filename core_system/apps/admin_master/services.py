@@ -8,6 +8,12 @@ from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
+from common.user_provisioning import (
+    delete_auth_user_if_unlinked,
+    get_or_prepare_auth_user,
+    split_full_name,
+    sync_auth_user,
+)
 from rest_framework.exceptions import ValidationError
 
 from .models import (
@@ -32,15 +38,6 @@ from .validators import (
 
 UserModel = get_user_model()
 MAX_FAILED_LOGIN_ATTEMPTS = 5
-
-
-def split_full_name(full_name: str) -> tuple[str, str]:
-    parts = [part for part in (full_name or "").strip().split() if part]
-    if not parts:
-        return "", ""
-    if len(parts) == 1:
-        return parts[0], ""
-    return parts[0], " ".join(parts[1:])
 
 
 def sync_staff_contact_details(
@@ -74,36 +71,6 @@ def sync_staff_contact_details(
         staff.save(update_fields=update_fields)
 
     return staff
-
-
-def _get_or_prepare_auth_user(
-    *,
-    instance: UserCreation | None = None,
-    username: str,
-) -> Any:
-    existing_user = (
-        UserModel.objects.select_for_update()
-        .filter(username__iexact=username)
-        .first()
-    )
-
-    if instance and instance.user_id:
-        if existing_user and existing_user.pk != instance.user_id:
-            raise ValidationError({"username": "A user with this username already exists."})
-        user = instance.user
-        user.username = username
-        return user
-
-    if existing_user:
-        try:
-            existing_profile = existing_user.admin_profile
-        except UserCreation.DoesNotExist:
-            existing_profile = None
-        if existing_profile and (instance is None or existing_profile.pk != instance.pk):
-            raise ValidationError({"username": "This username is already linked to another user account."})
-        return existing_user
-
-    return UserModel(username=username)
 
 
 @transaction.atomic
@@ -144,20 +111,22 @@ def upsert_user_creation(
         designation=designation,
     )
 
-    user = _get_or_prepare_auth_user(instance=instance, username=username.strip())
+    user = get_or_prepare_auth_user(
+        profile_model=UserCreation,
+        related_name="admin_profile",
+        username=username.strip(),
+        instance=instance,
+        profile_exists_message="This username is already linked to another user account.",
+    )
     staff_first_name, staff_last_name = split_full_name(staff.name)
-
-    user.email = (email or staff.email or "").strip()
-    user.first_name = (first_name if first_name is not None else user.first_name or staff_first_name).strip()
-    user.last_name = (last_name if last_name is not None else user.last_name or staff_last_name).strip()
-    user.is_active = account_status == UserCreation.AccountStatus.ACTIVE
-
-    password_changed = False
-    if password:
-        user.set_password(password)
-        password_changed = True
-
-    user.save()
+    password_changed = sync_auth_user(
+        user,
+        email=email or staff.email or "",
+        first_name=first_name if first_name is not None else user.first_name or staff_first_name,
+        last_name=last_name if last_name is not None else user.last_name or staff_last_name,
+        is_active=account_status == UserCreation.AccountStatus.ACTIVE,
+        password=password,
+    )
 
     profile = instance or UserCreation(user=user, staff=staff)
     profile.user = user
@@ -525,3 +494,11 @@ def user_has_screen_action(user, *, screen_code: str, action: str) -> bool:
     if action == "all":
         return effective_permissions.get("all", False)
     return bool(effective_permissions.get(action))
+
+
+@transaction.atomic
+def delete_user_creation_profile(instance: UserCreation) -> None:
+    linked_user = instance.user
+    instance.delete()
+    if linked_user:
+        delete_auth_user_if_unlinked(linked_user)

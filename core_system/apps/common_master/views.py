@@ -11,6 +11,15 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.admin_master.pagination import AdminMasterPagination
+from common.drf import (
+    EnvelopedMutationMixin,
+    LookupQuerysetMixin,
+    ProtectedDestroyMixin,
+    QueryParamFilterMixin,
+    ResponseSerializerMixin,
+    StandardizedListMixin,
+    ToggleStatusMixin,
+)
 
 from .models import (
     City,
@@ -50,121 +59,34 @@ from .serializers import (
     TaxSerializer,
 )
 
-
-def _coerce_filter_value(value: str):
-    normalized = str(value).strip().lower()
-    if normalized in {"true", "1", "yes", "on"}:
-        return True
-    if normalized in {"false", "0", "no", "off"}:
-        return False
-    return value
-
-
-class QueryParamFilterMixin:
-    filterset_map: dict[str, str] = {}
-
-    def filter_queryset(self, queryset):
-        queryset = super().filter_queryset(queryset)
-        search_value = (
-            self.request.query_params.get("search[value]")
-            if not self.request.query_params.get("search")
-            else None
-        )
-        if search_value:
-            query = Q()
-            for field_name in getattr(self, "search_fields", ()):
-                if field_name.startswith(("^", "=", "@", "$")):
-                    field_name = field_name[1:]
-                query |= Q(**{f"{field_name}__icontains": search_value})
-            queryset = queryset.filter(query)
-
-        for param, lookup in self.filterset_map.items():
-            value = self.request.query_params.get(param)
-            if value in (None, ""):
-                continue
-            queryset = queryset.filter(**{lookup: _coerce_filter_value(value)})
-
-        return queryset
-
-
-class CommonMasterViewSet(QueryParamFilterMixin, viewsets.ModelViewSet):
+class CommonMasterViewSet(
+    StandardizedListMixin,
+    EnvelopedMutationMixin,
+    ProtectedDestroyMixin,
+    ToggleStatusMixin,
+    LookupQuerysetMixin,
+    QueryParamFilterMixin,
+    ResponseSerializerMixin,
+    viewsets.ModelViewSet,
+):
     permission_classes = [IsAuthenticated]
     pagination_class = AdminMasterPagination
     parser_classes = [JSONParser, FormParser, MultiPartParser]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     resource_name = "Record"
     status_field = "is_active"
-    response_serializer_class = None
+    protected_error_as_validation_error = True
 
-    def get_response_serializer_class(self):
-        return self.response_serializer_class or self.get_serializer_class()
+    @property
+    def protected_error_message(self):
+        return f"{self.resource_name} cannot be deleted because dependent records exist."
 
-    def serialize_instance(self, instance):
-        serializer_class = self.get_response_serializer_class()
-        serializer = serializer_class(instance, context=self.get_serializer_context())
-        return serializer.data
-
-    def list(self, request, *args, **kwargs):
-        base_queryset = self.get_queryset()
-        total_count = base_queryset.count()
-        filtered_queryset = self.filter_queryset(base_queryset)
-        filtered_count = filtered_queryset.count()
-
-        page = self.paginate_queryset(filtered_queryset)
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            response = self.get_paginated_response(serializer.data)
-            if getattr(self.paginator, "datatables_mode", False):
-                response.data["recordsTotal"] = total_count
-                response.data["recordsFiltered"] = filtered_count
-            return response
-
-        serializer = self.get_serializer(filtered_queryset, many=True)
-        return Response(serializer.data)
-
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
-        return Response(
-            {
-                "message": f"{self.resource_name} created successfully.",
-                "data": self.serialize_instance(serializer.instance),
-            },
-            status=status.HTTP_201_CREATED,
-        )
-
-    def update(self, request, *args, **kwargs):
-        partial = kwargs.pop("partial", False)
-        instance = self.get_object()
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
-        serializer.is_valid(raise_exception=True)
-        self.perform_update(serializer)
-        return Response(
-            {
-                "message": f"{self.resource_name} updated successfully.",
-                "data": self.serialize_instance(serializer.instance),
-            }
-        )
-
-    def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
-        try:
-            self.perform_destroy(instance)
-        except ProtectedError:
-            raise ValidationError(
-                {"detail": f"{self.resource_name} cannot be deleted because dependent records exist."}
-            )
+    def build_destroy_success_response(self):
         return Response({"message": f"{self.resource_name} deleted successfully."})
 
     @action(detail=True, methods=["patch"], url_path="toggle-status")
     def toggle_status(self, request, pk=None):
-        instance = self.get_object()
-        field_name = self.status_field
-        new_value = not bool(getattr(instance, field_name))
-        setattr(instance, field_name, new_value)
-        instance.save(update_fields=[field_name])
-        return Response({"message": f"{self.resource_name} status updated.", "status": new_value})
+        return self.perform_toggle_status()
 
 
 class ContinentViewSet(CommonMasterViewSet):

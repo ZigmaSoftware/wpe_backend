@@ -5,7 +5,10 @@ from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
+from rest_framework.test import APITestCase
+from rest_framework_simplejwt.tokens import RefreshToken
 
+from apps.login_home.models import Department
 from .bootstrap import ensure_dev_full_access_user
 from .models import MainScreen, ScreenSection, UserScreen
 from .services import resolve_subject_permissions
@@ -101,3 +104,19 @@ class FullAccessPermissionResolutionTests(TestCase):
         self.assertTrue(user.is_staff)
         self.assertTrue(user.is_superuser)
         self.assertTrue(user.check_password("developer"))
+
+
+class DepartmentLookupApiTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="lookup-user", password="test-pass-123")
+        access_token = str(RefreshToken.for_user(self.user).access_token)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access_token}")
+
+    def test_returns_only_active_departments(self):
+        active_department = Department.objects.create(name="Production", is_active=True)
+        Department.objects.create(name="Dormant", is_active=False)
+
+        response = self.client.get("/api/users/departments/lookup/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, [{"id": active_department.id, "name": "Production"}])

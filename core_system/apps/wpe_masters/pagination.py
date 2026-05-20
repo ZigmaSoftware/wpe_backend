@@ -1,7 +1,7 @@
-from rest_framework.pagination import PageNumberPagination
+from common.drf import StandardResultsSetPagination
 
 
-class WpeMasterPagination(PageNumberPagination):
+class WpeMasterPagination(StandardResultsSetPagination):
     page_size = 25
     page_size_query_param = "page_size"
     max_page_size = 500
