@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -20,7 +21,7 @@ BLENDING_WAREHOUSE_CODE = "BLENDING"
 AUTO_CREATED_ITEM_CATEGORY = "GRN Imported"
 AUTO_CREATED_ITEM_GROUP = "Inbound GRN"
 AUTO_CREATED_ITEM_SUB_GROUP = "Auto Created"
-MOVED_TO_GRN_SCOPES = {"moved to grn", "moved_to_grn", "moved-grn", "grn", "approved"}
+MOVED_TO_GRN_SCOPES = {"moved to grn", "moved_to_grn", "moved-grn", "grn", "approved", "grn approved", "grn_approved"}
 
 INWARD_TRANSACTION_TYPES = {
     StoreTransaction.TransactionType.GRN_INWARD,
@@ -86,6 +87,47 @@ def get_store_warehouse() -> Warehouse:
         name="Main Store",
         warehouse_type=Warehouse.WarehouseType.STORE,
     )
+
+
+def get_warehouse_by_name(name: str) -> Warehouse:
+    """Look up an active warehouse by display name; auto-create if missing."""
+    stripped = name.strip()
+    warehouse = Warehouse.objects.filter(name=stripped, is_active=True).first()
+    if warehouse:
+        return warehouse
+    warehouse = Warehouse.objects.filter(name__iexact=stripped, is_active=True).first()
+    if warehouse:
+        return warehouse
+    code = re.sub(r"[^A-Z0-9]+", "_", stripped.upper())[:30].strip("_")
+    name_upper = stripped.upper()
+    if "QC" in name_upper or "PENDING" in name_upper:
+        wh_type = Warehouse.WarehouseType.QC_PENDING
+    elif "REJECT" in name_upper:
+        wh_type = Warehouse.WarehouseType.REJECTED
+    else:
+        wh_type = Warehouse.WarehouseType.STORE
+    warehouse, _created = Warehouse.objects.get_or_create(
+        code=code,
+        defaults={
+            "name": stripped,
+            "warehouse_type": wh_type,
+            "is_active": True,
+            "is_system": True,
+        },
+    )
+    return warehouse
+
+
+def resolve_target_warehouse(grn_payload: dict[str, Any], *, accepted: bool = True) -> Warehouse:
+    """Resolve the correct warehouse for stock posting based on QCR outcome."""
+    if accepted:
+        name = normalize_text(grn_payload.get("target_warehouse") or "Stores")
+        if name.upper() == STORE_WAREHOUSE_CODE or name.lower() in {"stores", "main store", "store"}:
+            return get_store_warehouse()
+        return get_warehouse_by_name(name)
+    else:
+        name = normalize_text(grn_payload.get("target_warehouse") or "Rejected Warehouse - CBE")
+        return get_warehouse_by_name(name)
 
 
 def get_blending_warehouse() -> Warehouse:
@@ -824,7 +866,11 @@ def add_stock_from_grn(grn_payload: dict[str, Any], *, created_by=None) -> dict[
     if not isinstance(grn_payload, dict):
         raise ValidationError({"payload": "GRN payload must be a JSON object."})
 
-    ensure_grn_ready_for_store_sync(grn_payload)
+    use_rejected_qty = bool(grn_payload.get("use_rejected_qty"))
+    accepted = not use_rejected_qty
+
+    if accepted:
+        ensure_grn_ready_for_store_sync(grn_payload)
 
     grn_identifier = resolve_grn_identifier(grn_payload)
     if not grn_identifier:
@@ -837,7 +883,7 @@ def add_stock_from_grn(grn_payload: dict[str, Any], *, created_by=None) -> dict[
         or grn_payload.get("trade_name")
         or "GRN Supplier"
     )
-    store_warehouse = get_store_warehouse()
+    target_warehouse = resolve_target_warehouse(grn_payload, accepted=accepted)
 
     processed_references: list[str] = []
     skipped_references: list[str] = []
@@ -851,7 +897,7 @@ def add_stock_from_grn(grn_payload: dict[str, Any], *, created_by=None) -> dict[
 
             if StoreTransaction.objects.filter(
                 item=item,
-                warehouse=store_warehouse,
+                warehouse=target_warehouse,
                 transaction_type=StoreTransaction.TransactionType.GRN_INWARD,
                 reference_type=StoreTransaction.ReferenceType.GRN,
                 reference_id=reference_id,
@@ -870,38 +916,55 @@ def add_stock_from_grn(grn_payload: dict[str, Any], *, created_by=None) -> dict[
                     }
                 )
 
-            raw_quantity = (
-                line_payload.get("accepted_qty")
-                or line_payload.get("quantity")
-                or line_payload.get("total_quantity")
-                or grn_payload.get("accepted_qty")
-                or grn_payload.get("quantity")
-                or grn_payload.get("total_quantity")
-            )
+            if use_rejected_qty:
+                raw_quantity = (
+                    line_payload.get("rejected_qty")
+                    or grn_payload.get("rejected_qty")
+                )
+            else:
+                raw_quantity = (
+                    line_payload.get("accepted_qty")
+                    or line_payload.get("quantity")
+                    or line_payload.get("total_quantity")
+                    or grn_payload.get("accepted_qty")
+                    or grn_payload.get("quantity")
+                    or grn_payload.get("total_quantity")
+                )
+
+            if not raw_quantity:
+                skipped_references.append(reference_id)
+                continue
+
             quantity = quantize_stock(raw_quantity)
             if quantity <= STOCK_ZERO:
                 skipped_references.append(reference_id)
                 continue
 
+            remarks = (
+                f"GRN rejected stock from {supplier_name}" if use_rejected_qty
+                else f"GRN inward from {supplier_name}"
+            )
             _stock_row, stock_transaction = _apply_stock_movement(
                 item=item,
-                warehouse=store_warehouse,
+                warehouse=target_warehouse,
                 quantity=quantity,
                 movement_type="inward",
                 transaction_type=StoreTransaction.TransactionType.GRN_INWARD,
                 reference_type=StoreTransaction.ReferenceType.GRN,
                 reference_id=reference_id,
-                remarks=f"GRN inward from {supplier_name}",
+                remarks=remarks,
                 metadata={
                     "grn_no": document_details.get("grn_no") or grn_payload.get("grn_no"),
                     "grn_identifier": grn_identifier,
                     "supplier": supplier_name,
                     "line_number": line_number,
                     "raw_line": line_payload,
+                    "qc_outcome": "rejected" if use_rejected_qty else "accepted",
+                    "target_warehouse": target_warehouse.code,
                 },
                 created_by=created_by,
                 transaction_date=grn_date,
-                locked_stock=get_current_stock(item=item, warehouse=store_warehouse, lock_for_update=True),
+                locked_stock=get_current_stock(item=item, warehouse=target_warehouse, lock_for_update=True),
             )
             store_transactions.append(stock_transaction)
             processed_references.append(reference_id)

@@ -8,7 +8,7 @@ from common.drf import QueryParamFilterMixin, StandardResultsSetPagination, succ
 
 from apps.store.inventory_monitoring import BaseInventoryHistoryAPIView, BaseInventorySummaryAPIView
 from apps.store.models import StockRequest
-from apps.store.selectors import availability_map_for_requests, store_request_queryset
+from apps.store.selectors import availability_map_for_requests, stock_source_map_for_stock_rows, store_request_queryset
 from apps.store.serializers import (
     StockRequestCancelSerializer,
     StockRequestCreateSerializer,
@@ -42,13 +42,15 @@ class WrappedBlendingListAPIView(QueryParamFilterMixin, generics.ListAPIView):
         queryset = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(queryset)
         if page is not None:
+            self._serializer_rows = list(page)
             serializer = self.get_serializer(page, many=True)
             return success_response(
                 message=self.list_message,
                 data=self.paginator.get_paginated_data(serializer.data),
             )
 
-        serializer = self.get_serializer(queryset, many=True)
+        self._serializer_rows = list(queryset)
+        serializer = self.get_serializer(self._serializer_rows, many=True)
         return success_response(
             message=self.list_message,
             data={"count": len(serializer.data), "results": serializer.data},
@@ -56,7 +58,6 @@ class WrappedBlendingListAPIView(QueryParamFilterMixin, generics.ListAPIView):
 
 
 class RequestBlendingStockAPIView(generics.GenericAPIView):
-    permission_classes = [IsAuthenticated, IsBlendingUser]
     serializer_class = BlendingAdditiveRequestSerializer
     pagination_class = StandardResultsSetPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -71,6 +72,11 @@ class RequestBlendingStockAPIView(generics.GenericAPIView):
     )
     ordering_fields = ("available_qty", "updated_at", "item__item_name", "id")
 
+    def get_permissions(self):
+        if self.request.method in ("GET", "HEAD", "OPTIONS"):
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsBlendingUser()]
+
     def get_serializer_class(self):
         if self.request.method == "GET":
             return BlendingStockSerializer
@@ -79,7 +85,8 @@ class RequestBlendingStockAPIView(generics.GenericAPIView):
     def get(self, request, *args, **kwargs):
         queryset = self.filter_queryset(requestable_additive_stock_queryset())
         page = self.paginate_queryset(queryset)
-        serializer = self.get_serializer(page if page is not None else queryset, many=True)
+        self._serializer_rows = list(page) if page is not None else list(queryset)
+        serializer = self.get_serializer(self._serializer_rows, many=True)
 
         if page is not None:
             return success_response(
@@ -91,6 +98,13 @@ class RequestBlendingStockAPIView(generics.GenericAPIView):
             message="Requestable store stock fetched successfully.",
             data={"count": len(serializer.data), "results": serializer.data},
         )
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        rows = getattr(self, "_serializer_rows", None)
+        if rows is not None:
+            context["stock_source_map"] = stock_source_map_for_stock_rows(rows)
+        return context
 
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -130,6 +144,11 @@ class BlendingStoreRequestListCreateAPIView(WrappedBlendingListAPIView, generics
         "department": "department",
     }
     list_message = "Blending store requests fetched successfully."
+
+    def get_permissions(self):
+        if self.request.method in ("GET", "HEAD", "OPTIONS"):
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsBlendingUser()]
 
     def get_queryset(self):
         queryset = store_request_queryset().filter(requesting_warehouse=get_blending_warehouse())
@@ -287,6 +306,7 @@ class BlendingInventoryHistoryAPIView(BaseInventoryHistoryAPIView):
 
 
 class BlendingStockListAPIView(WrappedBlendingListAPIView):
+    permission_classes = [IsAuthenticated]
     serializer_class = BlendingStockSerializer
     search_fields = ("item__item_code", "item__item_name", "warehouse__code", "warehouse__name")
     ordering_fields = ("available_qty", "updated_at", "item__item_name", "id")
@@ -302,8 +322,16 @@ class BlendingStockListAPIView(WrappedBlendingListAPIView):
             return requestable_additive_stock_queryset()
         return blending_stock_queryset()
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        rows = getattr(self, "_serializer_rows", None)
+        if rows is not None:
+            context["stock_source_map"] = stock_source_map_for_stock_rows(rows)
+        return context
+
 
 class BlendingRequestableAdditiveStockListAPIView(WrappedBlendingListAPIView):
+    permission_classes = [IsAuthenticated]
     serializer_class = BlendingStockSerializer
     search_fields = (
         "item__item_code",
@@ -323,3 +351,10 @@ class BlendingRequestableAdditiveStockListAPIView(WrappedBlendingListAPIView):
 
     def get_queryset(self):
         return requestable_additive_stock_queryset()
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        rows = getattr(self, "_serializer_rows", None)
+        if rows is not None:
+            context["stock_source_map"] = stock_source_map_for_stock_rows(rows)
+        return context

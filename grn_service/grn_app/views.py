@@ -20,8 +20,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.store.services import add_stock_from_grn
-from .models import GRN, QCR
-from .serializers import GRNReadSerializer, GRNSerializer, QCRSerializer
+from .models import GRN, GRNAuditLog, QCR
+from .serializers import GRNAuditLogSerializer, GRNReadSerializer, GRNSerializer, QCRSerializer
 
 
 HEADER_ALIASES = {
@@ -149,7 +149,17 @@ MODEL_DATE_FIELDS = {
     "gateentry_bookdate",
 }
 
+MODEL_DATETIME_FIELDS = {
+    "delivery_note_date",
+    "delivery_note_date",
+}
+
 STRING_DATE_FIELDS = {"req_date"}
+
+INTEGER_EDITABLE_FIELDS = {
+    "delivery_days_gap",
+    "order_rating",
+}
 
 DECIMAL_FIELDS = {
     "total_quantity",
@@ -175,10 +185,13 @@ INTEGER_FIELDS = {"item_serial_number"}
 BOOLEAN_FIELDS = {"status"}
 REQUIRED_FIELDS = ("grn_no",)
 RECEIVER_NESTED_KEYS = {"document_details", "document_requirement_details", "supplier_details", "items", "value_details"}
+ALL_NESTED_KEYS = RECEIVER_NESTED_KEYS | {"invoice_details"}
 EDITABLE_DOCUMENT_DETAILS_FIELDS = {
     "gateentry_bookno",
     "gateentry_bookdate",
     "tolerance",
+    "supplier_invoice_no",
+    "supplier_invoice_date",
 }
 EDITABLE_REQUIREMENT_DETAILS_FIELDS = {
     "req_date",
@@ -186,6 +199,17 @@ EDITABLE_REQUIREMENT_DETAILS_FIELDS = {
     "req_person_id",
     "req_department",
     "req_reason",
+}
+EDITABLE_INVOICE_DETAILS_FIELDS = {
+    "dc_numbers",
+    "delivery_days_gap",
+    "delivery_note_no",
+    "delivery_note_date",
+    "order_rating",
+    "grn_warehouse",
+    "source_warehouse",
+    "accepted_warehouse",
+    "rejected_warehouse",
 }
 EDITABLE_ITEM_FIELDS = {
     "item_serial_number",
@@ -196,12 +220,15 @@ EDITABLE_ITEM_FIELDS = {
 EDITABLE_NESTED_FIELD_MAP = {
     "document_details": EDITABLE_DOCUMENT_DETAILS_FIELDS,
     "document_requirement_details": EDITABLE_REQUIREMENT_DETAILS_FIELDS,
+    "invoice_details": EDITABLE_INVOICE_DETAILS_FIELDS,
     "items": EDITABLE_ITEM_FIELDS,
 }
 EDITABLE_FLAT_FIELDS = {
     "gateentry_bookno",
     "gateentry_bookdate",
     "tolerance",
+    "supplier_invoice_no",
+    "supplier_invoice_date",
     "req_date",
     "req_person_name",
     "req_person_id",
@@ -211,6 +238,21 @@ EDITABLE_FLAT_FIELDS = {
     "free_quantity",
     "accepted_qty",
     "rejected_qty",
+    "dc_numbers",
+    "delivery_days_gap",
+    "delivery_note_no",
+    "delivery_note_date",
+    "order_rating",
+    "grn_warehouse",
+    "source_warehouse",
+    "accepted_warehouse",
+    "rejected_warehouse",
+}
+
+MOVE_TO_QCR_REQUIRED_FIELDS = {
+    "grn_warehouse": "Warehouse",
+    "accepted_warehouse": "Accepted Warehouse",
+    "rejected_warehouse": "Rejected Warehouse",
 }
 RECEIVER_REQUIRED_FIELDS = (
     "document_details.grn_no",
@@ -287,7 +329,7 @@ GRN_LEGACY_VALUE_FIELDS = (
 
 ACTIVE_QCR_SCOPES = {"", "active", "qcr", "pending", "open"}
 CANCELLED_QCR_SCOPES = {"cancelled", "canceled", "cancel", "rejected", "reject"}
-MOVED_TO_GRN_SCOPES = {"moved to grn", "moved_to_grn", "moved-grn", "grn", "approved"}
+MOVED_TO_GRN_SCOPES = {"moved to grn", "moved_to_grn", "moved-grn", "grn", "approved", "grn approved", "grn_approved"}
 
 
 def resolve_list_scope(request, fallback: str = "") -> str:
@@ -495,13 +537,25 @@ def clean_model_value(field_name: str, value: Any, *, required: bool = False) ->
                 raise
             return None
 
+    if field_name in MODEL_DATETIME_FIELDS:
+        if is_blank(value):
+            return None
+        if isinstance(value, str):
+            from datetime import datetime as dt
+            for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    return dt.strptime(value.strip(), fmt)
+                except ValueError:
+                    continue
+        return value
+
     if field_name in DECIMAL_FIELDS:
         try:
             return parse_decimal(value)
         except ValueError:
             return None
 
-    if field_name in INTEGER_FIELDS:
+    if field_name in INTEGER_FIELDS or field_name in INTEGER_EDITABLE_FIELDS:
         try:
             return parse_integer(value)
         except ValueError:
@@ -550,6 +604,7 @@ def map_nested_grn_payload(data: dict[str, Any]) -> dict[str, Any]:
     supplier_details = data.get("supplier_details", {}) or {}
     items = data.get("items", []) or []
     value_details = data.get("value_details", {}) or {}
+    invoice_details = data.get("invoice_details", {}) or {}
 
     first_item = items[0] if items else {}
 
@@ -558,11 +613,20 @@ def map_nested_grn_payload(data: dict[str, Any]) -> dict[str, Any]:
         "po_date": document_details.get("po_date"),
         "grn_no": document_details.get("grn_no"),
         "grn_date": document_details.get("grn_date"),
-        "supplier_invoice_no": document_details.get("supplier_invoice_no"),
-        "supplier_invoice_date": document_details.get("supplier_invoice_date"),
+        "supplier_invoice_no": document_details.get("supplier_invoice_no") or invoice_details.get("supplier_invoice_no"),
+        "supplier_invoice_date": document_details.get("supplier_invoice_date") or invoice_details.get("supplier_invoice_date"),
         "gateentry_bookno": document_details.get("gateentry_bookno"),
         "gateentry_bookdate": document_details.get("gateentry_bookdate"),
         "tolerance": document_details.get("tolerance"),
+        "dc_numbers": invoice_details.get("dc_numbers"),
+        "delivery_days_gap": invoice_details.get("delivery_days_gap"),
+        "delivery_note_no": invoice_details.get("delivery_note_no"),
+        "delivery_note_date": invoice_details.get("delivery_note_date"),
+        "order_rating": invoice_details.get("order_rating"),
+        "grn_warehouse": invoice_details.get("grn_warehouse"),
+        "source_warehouse": invoice_details.get("source_warehouse"),
+        "accepted_warehouse": invoice_details.get("accepted_warehouse"),
+        "rejected_warehouse": invoice_details.get("rejected_warehouse"),
         "req_date": document_requirement_details.get("req_date"),
         "req_person_name": document_requirement_details.get("req_person_name"),
         "req_person_id": document_requirement_details.get("req_person_id"),
@@ -633,7 +697,7 @@ def build_grn_edit_payload(grn: GRN) -> dict[str, Any]:
     payload = deepcopy(grn.raw_payload if isinstance(grn.raw_payload, dict) else {})
     serialized = GRNReadSerializer(grn).data
 
-    for section_name in RECEIVER_NESTED_KEYS:
+    for section_name in ALL_NESTED_KEYS:
         default_value = deepcopy(serialized.get(section_name))
 
         if section_name == "items":
@@ -713,9 +777,24 @@ def merge_grn_update_payload(grn: GRN, data: Any) -> dict[str, Any]:
     return payload
 
 
+def to_json_safe(value: Any) -> Any:
+    """Recursively convert non-JSON-serializable Python objects to safe primitives."""
+    if isinstance(value, dict):
+        return {k: to_json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [to_json_safe(v) for v in value]
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
 def build_grn_update_fields(payload: dict[str, Any]) -> dict[str, Any]:
     flat_payload = map_nested_grn_payload(payload)
-    update_payload = {"raw_payload": payload}
+    update_payload = {"raw_payload": to_json_safe(payload)}
 
     for field_name in EDITABLE_FLAT_FIELDS:
         update_payload[field_name] = clean_model_value(field_name, flat_payload.get(field_name))
@@ -824,7 +903,7 @@ def serialize_grn_snapshot(grn: GRN) -> dict[str, Any]:
     return snapshot
 
 
-def build_store_sync_payload(*, grn: GRN, qcr_status: str | None = None) -> dict[str, Any]:
+def build_store_sync_payload(*, grn: GRN, qcr_status: str | None = None, accepted: bool = True) -> dict[str, Any]:
     payload = deepcopy(grn.raw_payload if isinstance(grn.raw_payload, dict) else {})
     document_details = payload.get("document_details")
     if not isinstance(document_details, dict):
@@ -868,6 +947,9 @@ def build_store_sync_payload(*, grn: GRN, qcr_status: str | None = None) -> dict
     payload["process_status"] = grn.process_status
     if qcr_status:
         payload["qcr_status"] = qcr_status
+    payload["target_warehouse"] = grn.accepted_warehouse or "Stores" if accepted else grn.rejected_warehouse or "Rejected Warehouse - CBE"
+    if not accepted:
+        payload["use_rejected_qty"] = True
     if grn.grn_date:
         payload.setdefault("grn_date", grn.grn_date.isoformat())
     if grn.accepted_qty is not None:
@@ -914,9 +996,9 @@ class GRNAPIViewMixin:
         list_scope = resolve_list_scope(request, getattr(self, "tab_scope", ""))
 
         if list_scope in MOVED_TO_GRN_SCOPES:
-            return queryset.filter(process_status="Moved to GRN")
+            return queryset.filter(process_status__in=["Moved to GRN", "GRN Approved"])
         if list_scope in ACTIVE_QCR_SCOPES:
-            return queryset.filter(status=True, process_status="GRN Process")
+            return queryset.filter(process_status="GRN Process")
         return queryset
 
     def get_grn_response(self, request):
@@ -978,7 +1060,7 @@ class GRNAPIViewMixin:
         try:
             data = request.data
             if any(key in data for key in RECEIVER_NESTED_KEYS):
-                payload = map_nested_grn_payload(data)
+                payload = build_receiver_grn_payload(data)
             elif hasattr(data, "dict"):
                 payload = data.dict()
             else:
@@ -987,6 +1069,12 @@ class GRNAPIViewMixin:
             serializer = GRNSerializer(data=payload)
             if serializer.is_valid():
                 saved_grn = serializer.save()
+                GRNAuditLog.objects.create(
+                    grn=saved_grn,
+                    stage=GRNAuditLog.STAGE_GRN_CREATED,
+                    actor=get_actor_name(request),
+                    notes=f"GRN {saved_grn.grn_no} created.",
+                )
                 return Response(
                     {
                         "status": "success",
@@ -1051,11 +1139,12 @@ class GRNDetailAPIView(APIView):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-            if not grn.status or grn.process_status != "GRN Process":
+            if grn.process_status != "GRN Process":
                 return Response(
                     {
                         "status": "error",
-                        "message": "Only active GRN Process records can be updated.",
+                        "message": "GRN details can only be edited in GRN Process stage. This record is locked.",
+                        "process_status": grn.process_status,
                     },
                     status=status.HTTP_409_CONFLICT,
                 )
@@ -1077,6 +1166,12 @@ class GRNDetailAPIView(APIView):
                 )
 
             saved_grn = serializer.save()
+            GRNAuditLog.objects.create(
+                grn=saved_grn,
+                stage=GRNAuditLog.STAGE_GRN_EDITED,
+                actor=get_actor_name(request),
+                notes="GRN Process fields updated.",
+            )
             return Response(
                 {
                     "status": "success",
@@ -1430,6 +1525,15 @@ class QCRListAPIView(APIView):
             raise
 
 
+def validate_move_to_qcr(grn: GRN) -> dict[str, str]:
+    errors: dict[str, str] = {}
+    for field_name, label in MOVE_TO_QCR_REQUIRED_FIELDS.items():
+        value = getattr(grn, field_name, None)
+        if is_blank(value):
+            errors[field_name] = f"{label} is required before moving to QCR."
+    return errors
+
+
 class GRNMoveToQCRAPIView(APIView):
     parser_classes = [JSONParser, FormParser, MultiPartParser]
 
@@ -1446,6 +1550,15 @@ class GRNMoveToQCRAPIView(APIView):
                         status=status.HTTP_404_NOT_FOUND,
                     )
 
+                if grn.process_status != "GRN Process":
+                    return Response(
+                        {
+                            "status": "error",
+                            "message": "Only GRN Process records can be moved to QCR.",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
                 if QCR.objects.filter(source_grn=grn).exists():
                     return Response(
                         {
@@ -1453,6 +1566,17 @@ class GRNMoveToQCRAPIView(APIView):
                             "message": "This GRN record has already been moved to QCR.",
                         },
                         status=status.HTTP_409_CONFLICT,
+                    )
+
+                validation_errors = validate_move_to_qcr(grn)
+                if validation_errors:
+                    return Response(
+                        {
+                            "status": "error",
+                            "message": "Mandatory fields are missing. Please complete all required fields before moving to QCR.",
+                            "errors": validation_errors,
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
                     )
 
                 moved_at = timezone.now()
@@ -1469,10 +1593,18 @@ class GRNMoveToQCRAPIView(APIView):
                 )
 
                 grn.process_status = "Moved to QCR"
+                grn.qc_status = "Pending"
                 grn.status = False
                 grn.moved_to_qcr_at = moved_at
                 grn.moved_to_qcr_by = moved_by
-                grn.save(update_fields=["process_status", "status", "moved_to_qcr_at", "moved_to_qcr_by", "updated_at"])
+                grn.save(update_fields=["process_status", "qc_status", "status", "moved_to_qcr_at", "moved_to_qcr_by", "updated_at"])
+
+                GRNAuditLog.objects.create(
+                    grn=grn,
+                    stage=GRNAuditLog.STAGE_MOVED_TO_QCR,
+                    actor=moved_by,
+                    notes=f"Moved to QCR. QCR ID: {qcr_record.unique_id}",
+                )
 
             return Response(
                 {
@@ -1512,10 +1644,24 @@ class QCRStatusUpdateAPIView(APIView):
             return Response(
                 {
                     "status": "error",
-                    "message": "A valid QCR action is required.",
+                    "message": "A valid QCR action is required (move_to_grn or reject).",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        remarks = None
+        if action == "reject":
+            raw_remarks = request.data.get("remarks") if hasattr(request.data, "get") else None
+            remarks = str(raw_remarks).strip() if raw_remarks else None
+            if not remarks:
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "Remarks are mandatory when rejecting a QCR.",
+                        "errors": {"remarks": "This field is required for rejection."},
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         try:
             with transaction.atomic():
@@ -1539,25 +1685,53 @@ class QCRStatusUpdateAPIView(APIView):
                     )
 
                 grn = qcr_record.source_grn
+                actor = get_actor_name(request)
 
                 if action == "move_to_grn":
                     qcr_record.status = "Moved to GRN"
                     qcr_record.save(update_fields=["status", "updated_at"])
-                    grn.process_status = "Moved to GRN"
+                    grn.process_status = "GRN Approved"
+                    grn.qc_status = "Pass"
                     grn.status = True
-                    message = "QCR record moved to GRN successfully."
+                    message = "QCR accepted. GRN approved and stock added to store."
+                    audit_stage = GRNAuditLog.STAGE_QCR_ACCEPTED
+                    audit_notes = f"QC Pass. Accepted quantity moved to {grn.accepted_warehouse or 'Stores'}."
                 else:
                     qcr_record.status = "Rejected"
-                    qcr_record.save(update_fields=["status", "updated_at"])
+                    qcr_record.remarks = remarks
+                    qcr_record.save(update_fields=["status", "remarks", "updated_at"])
                     grn.process_status = "Rejected"
+                    grn.qc_status = "Fail"
                     grn.status = False
-                    message = "QCR record rejected successfully."
+                    message = "QCR rejected. Stock will not be moved to store."
+                    audit_stage = GRNAuditLog.STAGE_QCR_REJECTED
+                    audit_notes = f"QC Fail. Remarks: {remarks}. Quantity not moved to store."
 
-                grn.save(update_fields=["process_status", "status", "updated_at"])
+                grn.save(update_fields=["process_status", "qc_status", "status", "updated_at"])
+
+                GRNAuditLog.objects.create(
+                    grn=grn,
+                    stage=audit_stage,
+                    actor=actor,
+                    notes=audit_notes,
+                )
+
+                sync_payload = build_store_sync_payload(
+                    grn=grn,
+                    qcr_status=qcr_record.status,
+                    accepted=(action == "move_to_grn"),
+                )
+                add_stock_from_grn(
+                    sync_payload,
+                    created_by=getattr(request, "user", None),
+                )
+
                 if action == "move_to_grn":
-                    add_stock_from_grn(
-                        build_store_sync_payload(grn=grn, qcr_status=qcr_record.status),
-                        created_by=getattr(request, "user", None),
+                    GRNAuditLog.objects.create(
+                        grn=grn,
+                        stage=GRNAuditLog.STAGE_ADDED_TO_STORE,
+                        actor=actor,
+                        notes=f"Inventory posted to {grn.accepted_warehouse or 'Stores'}.",
                     )
 
             return Response(
@@ -1594,5 +1768,26 @@ class QCRStatusUpdateAPIView(APIView):
                     "status": "error",
                     "message": str(exc),
                 },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class GRNAuditLogAPIView(APIView):
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+
+    def get(self, request, pk: int):
+        try:
+            grn = GRN.objects.filter(pk=pk).first()
+            if grn is None:
+                return Response(
+                    {"status": "error", "message": "GRN not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            logs = GRNAuditLog.objects.filter(grn=grn).order_by("timestamp")
+            serializer = GRNAuditLogSerializer(logs, many=True)
+            return Response({"status": "success", "data": serializer.data})
+        except Exception as exc:
+            return Response(
+                {"status": "error", "message": str(exc)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )

@@ -23,6 +23,67 @@ def current_stock_queryset():
     return StoreStock.objects.select_related("item", "warehouse")
 
 
+def _coerce_source_text(value) -> str:
+    return str(value or "").strip()
+
+
+def _transaction_group_reference(transaction_row: StoreTransaction) -> str:
+    metadata = transaction_row.metadata or {}
+    reference_id = _coerce_source_text(transaction_row.reference_id)
+    grn_identifier = _coerce_source_text(metadata.get("grn_identifier"))
+    grn_no = _coerce_source_text(metadata.get("grn_no"))
+
+    if grn_no:
+        return grn_no
+    if grn_identifier:
+        return grn_identifier
+    if transaction_row.reference_type == StoreTransaction.ReferenceType.GRN and ":" in reference_id:
+        return reference_id.rsplit(":", 1)[0]
+    return reference_id or transaction_row.reference_type
+
+
+def _serialize_stock_source(transaction_row: StoreTransaction) -> dict:
+    metadata = transaction_row.metadata or {}
+    reference = _transaction_group_reference(transaction_row)
+    supplier = _coerce_source_text(metadata.get("supplier"))
+
+    return {
+        "source_group_key": f"{transaction_row.reference_type}:{reference}",
+        "source_reference": reference,
+        "source_supplier": supplier,
+        "source_line_number": metadata.get("line_number"),
+        "source_transaction_type": transaction_row.transaction_type,
+        "source_transaction_no": transaction_row.transaction_no,
+        "source_transaction_date": transaction_row.transaction_date,
+        "source_created_at": transaction_row.created_at,
+    }
+
+
+def stock_source_map_for_stock_rows(stock_rows) -> dict[tuple[int, int], dict]:
+    rows = list(stock_rows)
+    if not rows:
+        return {}
+
+    warehouse_ids = {row.warehouse_id for row in rows}
+    item_ids = {row.item_id for row in rows}
+    source_map: dict[tuple[int, int], dict] = {}
+
+    transactions = (
+        StoreTransaction.objects.filter(
+            warehouse_id__in=warehouse_ids,
+            item_id__in=item_ids,
+            inward_qty__gt=STOCK_ZERO,
+        )
+        .order_by("warehouse_id", "item_id", "-transaction_date", "-created_at", "-id")
+    )
+    for transaction_row in transactions:
+        key = (transaction_row.warehouse_id, transaction_row.item_id)
+        if key not in source_map:
+            source_map[key] = _serialize_stock_source(transaction_row)
+
+    return source_map
+
+
 def stock_ledger_queryset():
     return StoreTransaction.objects.select_related("item", "warehouse", "created_by")
 

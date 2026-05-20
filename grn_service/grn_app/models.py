@@ -1,6 +1,7 @@
 from random import SystemRandom
 
 from django.db import models
+from django.utils import timezone
 
 
 _random = SystemRandom()
@@ -137,6 +138,25 @@ class GRN(WPEUniqueIDModel):
     raw_payload = models.JSONField(default=dict, blank=True)
 
     # =========================
+    # Invoice / Order Details (GRN Process editable)
+    # =========================
+    purchase_bill_no = models.CharField(max_length=100, unique=True, blank=True, null=True)
+    purchase_bill_date = models.DateField(blank=True, null=True)
+    dc_numbers = models.TextField(blank=True, null=True)
+    delivery_days_gap = models.IntegerField(default=0, blank=True, null=True)
+    delivery_note_no = models.CharField(max_length=100, blank=True, null=True)
+    delivery_note_date = models.DateTimeField(blank=True, null=True)
+    order_rating = models.IntegerField(default=0, blank=True, null=True)
+
+    # =========================
+    # Warehouse Routing (GRN Process editable)
+    # =========================
+    grn_warehouse = models.CharField(max_length=255, default="QC Pending Warehouse - CBE", blank=True)
+    source_warehouse = models.CharField(max_length=255, blank=True, null=True)
+    accepted_warehouse = models.CharField(max_length=255, default="Stores", blank=True)
+    rejected_warehouse = models.CharField(max_length=255, default="Rejected Warehouse - CBE", blank=True)
+
+    # =========================
     # System Fields
     # =========================
     created_at = models.DateTimeField(auto_now_add=True)
@@ -144,8 +164,19 @@ class GRN(WPEUniqueIDModel):
 
     status = models.BooleanField(default=True)
     process_status = models.CharField(max_length=100, default="GRN Process")
+    qc_status = models.CharField(max_length=20, default="Pending", blank=True)
     moved_to_qcr_at = models.DateTimeField(blank=True, null=True)
     moved_to_qcr_by = models.CharField(max_length=255, blank=True, null=True)
+
+    def save(self, *args, **kwargs):
+        is_new = self.pk is None
+        if not self.purchase_bill_date:
+            self.purchase_bill_date = timezone.localdate()
+        super().save(*args, **kwargs)
+        if is_new and not self.purchase_bill_no:
+            purchase_bill_no = f"PB-{self.pk:08d}"
+            GRN.objects.filter(pk=self.pk).update(purchase_bill_no=purchase_bill_no)
+            self.purchase_bill_no = purchase_bill_no
 
     def __str__(self):
         return self.grn_no
@@ -156,6 +187,7 @@ class QCR(WPEUniqueIDModel):
     grn_reference_no = models.CharField(max_length=100, db_index=True)
     snapshot = models.JSONField(default=dict)
     status = models.CharField(max_length=100, default="Active")
+    remarks = models.TextField(blank=True, null=True)
     moved_to_qcr_at = models.DateTimeField()
     moved_to_qcr_by = models.CharField(max_length=255, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -163,3 +195,24 @@ class QCR(WPEUniqueIDModel):
 
     def __str__(self):
         return f"QCR-{self.grn_reference_no}"
+
+
+class GRNAuditLog(models.Model):
+    STAGE_GRN_CREATED = "GRN Created"
+    STAGE_GRN_EDITED = "GRN Process Edited"
+    STAGE_MOVED_TO_QCR = "Moved to QCR"
+    STAGE_QCR_ACCEPTED = "QCR Accepted"
+    STAGE_QCR_REJECTED = "QCR Rejected"
+    STAGE_ADDED_TO_STORE = "Added to Store"
+
+    grn = models.ForeignKey(GRN, on_delete=models.CASCADE, related_name="audit_logs")
+    stage = models.CharField(max_length=100)
+    actor = models.CharField(max_length=255, blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-timestamp"]
+
+    def __str__(self):
+        return f"{self.grn.grn_no} - {self.stage}"

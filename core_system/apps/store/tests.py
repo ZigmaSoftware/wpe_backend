@@ -201,6 +201,59 @@ class StoreWorkflowTests(APITestCase):
         self.assertEqual(second_result["skipped_references"], ["WPE-00000001:1"])
         self.assertEqual(stock_row.available_qty, Decimal("12.500"))
 
+    def test_store_stock_list_exposes_grn_purchase_group_metadata(self):
+        first_item = Item.objects.create(
+            category="Raw Material",
+            group="polymer",
+            sub_group="hdpe",
+            item_name="Grouped Resin A",
+            unit="kg",
+        )
+        second_item = Item.objects.create(
+            category="Raw Material",
+            group="polymer",
+            sub_group="hdpe",
+            item_name="Grouped Resin B",
+            unit="kg",
+        )
+        payload = {
+            "unique_id": "WPE-00000003",
+            "process_status": "Moved to GRN",
+            "document_details": {
+                "grn_no": "GRN-1003",
+                "grn_date": "2026-05-05",
+            },
+            "supplier_details": {
+                "trade_name": "Grouped Supplier",
+            },
+            "items": [
+                {
+                    "item_id": str(first_item.id),
+                    "product_description": first_item.item_name,
+                    "unit": "kg",
+                    "accepted_qty": "10.000",
+                },
+                {
+                    "item_id": str(second_item.id),
+                    "product_description": second_item.item_name,
+                    "unit": "kg",
+                    "accepted_qty": "20.000",
+                },
+            ],
+        }
+
+        add_stock_from_grn(payload, created_by=self.store_user)
+        response = self.blending_client.get("/api/blending/request-stock/")
+
+        rows = response.data["data"]["results"]
+        grouped_rows = [row for row in rows if row["item"] in {first_item.id, second_item.id}]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(grouped_rows), 2)
+        self.assertEqual({row["source_group_key"] for row in grouped_rows}, {"GRN:GRN-1003"})
+        self.assertEqual({row["source_reference"] for row in grouped_rows}, {"GRN-1003"})
+        self.assertEqual({row["source_supplier"] for row in grouped_rows}, {"Grouped Supplier"})
+
     def test_add_stock_from_grn_requires_moved_to_grn_status(self):
         payload = {
             "unique_id": "WPE-00000002",

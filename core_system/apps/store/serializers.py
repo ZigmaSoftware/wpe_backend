@@ -42,6 +42,14 @@ class StoreStockSerializer(serializers.ModelSerializer):
     warehouse_name = serializers.CharField(source="warehouse.name", read_only=True)
     net_available_qty = serializers.DecimalField(max_digits=14, decimal_places=3, read_only=True)
     quantity = serializers.SerializerMethodField()
+    source_group_key = serializers.SerializerMethodField()
+    source_reference = serializers.SerializerMethodField()
+    source_supplier = serializers.SerializerMethodField()
+    source_line_number = serializers.SerializerMethodField()
+    source_transaction_type = serializers.SerializerMethodField()
+    source_transaction_no = serializers.SerializerMethodField()
+    source_transaction_date = serializers.SerializerMethodField()
+    source_created_at = serializers.SerializerMethodField()
 
     class Meta:
         model = StoreStock
@@ -61,6 +69,14 @@ class StoreStockSerializer(serializers.ModelSerializer):
             "reserved_qty",
             "net_available_qty",
             "quantity",
+            "source_group_key",
+            "source_reference",
+            "source_supplier",
+            "source_line_number",
+            "source_transaction_type",
+            "source_transaction_no",
+            "source_transaction_date",
+            "source_created_at",
             "created_at",
             "updated_at",
         )
@@ -68,6 +84,42 @@ class StoreStockSerializer(serializers.ModelSerializer):
 
     def get_quantity(self, obj):
         return serialize_quantity(obj.available_qty)
+
+    def _get_source_info(self, obj):
+        source_map = self.context.get("stock_source_map", {})
+        return source_map.get((obj.warehouse_id, obj.item_id), {})
+
+    def get_source_group_key(self, obj):
+        source_info = self._get_source_info(obj)
+        return source_info.get("source_group_key") or f"stock:{obj.id}"
+
+    def get_source_reference(self, obj):
+        source_info = self._get_source_info(obj)
+        return source_info.get("source_reference") or obj.warehouse.code
+
+    def get_source_supplier(self, obj):
+        source_info = self._get_source_info(obj)
+        return source_info.get("source_supplier") or None
+
+    def get_source_line_number(self, obj):
+        source_info = self._get_source_info(obj)
+        return source_info.get("source_line_number")
+
+    def get_source_transaction_type(self, obj):
+        source_info = self._get_source_info(obj)
+        return source_info.get("source_transaction_type")
+
+    def get_source_transaction_no(self, obj):
+        source_info = self._get_source_info(obj)
+        return source_info.get("source_transaction_no")
+
+    def get_source_transaction_date(self, obj):
+        source_info = self._get_source_info(obj)
+        return source_info.get("source_transaction_date")
+
+    def get_source_created_at(self, obj):
+        source_info = self._get_source_info(obj)
+        return source_info.get("source_created_at")
 
 
 class LegacyStockRequestCreateSerializer(serializers.Serializer):

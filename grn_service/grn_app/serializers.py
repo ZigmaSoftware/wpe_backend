@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import GRN, QCR
+from .models import GRN, GRNAuditLog, QCR
 
 
 class GRNSerializer(serializers.ModelSerializer):
@@ -11,6 +11,20 @@ class GRNSerializer(serializers.ModelSerializer):
     def validate_grn_no(self, value):
         if not value:
             raise serializers.ValidationError("GRN Number is required")
+        return value
+
+    def validate_raw_payload(self, value):
+        if value is None or value == "" or value == []:
+            return {}
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            import json
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, dict) else {}
+            except (json.JSONDecodeError, ValueError):
+                raise serializers.ValidationError("raw_payload must be valid JSON if provided.")
         return value
 
 
@@ -63,6 +77,7 @@ class GRNReadSerializer(serializers.ModelSerializer):
             "updated_at": instance.updated_at,
             "status": instance.status,
             "process_status": instance.process_status,
+            "qc_status": instance.qc_status,
             "moved_to_qcr_at": instance.moved_to_qcr_at,
             "moved_to_qcr_by": instance.moved_to_qcr_by,
             "raw_payload": raw_payload,
@@ -106,6 +121,19 @@ class GRNReadSerializer(serializers.ModelSerializer):
                 "sales_contact_id": instance.sales_contact_id,
                 "currency": instance.currency,
             },
+            "invoice_details": {
+                "purchase_bill_no": instance.purchase_bill_no,
+                "purchase_bill_date": instance.purchase_bill_date,
+                "dc_numbers": instance.dc_numbers,
+                "delivery_days_gap": instance.delivery_days_gap,
+                "delivery_note_no": instance.delivery_note_no,
+                "delivery_note_date": instance.delivery_note_date,
+                "order_rating": instance.order_rating,
+                "grn_warehouse": instance.grn_warehouse,
+                "source_warehouse": instance.source_warehouse,
+                "accepted_warehouse": instance.accepted_warehouse,
+                "rejected_warehouse": instance.rejected_warehouse,
+            },
             "items": raw_items if isinstance(raw_items, list) else ([item_data] if has_item_data else []),
             "value_details": {
                 "freight_charge": instance.freight_charge,
@@ -123,3 +151,9 @@ class QCRSerializer(serializers.ModelSerializer):
     class Meta:
         model = QCR
         fields = "__all__"
+
+
+class GRNAuditLogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GRNAuditLog
+        fields = ["id", "grn_id", "stage", "actor", "notes", "timestamp"]

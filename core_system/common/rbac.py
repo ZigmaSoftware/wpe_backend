@@ -20,6 +20,18 @@ BLENDING_ROLE_TOKENS = {
     "blending_user",
     "blending_manager",
 }
+PRESALES_ROLE_TOKENS = {
+    "presales",
+    "presales_user",
+    "presales_manager",
+    "sales",
+}
+PRODUCTION_ROLE_TOKENS = {
+    "production",
+    "production_user",
+    "production_manager",
+    "operator",
+}
 
 
 def _normalize_role_token(value) -> str | None:
