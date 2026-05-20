@@ -9,7 +9,7 @@ from rest_framework import serializers
 from apps.login_home.models import Department
 
 from .models import (
-    SCREEN_ACTIONS,
+    SCREEN_ACTIONS, 
     MainScreen,
     ScreenSection,
     Staff,

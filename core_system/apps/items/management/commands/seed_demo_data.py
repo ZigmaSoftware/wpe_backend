@@ -240,8 +240,8 @@ class Command(BaseCommand):
                 "is_active": True,
             },
         )
-        if created or not user.check_password("admin123"):
-            user.set_password("admin123")
+        if created or not user.check_password("admin@123"):
+            user.set_password("admin@123")
             user.email = "admin@gmail.com"
             user.is_staff = True
             user.is_superuser = True
