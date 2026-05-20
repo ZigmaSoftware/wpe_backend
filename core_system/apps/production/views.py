@@ -204,15 +204,64 @@ class ProductionMachineListAPIView(generics.ListAPIView):
     serializer_class = ProductionMachineSerializer
 
     def get_queryset(self):
-        qs = ProductionMachine.objects.filter(is_active=True)
+        qs = ProductionMachine.objects.all()
+        show_all = self.request.query_params.get("show_all", "false").lower() == "true"
+        if not show_all:
+            qs = qs.filter(is_active=True)
         stage = self.request.query_params.get("stage")
         if stage:
             qs = qs.filter(applicable_stages__icontains=stage)
-        return qs
+        return qs.order_by("machine_code")
 
     def list(self, request, *args, **kwargs):
         qs = self.get_queryset()
         return success_response(message="Machines fetched.", data=list(ProductionMachineSerializer(qs, many=True).data))
+
+    def post(self, request, *args, **kwargs):
+        data = request.data
+        required = ("machine_code", "name", "machine_type")
+        for field in required:
+            if not data.get(field):
+                return success_response(message=f"{field} is required.", data={}, status_code=400)
+        if ProductionMachine.objects.filter(machine_code=data["machine_code"]).exists():
+            return success_response(message="Machine code already exists.", data={}, status_code=400)
+        machine = ProductionMachine.objects.create(
+            machine_code=data["machine_code"].strip().upper(),
+            name=data["name"].strip(),
+            machine_type=data["machine_type"],
+            applicable_stages=data.get("applicable_stages", "AD,BL"),
+            location=data.get("location", ""),
+            notes=data.get("notes", ""),
+            is_active=data.get("is_active", True),
+        )
+        return success_response(message="Machine created.", data=ProductionMachineSerializer(machine).data, status_code=201)
+
+
+class ProductionMachineDetailAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self, pk):
+        return get_object_or_404(ProductionMachine, pk=pk)
+
+    def get(self, request, pk, *args, **kwargs):
+        machine = self.get_object(pk)
+        return success_response(message="Machine fetched.", data=ProductionMachineSerializer(machine).data)
+
+    def patch(self, request, pk, *args, **kwargs):
+        machine = self.get_object(pk)
+        data = request.data
+        updatable = ("name", "machine_type", "applicable_stages", "location", "notes", "is_active")
+        for field in updatable:
+            if field in data:
+                setattr(machine, field, data[field])
+        machine.save()
+        return success_response(message="Machine updated.", data=ProductionMachineSerializer(machine).data)
+
+    def delete(self, request, pk, *args, **kwargs):
+        machine = self.get_object(pk)
+        machine.is_active = False
+        machine.save()
+        return success_response(message="Machine deactivated.", data={})
 
 
 class BOMVariantListAPIView(generics.ListAPIView):
@@ -220,10 +269,130 @@ class BOMVariantListAPIView(generics.ListAPIView):
     serializer_class = BOMVariantListSerializer
 
     def get_queryset(self):
-        return BOMVariant.objects.filter(is_active=True).prefetch_related("components")
+        qs = BOMVariant.objects.all()
+        show_all = self.request.query_params.get("show_all", "false").lower() == "true"
+        if not show_all:
+            qs = qs.filter(is_active=True)
+        return qs.prefetch_related("components").order_by("variant_code")
 
     def list(self, request, *args, **kwargs):
         return success_response(message="BOM variants fetched.", data=list(BOMVariantListSerializer(self.get_queryset(), many=True).data))
+
+    def post(self, request, *args, **kwargs):
+        data = request.data
+        required = ("variant_code", "name", "password")
+        for field in required:
+            if not data.get(field):
+                return success_response(message=f"{field} is required.", data={}, status_code=400)
+        if BOMVariant.objects.filter(variant_code=data["variant_code"]).exists():
+            return success_response(message="Variant code already exists.", data={}, status_code=400)
+
+        from apps.items.models import Item
+        product_item = None
+        if data.get("product_item"):
+            product_item = get_object_or_404(Item, pk=data["product_item"])
+
+        bom = BOMVariant(
+            variant_code=data["variant_code"].strip().upper(),
+            name=data["name"].strip(),
+            product_item=product_item,
+            revision=data.get("revision", "v1"),
+            notes=data.get("notes", ""),
+            is_active=True,
+            created_by=request.user,
+        )
+        bom.set_password(str(data["password"]))
+        bom.save()
+
+        components = data.get("components", [])
+        for comp_data in components:
+            item = get_object_or_404(Item, pk=comp_data["item"])
+            BOMVariantComponent.objects.create(
+                bom_variant=bom,
+                item=item,
+                target_weight_grams=comp_data.get("target_weight_grams", 0),
+                min_weight_grams=comp_data.get("min_weight_grams", 195),
+                max_weight_grams=comp_data.get("max_weight_grams", 9205),
+                sequence=comp_data.get("sequence", 1),
+                is_regrind=comp_data.get("is_regrind", False),
+                unit=comp_data.get("unit", "g"),
+            )
+
+        bom.refresh_from_db()
+        full_bom = BOMVariant.objects.prefetch_related("components__item").get(pk=bom.pk)
+        return success_response(message="BOM variant created.", data=BOMVariantDetailSerializer(full_bom).data, status_code=201)
+
+
+class BOMVariantDetailAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self, pk):
+        return get_object_or_404(BOMVariant, pk=pk)
+
+    def get(self, request, pk, *args, **kwargs):
+        bom = BOMVariant.objects.prefetch_related("components__item").get(pk=pk)
+        return success_response(message="BOM variant fetched.", data=BOMVariantDetailSerializer(bom).data)
+
+    def patch(self, request, pk, *args, **kwargs):
+        bom = self.get_object(pk)
+        data = request.data
+        for field in ("name", "revision", "notes", "is_active"):
+            if field in data:
+                setattr(bom, field, data[field])
+        if data.get("product_item"):
+            from apps.items.models import Item
+            bom.product_item = get_object_or_404(Item, pk=data["product_item"])
+        bom.save()
+        return success_response(message="BOM variant updated.", data=BOMVariantListSerializer(bom).data)
+
+    def delete(self, request, pk, *args, **kwargs):
+        bom = self.get_object(pk)
+        bom.is_active = False
+        bom.save()
+        return success_response(message="BOM variant deactivated.", data={})
+
+
+class BOMVariantSetPasswordAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, *args, **kwargs):
+        bom = get_object_or_404(BOMVariant, pk=pk)
+        password = request.data.get("password", "")
+        if not password:
+            return success_response(message="Password is required.", data={}, status_code=400)
+        bom.set_password(str(password))
+        bom.save()
+        return success_response(message="Password updated successfully.", data={})
+
+
+class BOMVariantComponentAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, *args, **kwargs):
+        bom = get_object_or_404(BOMVariant, pk=pk, is_active=True)
+        data = request.data
+        if not data.get("item"):
+            return success_response(message="item is required.", data={}, status_code=400)
+        from apps.items.models import Item
+        item = get_object_or_404(Item, pk=data["item"])
+        if BOMVariantComponent.objects.filter(bom_variant=bom, item=item).exists():
+            return success_response(message="This item is already a component of this BOM variant.", data={}, status_code=400)
+        comp = BOMVariantComponent.objects.create(
+            bom_variant=bom,
+            item=item,
+            target_weight_grams=data.get("target_weight_grams", 0),
+            min_weight_grams=data.get("min_weight_grams", 195),
+            max_weight_grams=data.get("max_weight_grams", 9205),
+            sequence=data.get("sequence", bom.components.count() + 1),
+            is_regrind=data.get("is_regrind", False),
+            unit=data.get("unit", "g"),
+        )
+        return success_response(message="Component added.", data=BOMVariantComponentSerializer(comp).data, status_code=201)
+
+    def delete(self, request, pk, comp_id, *args, **kwargs):
+        comp = get_object_or_404(BOMVariantComponent, pk=comp_id, bom_variant_id=pk)
+        comp.delete()
+        return success_response(message="Component removed.", data={})
 
 
 class BOMVariantVerifyPasswordAPIView(generics.GenericAPIView):
