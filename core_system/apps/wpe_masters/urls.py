@@ -10,6 +10,8 @@ from .views import (
     DepartmentMasterViewSet,
     LocationMasterViewSet,
     PriceBookMasterViewSet,
+    ProductTypeCategoryViewSet,
+    ProductTypeSubtypeViewSet,
     ProductionTypeMasterViewSet,
     PurchaseTypeMasterViewSet,
     RolePermissionMatrixView,
@@ -27,6 +29,8 @@ router.register(r"branches", BranchMasterViewSet, basename="wpe-branch")
 router.register(r"price-books", PriceBookMasterViewSet, basename="wpe-price-book")
 router.register(r"warehouses", WarehouseMasterViewSet, basename="wpe-warehouse")
 router.register(r"production-types", ProductionTypeMasterViewSet, basename="wpe-production-type")
+router.register(r"product-type-categories", ProductTypeCategoryViewSet, basename="wpe-product-type-category")
+router.register(r"product-type-subtypes", ProductTypeSubtypeViewSet, basename="wpe-product-type-subtype")
 router.register(r"sale-types", SaleTypeMasterViewSet, basename="wpe-sale-type")
 router.register(r"purchase-types", PurchaseTypeMasterViewSet, basename="wpe-purchase-type")
 router.register(r"roles", RoleMasterViewSet, basename="wpe-role")

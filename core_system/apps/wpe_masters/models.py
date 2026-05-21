@@ -6,6 +6,33 @@ import uuid
 
 from django.conf import settings
 from django.db import models
+from django.utils.text import slugify
+
+
+def build_unique_code(
+    model_cls: type[models.Model],
+    source_value: str,
+    *,
+    instance: models.Model | None = None,
+    field_name: str = "code",
+    prefix: str = "wpe-master",
+    max_length: int = 120,
+) -> str:
+    base = slugify(source_value or "")[:max_length].strip("-") or prefix
+    candidate = base
+    counter = 2
+
+    queryset = model_cls.objects.all()
+    if instance and instance.pk:
+        queryset = queryset.exclude(pk=instance.pk)
+
+    while queryset.filter(**{field_name: candidate}).exists():
+        suffix = f"-{counter}"
+        trimmed_base = base[: max_length - len(suffix)]
+        candidate = f"{trimmed_base}{suffix}"
+        counter += 1
+
+    return candidate
 
 
 class BaseMaster(models.Model):
@@ -21,6 +48,44 @@ class BaseMaster(models.Model):
 
     def __str__(self) -> str:
         return self.name
+
+
+class ProductTypeGovernedMaster(models.Model):
+    unique_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    name = models.CharField(
+        max_length=200,
+        db_index=True,
+        db_collation="utf8mb4_bin",
+    )
+    code = models.CharField(
+        max_length=120,
+        unique=True,
+        db_index=True,
+        editable=False,
+    )
+    description = models.TextField(blank=True)
+    sort_order = models.PositiveIntegerField(default=1, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+
+    class Meta:
+        abstract = True
+
+    def __str__(self) -> str:
+        return self.name
+
+    def save(self, *args, **kwargs):
+        self.name = (self.name or "").strip()
+        self.description = (self.description or "").strip()
+        if not self.code:
+            self.code = build_unique_code(
+                type(self),
+                self.name,
+                instance=self,
+                prefix=self._meta.model_name,
+            )
+        return super().save(*args, **kwargs)
 
 
 class LocationMaster(BaseMaster):
@@ -93,6 +158,77 @@ class DepartmentMaster(BaseMaster):
         db_table = "wpe_department_master"
         verbose_name = "Department Master"
         verbose_name_plural = "Department Masters"
+
+
+class ProductTypeCategory(ProductTypeGovernedMaster):
+    class Meta:
+        db_table = "wpe_product_type_category"
+        verbose_name = "Product Type Category"
+        verbose_name_plural = "Product Type Categories"
+        ordering = ["sort_order", "name", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["name"],
+                name="wpe_pt_category_name_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["is_active", "sort_order"],
+                name="wpe_pt_cat_active_sort_idx",
+            ),
+            models.Index(
+                fields=["sort_order", "name"],
+                name="wpe_pt_cat_sort_name_idx",
+            ),
+        ]
+
+
+class ProductTypeSubtype(ProductTypeGovernedMaster):
+    category = models.ForeignKey(
+        ProductTypeCategory,
+        on_delete=models.PROTECT,
+        related_name="subtypes",
+    )
+
+    class Meta:
+        db_table = "wpe_product_type_subtype"
+        verbose_name = "Product Type Subtype"
+        verbose_name_plural = "Product Type Subtypes"
+        ordering = ["category__sort_order", "category__name", "sort_order", "name", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["category", "name"],
+                name="wpe_pt_subtype_category_name_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["category", "is_active"],
+                name="wpe_pt_subtype_cat_active_idx",
+            ),
+            models.Index(
+                fields=["category", "sort_order"],
+                name="wpe_pt_subtype_cat_sort_idx",
+            ),
+            models.Index(
+                fields=["sort_order", "name"],
+                name="wpe_pt_subtype_sort_name_idx",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.name = (self.name or "").strip()
+        self.description = (self.description or "").strip()
+        if not self.code:
+            category_name = self.category.name if self.category_id else "category"
+            self.code = build_unique_code(
+                type(self),
+                f"{category_name}-{self.name}",
+                instance=self,
+                prefix="product-type-subtype",
+            )
+        return super().save(*args, **kwargs)
 
 
 class WPEUserCreation(models.Model):

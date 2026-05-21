@@ -11,6 +11,8 @@ from .models import (
     DepartmentMaster,
     LocationMaster,
     PriceBookMaster,
+    ProductTypeCategory,
+    ProductTypeSubtype,
     ProductionTypeMaster,
     PurchaseTypeMaster,
     RoleMaster,
@@ -74,6 +76,137 @@ class RoleMasterSerializer(BaseMasterSerializer):
 class DepartmentMasterSerializer(BaseMasterSerializer):
     class Meta(BaseMasterSerializer.Meta):
         model = DepartmentMaster
+
+
+class ProductTypeNameValidationMixin:
+    default_error_messages = {
+        "blank_name": "Name is required.",
+    }
+
+    def validate_name(self, value: str) -> str:
+        normalized = (value or "").strip()
+        if not normalized:
+            self.fail("blank_name")
+        return normalized
+
+    def validate_description(self, value: str) -> str:
+        return (value or "").strip()
+
+    def _validate_exact_name_uniqueness(
+        self,
+        *,
+        model_cls,
+        name: str,
+        instance=None,
+        filters: dict[str, object] | None = None,
+    ) -> None:
+        queryset = model_cls.objects.filter(name=name, **(filters or {}))
+        if instance and instance.pk:
+            queryset = queryset.exclude(pk=instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError({"name": "A record with this exact name already exists."})
+
+
+class ProductTypeSubtypeNestedSerializer(serializers.ModelSerializer):
+    category_name = serializers.CharField(source="category.name", read_only=True)
+
+    class Meta:
+        model = ProductTypeSubtype
+        fields = (
+            "id",
+            "unique_id",
+            "category",
+            "category_name",
+            "name",
+            "code",
+            "description",
+            "sort_order",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("unique_id", "code", "created_at", "updated_at")
+
+
+class ProductTypeCategorySerializer(ProductTypeNameValidationMixin, serializers.ModelSerializer):
+    subtype_count = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = ProductTypeCategory
+        fields = (
+            "id",
+            "unique_id",
+            "name",
+            "code",
+            "description",
+            "sort_order",
+            "subtype_count",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("unique_id", "code", "subtype_count", "created_at", "updated_at")
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        name = attrs.get("name", getattr(self.instance, "name", ""))
+        self._validate_exact_name_uniqueness(
+            model_cls=ProductTypeCategory,
+            name=name,
+            instance=self.instance,
+        )
+        return attrs
+
+
+class ProductTypeCategoryTreeSerializer(ProductTypeCategorySerializer):
+    subtypes = serializers.SerializerMethodField()
+
+    class Meta(ProductTypeCategorySerializer.Meta):
+        fields = ProductTypeCategorySerializer.Meta.fields + ("subtypes",)
+
+    def get_subtypes(self, obj):
+        subtypes = getattr(obj, "prefetched_subtypes", None)
+        if subtypes is None:
+            subtypes = obj.subtypes.all()
+        return ProductTypeSubtypeNestedSerializer(subtypes, many=True).data
+
+
+class ProductTypeSubtypeSerializer(ProductTypeNameValidationMixin, serializers.ModelSerializer):
+    category_name = serializers.CharField(source="category.name", read_only=True)
+
+    class Meta:
+        model = ProductTypeSubtype
+        fields = (
+            "id",
+            "unique_id",
+            "category",
+            "category_name",
+            "name",
+            "code",
+            "description",
+            "sort_order",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("unique_id", "code", "category_name", "created_at", "updated_at")
+        validators = []
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        category = attrs.get("category", getattr(self.instance, "category", None))
+        name = attrs.get("name", getattr(self.instance, "name", ""))
+
+        if category is None:
+            raise serializers.ValidationError({"category": "Category is required."})
+
+        self._validate_exact_name_uniqueness(
+            model_cls=ProductTypeSubtype,
+            name=name,
+            instance=self.instance,
+            filters={"category": category},
+        )
+        return attrs
 
 
 class WPEUserCreationReadSerializer(serializers.ModelSerializer):

@@ -5,6 +5,8 @@ from .models import (
     DepartmentMaster,
     LocationMaster,
     PriceBookMaster,
+    ProductTypeCategory,
+    ProductTypeSubtype,
     ProductionTypeMaster,
     PurchaseTypeMaster,
     RoleMaster,
@@ -12,6 +14,14 @@ from .models import (
     WarehouseMaster,
     WPEUserCreation,
 )
+
+
+class ProductTypeSubtypeInline(admin.TabularInline):
+    model = ProductTypeSubtype
+    extra = 0
+    fields = ("name", "code", "sort_order", "is_active")
+    readonly_fields = ("code",)
+    ordering = ("sort_order", "name")
 
 
 @admin.register(LocationMaster)
@@ -75,6 +85,23 @@ class DepartmentMasterAdmin(admin.ModelAdmin):
     list_display = ("name", "is_active", "created_at")
     search_fields = ("name",)
     list_filter = ("is_active",)
+
+
+@admin.register(ProductTypeCategory)
+class ProductTypeCategoryAdmin(admin.ModelAdmin):
+    list_display = ("name", "code", "sort_order", "is_active", "created_at")
+    search_fields = ("name", "code", "description")
+    list_filter = ("is_active",)
+    ordering = ("sort_order", "name")
+    inlines = [ProductTypeSubtypeInline]
+
+
+@admin.register(ProductTypeSubtype)
+class ProductTypeSubtypeAdmin(admin.ModelAdmin):
+    list_display = ("name", "category", "code", "sort_order", "is_active", "created_at")
+    search_fields = ("name", "code", "description", "category__name")
+    list_filter = ("category", "is_active")
+    ordering = ("category__sort_order", "category__name", "sort_order", "name")
 
 
 @admin.register(WPEUserCreation)

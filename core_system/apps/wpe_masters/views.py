@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 from django.db import transaction
-from django.db.models import ProtectedError
+from django.db.models import Count, Prefetch, ProtectedError, Q
 from rest_framework import filters, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.admin_master.models import MainScreen, UserScreen
+from apps.admin_master.permissions import AdminMasterRBACPermission
 
 from .models import (
     BranchMaster,
     DepartmentMaster,
     LocationMaster,
     PriceBookMaster,
+    ProductTypeCategory,
+    ProductTypeSubtype,
     ProductionTypeMaster,
     PurchaseTypeMaster,
     RoleMaster,
@@ -30,6 +33,9 @@ from .serializers import (
     DepartmentMasterSerializer,
     LocationMasterSerializer,
     PriceBookMasterSerializer,
+    ProductTypeCategorySerializer,
+    ProductTypeCategoryTreeSerializer,
+    ProductTypeSubtypeSerializer,
     ProductionTypeMasterSerializer,
     PurchaseTypeMasterSerializer,
     RoleMasterSerializer,
@@ -42,13 +48,52 @@ from .serializers import (
 from .pagination import WpeMasterPagination
 
 
-class BaseMasterViewSet(viewsets.ModelViewSet):
+def _coerce_filter_value(value: str):
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    return value
+
+
+class QueryParamFilterMixin:
+    filterset_map: dict[str, str] = {}
+
+    def filter_queryset(self, queryset):
+        queryset = super().filter_queryset(queryset)
+        search_value = (
+            self.request.query_params.get("search[value]")
+            if not self.request.query_params.get("search")
+            else None
+        )
+        if search_value:
+            query = Q()
+            for field_name in getattr(self, "search_fields", ()):
+                if field_name.startswith(("^", "=", "@", "$")):
+                    field_name = field_name[1:]
+                query |= Q(**{f"{field_name}__icontains": search_value})
+            queryset = queryset.filter(query)
+
+        for param, lookup in self.filterset_map.items():
+            value = self.request.query_params.get(param)
+            if value in (None, ""):
+                continue
+            queryset = queryset.filter(**{lookup: _coerce_filter_value(value)})
+
+        return queryset
+
+
+class BaseMasterViewSet(QueryParamFilterMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     pagination_class = WpeMasterPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ["name"]
     ordering_fields = ["name", "created_at", "is_active"]
     ordering = ["name"]
+    filterset_map = {
+        "is_active": "is_active",
+    }
 
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
@@ -82,6 +127,16 @@ class BaseMasterViewSet(viewsets.ModelViewSet):
                 {"detail": "Cannot delete: this record is referenced by other data."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+
+class ProductTypeManagedViewSet(BaseMasterViewSet):
+    permission_classes = [AdminMasterRBACPermission]
+    permission_screen_code = "wpe-product-type-master"
+    ordering_fields = ["sort_order", "name", "code", "is_active", "created_at"]
+    ordering = ["sort_order", "name"]
+    filterset_map = {
+        "is_active": "is_active",
+    }
 
 
 class LocationMasterViewSet(BaseMasterViewSet):
@@ -127,6 +182,82 @@ class RoleMasterViewSet(BaseMasterViewSet):
 class DepartmentMasterViewSet(BaseMasterViewSet):
     queryset = DepartmentMaster.objects.all()
     serializer_class = DepartmentMasterSerializer
+
+
+class ProductTypeCategoryViewSet(ProductTypeManagedViewSet):
+    serializer_class = ProductTypeCategorySerializer
+    search_fields = ["name", "code", "description"]
+
+    def get_queryset(self):
+        return ProductTypeCategory.objects.annotate(
+            subtype_count=Count("subtypes", distinct=True)
+        ).all()
+
+    @action(detail=False, methods=["get"])
+    def lookup(self, request):
+        queryset = (
+            self.filter_queryset(self.get_queryset())
+            .filter(is_active=True)
+            .values("id", "name", "code", "sort_order")
+            .order_by("sort_order", "name", "id")
+        )
+        return Response(list(queryset))
+
+    @action(detail=False, methods=["get"], url_path="tree")
+    def tree(self, request):
+        subtype_queryset = ProductTypeSubtype.objects.order_by("sort_order", "name", "id")
+        if request.query_params.get("subtypes_is_active") not in (None, ""):
+            subtype_queryset = subtype_queryset.filter(
+                is_active=_coerce_filter_value(request.query_params["subtypes_is_active"])
+            )
+
+        queryset = self.filter_queryset(
+            self.get_queryset().prefetch_related(
+                Prefetch(
+                    "subtypes",
+                    queryset=subtype_queryset,
+                    to_attr="prefetched_subtypes",
+                )
+            )
+        )
+        serializer = ProductTypeCategoryTreeSerializer(queryset, many=True)
+        return Response(serializer.data)
+
+
+class ProductTypeSubtypeViewSet(ProductTypeManagedViewSet):
+    serializer_class = ProductTypeSubtypeSerializer
+    search_fields = ["name", "code", "description", "category__name", "category__code"]
+    filterset_map = {
+        "category": "category_id",
+        "category_id": "category_id",
+        "is_active": "is_active",
+    }
+
+    def get_queryset(self):
+        return ProductTypeSubtype.objects.select_related("category").all()
+
+    @action(detail=False, methods=["get"])
+    def lookup(self, request):
+        queryset = (
+            self.filter_queryset(self.get_queryset())
+            .filter(is_active=True, category__is_active=True)
+            .values("id", "name", "code", "category_id", "category__name", "sort_order")
+            .order_by("category__sort_order", "category__name", "sort_order", "name", "id")
+        )
+
+        return Response(
+            [
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "code": row["code"],
+                    "category": row["category_id"],
+                    "category_name": row["category__name"],
+                    "sort_order": row["sort_order"],
+                }
+                for row in queryset
+            ]
+        )
 
 
 class WPEUserCreationViewSet(viewsets.ModelViewSet):
