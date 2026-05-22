@@ -4,6 +4,7 @@ from .models import (
     MaterialMovement,
     ProductionTransaction,
     ProductionSummary,
+    ProductionOrderMaterialPlan,
 )
 
 
@@ -95,10 +96,47 @@ class ProductionOrderListSerializer(serializers.ModelSerializer):
         read_only_fields = ["id"]
 
 
+class ProductionOrderMaterialPlanSerializer(serializers.ModelSerializer):
+    bom_variant_code = serializers.CharField(source="bom_variant.variant_code", read_only=True, default=None)
+    source_label = serializers.CharField(source="get_source_type_display", read_only=True)
+
+    class Meta:
+        model = ProductionOrderMaterialPlan
+        fields = [
+            "id",
+            "sequence",
+            "source_type",
+            "source_label",
+            "is_bom_derived",
+            "is_manual",
+            "bom_variant",
+            "bom_variant_code",
+            "bom_component",
+            "item",
+            "product_subtype",
+            "item_code",
+            "item_name",
+            "unit",
+            "per_unit_quantity",
+            "bom_quantity",
+            "required_quantity",
+            "received_quantity",
+            "remaining_quantity",
+            "request_quantity",
+            "rate",
+            "amount",
+            "notes",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at", "bom_variant_code", "source_label"]
+
+
 class ProductionOrderDetailSerializer(serializers.ModelSerializer):
     """Detailed serializer for Production Order with nested data"""
 
     material_movements = MaterialMovementSerializer(many=True, read_only=True)
+    material_plans = ProductionOrderMaterialPlanSerializer(many=True, read_only=True)
     transactions = ProductionTransactionSerializer(many=True, read_only=True)
     summary = ProductionSummarySerializer(read_only=True)
     cost_per_unit = serializers.DecimalField(
@@ -134,6 +172,7 @@ class ProductionOrderDetailSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "material_movements",
+            "material_plans",
             "transactions",
             "summary",
             "cost_per_unit",
@@ -143,6 +182,7 @@ class ProductionOrderDetailSerializer(serializers.ModelSerializer):
 
 class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
     """Serializer for creating and updating Production Orders"""
+    materials = serializers.ListField(child=serializers.DictField(), required=False, write_only=True)
 
     class Meta:
         model = ProductionOrder
@@ -165,6 +205,7 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
             "total_cost",
             "start_date_time",
             "end_date_time",
+            "materials",
         ]
 
     def validate(self, data):
@@ -175,6 +216,52 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
                     {"end_date_time": "End time must be after start time."}
                 )
         return data
+
+    def create(self, validated_data):
+        materials = validated_data.pop("materials", [])
+        order = super().create(validated_data)
+        self._save_materials(order, materials)
+        return order
+
+    def update(self, instance, validated_data):
+        materials = validated_data.pop("materials", None)
+        order = super().update(instance, validated_data)
+        if materials is not None:
+            order.material_plans.all().delete()
+            self._save_materials(order, materials)
+        return order
+
+    def _save_materials(self, order: ProductionOrder, materials):
+        rows = []
+        for index, material in enumerate(materials or [], start=1):
+            rows.append(
+                ProductionOrderMaterialPlan(
+                    production_order=order,
+                    sequence=int(material.get("sequence") or index),
+                    source_type=material.get("source_type") or ProductionOrderMaterialPlan.SourceType.ITEM,
+                    is_bom_derived=bool(material.get("is_bom_derived", False)),
+                    is_manual=bool(material.get("is_manual", False)),
+                    bom_variant_id=material.get("bom_variant"),
+                    bom_component_id=material.get("bom_component"),
+                    item_id=material.get("item"),
+                    product_subtype_id=material.get("product_subtype"),
+                    item_code=str(material.get("item_code") or ""),
+                    item_name=str(material.get("item_name") or ""),
+                    unit=str(material.get("unit") or "g"),
+                    per_unit_quantity=material.get("per_unit_quantity") or 0,
+                    bom_quantity=material.get("bom_quantity") or 0,
+                    required_quantity=material.get("required_quantity") or 0,
+                    received_quantity=material.get("received_quantity") or 0,
+                    remaining_quantity=material.get("remaining_quantity") or 0,
+                    request_quantity=material.get("request_quantity") or 0,
+                    rate=material.get("rate") or 0,
+                    amount=material.get("amount") or 0,
+                    notes=str(material.get("notes") or ""),
+                )
+            )
+
+        if rows:
+            ProductionOrderMaterialPlan.objects.bulk_create(rows)
 
 
 # ===== NEW OIMS SERIALIZERS =====

@@ -551,6 +551,79 @@ class BOMVariantComponent(models.Model):
         return None
 
 
+class ProductionOrderMaterialPlan(models.Model):
+    class SourceType(models.TextChoices):
+        ITEM = "ITEM", "Item"
+        PRODUCT_SUBTYPE = "PRODUCT_SUBTYPE", "Product Subtype"
+
+    production_order = models.ForeignKey(
+        ProductionOrder,
+        on_delete=models.CASCADE,
+        related_name="material_plans",
+    )
+    bom_variant = models.ForeignKey(BOMVariant, null=True, blank=True, on_delete=models.SET_NULL)
+    bom_component = models.ForeignKey(BOMVariantComponent, null=True, blank=True, on_delete=models.SET_NULL)
+    item = models.ForeignKey("Items.Item", null=True, blank=True, on_delete=models.SET_NULL)
+    product_subtype = models.ForeignKey(
+        "wpe_masters.ProductTypeSubtype",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="production_material_plans",
+    )
+    sequence = models.PositiveIntegerField(default=1)
+    source_type = models.CharField(max_length=20, choices=SourceType.choices, default=SourceType.ITEM)
+    is_bom_derived = models.BooleanField(default=False)
+    is_manual = models.BooleanField(default=False)
+    item_code = models.CharField(max_length=100, blank=True)
+    item_name = models.CharField(max_length=255)
+    unit = models.CharField(max_length=20, default="g")
+    per_unit_quantity = models.DecimalField(max_digits=14, decimal_places=3, default=ZERO_DECIMAL)
+    bom_quantity = models.DecimalField(max_digits=14, decimal_places=3, default=ZERO_DECIMAL)
+    required_quantity = models.DecimalField(max_digits=14, decimal_places=3, default=ZERO_DECIMAL)
+    received_quantity = models.DecimalField(max_digits=14, decimal_places=3, default=ZERO_DECIMAL)
+    remaining_quantity = models.DecimalField(max_digits=14, decimal_places=3, default=ZERO_DECIMAL)
+    request_quantity = models.DecimalField(max_digits=14, decimal_places=3, default=ZERO_DECIMAL)
+    rate = models.DecimalField(max_digits=14, decimal_places=3, default=ZERO_DECIMAL)
+    amount = models.DecimalField(max_digits=14, decimal_places=2, default=ZERO_DECIMAL)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sequence", "id"]
+        indexes = [
+            models.Index(fields=["production_order", "sequence"], name="prod_material_order_seq_idx"),
+            models.Index(fields=["bom_variant"], name="prod_material_bom_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.production_order.production_id} — {self.item_name}"
+
+    def clean(self):
+        if self.source_type == self.SourceType.PRODUCT_SUBTYPE and not self.product_subtype_id and not self.bom_component_id:
+            raise ValidationError({"product_subtype": "Product subtype rows must reference a BOM component or subtype."})
+
+        if self.source_type == self.SourceType.ITEM and not (self.item_id or self.item_code):
+            raise ValidationError({"item": "Item rows must include an item reference or item code."})
+
+    def save(self, *args, **kwargs):
+        if self.item_id:
+            self.item_code = self.item.item_code
+            self.item_name = self.item.item_name
+            self.unit = self.unit or self.item.unit
+        elif self.product_subtype_id:
+            self.item_code = self.product_subtype.code
+            self.item_name = self.product_subtype.name
+        elif self.bom_component_id:
+            self.item_code = self.bom_component.component_code
+            self.item_name = self.bom_component.component_name
+            self.unit = self.unit or self.bom_component.unit
+
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
 class ProductionBatch(models.Model):
     class Stage(models.TextChoices):
         AD = "AD", "Raw Materials (AD)"
