@@ -177,7 +177,7 @@ class ProductionSummaryViewSet(viewsets.ModelViewSet):
 
 from decimal import Decimal
 from django.db import transaction
-from django.db.models import Count, Prefetch
+from django.db.models import Count, Prefetch, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics
@@ -333,6 +333,12 @@ class BOMVariantListAPIView(generics.ListAPIView):
         show_all = self.request.query_params.get("show_all", "false").lower() == "true"
         if not show_all:
             qs = qs.filter(is_active=True)
+        product_item = self.request.query_params.get("product_item")
+        if product_item:
+            qs = qs.filter(product_item_id=product_item)
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(Q(variant_code__icontains=search) | Q(name__icontains=search))
         return qs.order_by("variant_code")
 
     def list(self, request, *args, **kwargs):
