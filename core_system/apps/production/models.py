@@ -1,5 +1,7 @@
 from decimal import Decimal
+from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 
 
@@ -464,7 +466,14 @@ class BOMVariant(models.Model):
 
 class BOMVariantComponent(models.Model):
     bom_variant = models.ForeignKey(BOMVariant, on_delete=models.CASCADE, related_name="components")
-    item = models.ForeignKey("Items.Item", on_delete=models.PROTECT)
+    item = models.ForeignKey("Items.Item", null=True, blank=True, on_delete=models.PROTECT)
+    product_subtype = models.ForeignKey(
+        "wpe_masters.ProductTypeSubtype",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="bom_variant_components",
+    )
     target_weight_grams = models.DecimalField(max_digits=10, decimal_places=3)
     min_weight_grams = models.DecimalField(max_digits=10, decimal_places=3)
     max_weight_grams = models.DecimalField(max_digits=10, decimal_places=3)
@@ -474,10 +483,72 @@ class BOMVariantComponent(models.Model):
 
     class Meta:
         ordering = ["sequence"]
-        unique_together = [("bom_variant", "item")]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(item__isnull=False) | Q(product_subtype__isnull=False),
+                name="production_bom_component_source_required",
+            ),
+        ]
 
     def __str__(self):
-        return f"{self.bom_variant.variant_code} — {self.item.item_name}"
+        return f"{self.bom_variant.variant_code} — {self.component_name or f'Component {self.pk}'}"
+
+    def clean(self):
+        if not self.item_id and not self.product_subtype_id:
+            raise ValidationError("item or product_subtype is required.")
+
+        if not self.bom_variant_id:
+            return
+
+        queryset = type(self).objects.filter(bom_variant_id=self.bom_variant_id)
+        if self.pk:
+            queryset = queryset.exclude(pk=self.pk)
+
+        if self.item_id and queryset.filter(item_id=self.item_id).exists():
+            raise ValidationError({"item": "This item is already mapped to the BOM variant."})
+
+        if self.product_subtype_id and queryset.filter(product_subtype_id=self.product_subtype_id).exists():
+            raise ValidationError({"product_subtype": "This product subtype is already mapped to the BOM variant."})
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    @property
+    def source_type(self) -> str:
+        return "PRODUCT_SUBTYPE" if self.product_subtype_id else "ITEM"
+
+    @property
+    def component_name(self) -> str:
+        if self.product_subtype_id:
+            return self.product_subtype.name
+        if self.item_id:
+            return self.item.item_name
+        return ""
+
+    @property
+    def component_code(self) -> str:
+        if self.product_subtype_id:
+            return self.product_subtype.code
+        if self.item_id:
+            return self.item.item_code
+        return ""
+
+    @property
+    def component_category_name(self) -> str:
+        if self.product_subtype_id:
+            return self.product_subtype.category.name
+        if self.item_id:
+            return self.item.category
+        return ""
+
+    @property
+    def component_is_active(self) -> bool | None:
+        if self.product_subtype_id:
+            return bool(self.product_subtype.is_active and self.product_subtype.category.is_active)
+        if self.item_id:
+            return bool(self.item.status)
+        return None
 
 
 class ProductionBatch(models.Model):
@@ -521,7 +592,7 @@ class ProductionBatch(models.Model):
 class BatchWeightEntry(models.Model):
     batch = models.ForeignKey(ProductionBatch, on_delete=models.CASCADE, related_name="weight_entries")
     bom_component = models.ForeignKey(BOMVariantComponent, on_delete=models.PROTECT)
-    item = models.ForeignKey("Items.Item", on_delete=models.PROTECT)
+    item = models.ForeignKey("Items.Item", null=True, blank=True, on_delete=models.PROTECT)
     target_weight_grams = models.DecimalField(max_digits=10, decimal_places=3)
     entered_weight_grams = models.DecimalField(max_digits=10, decimal_places=3, null=True, blank=True)
     is_valid = models.BooleanField(null=True, blank=True)
@@ -552,7 +623,19 @@ class BatchWeightEntry(models.Model):
         self.validation_notes = " ".join(errors)
 
     def __str__(self):
-        return f"{self.batch} — {self.item.item_name}: {self.entered_weight_grams}g"
+        return f"{self.batch} — {self.component_name}: {self.entered_weight_grams}g"
+
+    @property
+    def component_name(self) -> str:
+        return self.bom_component.component_name
+
+    @property
+    def component_code(self) -> str:
+        return self.bom_component.component_code
+
+    @property
+    def component_category_name(self) -> str:
+        return self.bom_component.component_category_name
 
 
 class RegrindMaterialEntry(models.Model):

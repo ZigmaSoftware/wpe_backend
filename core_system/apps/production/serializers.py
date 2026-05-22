@@ -189,25 +189,39 @@ class ProductionMachineSerializer(serializers.ModelSerializer):
 
 
 class BOMVariantComponentSerializer(serializers.ModelSerializer):
-    item_code = serializers.CharField(source="item.item_code", read_only=True)
-    item_name = serializers.CharField(source="item.item_name", read_only=True)
-    category = serializers.CharField(source="item.category", read_only=True)
+    item_code = serializers.CharField(source="component_code", read_only=True)
+    item_name = serializers.CharField(source="component_name", read_only=True)
+    category = serializers.CharField(source="component_category_name", read_only=True)
+    source_type = serializers.ReadOnlyField()
+    is_active = serializers.BooleanField(source="component_is_active", read_only=True, allow_null=True)
 
     class Meta:
         model = BOMVariantComponent
-        fields = ("id", "item", "item_code", "item_name", "category", "target_weight_grams", "min_weight_grams", "max_weight_grams", "sequence", "is_regrind", "unit")
+        fields = (
+            "id",
+            "item",
+            "product_subtype",
+            "source_type",
+            "item_code",
+            "item_name",
+            "category",
+            "is_active",
+            "target_weight_grams",
+            "min_weight_grams",
+            "max_weight_grams",
+            "sequence",
+            "is_regrind",
+            "unit",
+        )
 
 
 class BOMVariantListSerializer(serializers.ModelSerializer):
     product_item_name = serializers.CharField(source="product_item.item_name", read_only=True, default=None)
-    component_count = serializers.SerializerMethodField()
+    component_count = serializers.IntegerField(read_only=True, default=0)
 
     class Meta:
         model = BOMVariant
         fields = ("id", "variant_code", "name", "product_item", "product_item_name", "revision", "is_active", "notes", "component_count", "created_at", "updated_at")
-
-    def get_component_count(self, obj):
-        return obj.components.count()
 
 
 class BOMVariantDetailSerializer(serializers.ModelSerializer):
@@ -220,15 +234,17 @@ class BOMVariantDetailSerializer(serializers.ModelSerializer):
 
 
 class BatchWeightEntrySerializer(serializers.ModelSerializer):
-    item_code = serializers.CharField(source="item.item_code", read_only=True)
-    item_name = serializers.CharField(source="item.item_name", read_only=True)
+    item_code = serializers.CharField(source="component_code", read_only=True)
+    item_name = serializers.CharField(source="component_name", read_only=True)
+    category = serializers.CharField(source="component_category_name", read_only=True)
+    source_type = serializers.CharField(source="bom_component.source_type", read_only=True)
     min_weight_grams = serializers.DecimalField(source="bom_component.min_weight_grams", max_digits=10, decimal_places=3, read_only=True)
     max_weight_grams = serializers.DecimalField(source="bom_component.max_weight_grams", max_digits=10, decimal_places=3, read_only=True)
     entered_by_username = serializers.CharField(source="entered_by.username", read_only=True, default=None)
 
     class Meta:
         model = BatchWeightEntry
-        fields = ("id", "batch", "bom_component", "item", "item_code", "item_name",
+        fields = ("id", "batch", "bom_component", "item", "item_code", "item_name", "category", "source_type",
                   "target_weight_grams", "min_weight_grams", "max_weight_grams",
                   "entered_weight_grams", "is_valid", "validation_notes", "source",
                   "entered_by", "entered_by_username", "entered_at")
