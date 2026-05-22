@@ -176,6 +176,8 @@ class ProductionSummaryViewSet(viewsets.ModelViewSet):
 # ===== NEW OIMS PRODUCTION VIEWS =====
 
 from decimal import Decimal
+from django.db import transaction
+from django.db.models import Count, Prefetch
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics
@@ -191,12 +193,70 @@ from .models import (
 )
 from .serializers import (
     ProductionMachineSerializer,
+    BOMVariantComponentSerializer,
     BOMVariantListSerializer,
     BOMVariantDetailSerializer,
     ProductionBatchSerializer,
     BatchWeightEntrySerializer,
     RegrindMaterialEntrySerializer,
 )
+
+
+def bom_component_queryset():
+    return BOMVariantComponent.objects.select_related(
+        "item",
+        "product_subtype__category",
+    ).order_by("sequence", "id")
+
+
+def bom_variant_queryset():
+    return BOMVariant.objects.select_related("product_item").prefetch_related(
+        Prefetch("components", queryset=bom_component_queryset())
+    )
+
+
+def resolve_bom_component_source(component_data):
+    from apps.items.models import Item
+    from apps.wpe_masters.models import ProductTypeSubtype
+
+    item_id = component_data.get("item")
+    product_subtype_id = component_data.get("product_subtype")
+
+    if item_id and product_subtype_id:
+        return None, None, "Provide either item or product_subtype, not both."
+    if not item_id and not product_subtype_id:
+        return None, None, "item or product_subtype is required."
+
+    item = get_object_or_404(Item, pk=item_id) if item_id else None
+    product_subtype = (
+        get_object_or_404(ProductTypeSubtype.objects.select_related("category"), pk=product_subtype_id)
+        if product_subtype_id
+        else None
+    )
+    return item, product_subtype, None
+
+
+def validate_bom_component_payload(component_data, fallback_sequence):
+    item, product_subtype, error = resolve_bom_component_source(component_data)
+    if error:
+        return None, error
+
+    target_weight_grams = component_data.get("target_weight_grams")
+    if target_weight_grams in (None, ""):
+        return None, "target_weight_grams is required."
+
+    unit = str(component_data.get("unit", "g")).strip() or "g"
+    payload = {
+        "item": item,
+        "product_subtype": product_subtype,
+        "target_weight_grams": target_weight_grams,
+        "min_weight_grams": component_data.get("min_weight_grams", 195),
+        "max_weight_grams": component_data.get("max_weight_grams", 9205),
+        "sequence": component_data.get("sequence", fallback_sequence),
+        "is_regrind": component_data.get("is_regrind", False),
+        "unit": unit,
+    }
+    return payload, None
 
 
 class ProductionMachineListAPIView(generics.ListAPIView):
@@ -269,11 +329,11 @@ class BOMVariantListAPIView(generics.ListAPIView):
     serializer_class = BOMVariantListSerializer
 
     def get_queryset(self):
-        qs = BOMVariant.objects.all()
+        qs = bom_variant_queryset().annotate(component_count=Count("components", distinct=True))
         show_all = self.request.query_params.get("show_all", "false").lower() == "true"
         if not show_all:
             qs = qs.filter(is_active=True)
-        return qs.prefetch_related("components").order_by("variant_code")
+        return qs.order_by("variant_code")
 
     def list(self, request, *args, **kwargs):
         return success_response(message="BOM variants fetched.", data=list(BOMVariantListSerializer(self.get_queryset(), many=True).data))
@@ -292,34 +352,45 @@ class BOMVariantListAPIView(generics.ListAPIView):
         if data.get("product_item"):
             product_item = get_object_or_404(Item, pk=data["product_item"])
 
-        bom = BOMVariant(
-            variant_code=data["variant_code"].strip().upper(),
-            name=data["name"].strip(),
-            product_item=product_item,
-            revision=data.get("revision", "v1"),
-            notes=data.get("notes", ""),
-            is_active=True,
-            created_by=request.user,
-        )
-        bom.set_password(str(data["password"]))
-        bom.save()
-
-        components = data.get("components", [])
-        for comp_data in components:
-            item = get_object_or_404(Item, pk=comp_data["item"])
-            BOMVariantComponent.objects.create(
-                bom_variant=bom,
-                item=item,
-                target_weight_grams=comp_data.get("target_weight_grams", 0),
-                min_weight_grams=comp_data.get("min_weight_grams", 195),
-                max_weight_grams=comp_data.get("max_weight_grams", 9205),
-                sequence=comp_data.get("sequence", 1),
-                is_regrind=comp_data.get("is_regrind", False),
-                unit=comp_data.get("unit", "g"),
+        with transaction.atomic():
+            bom = BOMVariant(
+                variant_code=data["variant_code"].strip().upper(),
+                name=data["name"].strip(),
+                product_item=product_item,
+                revision=data.get("revision", "v1"),
+                notes=data.get("notes", ""),
+                is_active=True,
+                created_by=request.user,
             )
+            bom.set_password(str(data["password"]))
+            bom.save()
 
-        bom.refresh_from_db()
-        full_bom = BOMVariant.objects.prefetch_related("components__item").get(pk=bom.pk)
+            seen_keys = set()
+            components = data.get("components", [])
+            for index, comp_data in enumerate(components, start=1):
+                payload, error = validate_bom_component_payload(comp_data, index)
+                if error:
+                    return success_response(
+                        message=f"Component {index}: {error}",
+                        data={},
+                        status_code=400,
+                    )
+
+                duplicate_key = (
+                    ("product_subtype", payload["product_subtype"].pk)
+                    if payload["product_subtype"] is not None
+                    else ("item", payload["item"].pk)
+                )
+                if duplicate_key in seen_keys:
+                    return success_response(
+                        message=f"Component {index}: duplicate component selection is not allowed.",
+                        data={},
+                        status_code=400,
+                    )
+                seen_keys.add(duplicate_key)
+                BOMVariantComponent.objects.create(bom_variant=bom, **payload)
+
+        full_bom = bom_variant_queryset().get(pk=bom.pk)
         return success_response(message="BOM variant created.", data=BOMVariantDetailSerializer(full_bom).data, status_code=201)
 
 
@@ -327,10 +398,10 @@ class BOMVariantDetailAPIView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_object(self, pk):
-        return get_object_or_404(BOMVariant, pk=pk)
+        return get_object_or_404(bom_variant_queryset(), pk=pk)
 
     def get(self, request, pk, *args, **kwargs):
-        bom = BOMVariant.objects.prefetch_related("components__item").get(pk=pk)
+        bom = self.get_object(pk)
         return success_response(message="BOM variant fetched.", data=BOMVariantDetailSerializer(bom).data)
 
     def patch(self, request, pk, *args, **kwargs):
@@ -343,7 +414,8 @@ class BOMVariantDetailAPIView(generics.GenericAPIView):
             from apps.items.models import Item
             bom.product_item = get_object_or_404(Item, pk=data["product_item"])
         bom.save()
-        return success_response(message="BOM variant updated.", data=BOMVariantListSerializer(bom).data)
+        refreshed = bom_variant_queryset().annotate(component_count=Count("components", distinct=True)).get(pk=bom.pk)
+        return success_response(message="BOM variant updated.", data=BOMVariantListSerializer(refreshed).data)
 
     def delete(self, request, pk, *args, **kwargs):
         bom = self.get_object(pk)
@@ -371,23 +443,59 @@ class BOMVariantComponentAPIView(generics.GenericAPIView):
     def post(self, request, pk, *args, **kwargs):
         bom = get_object_or_404(BOMVariant, pk=pk, is_active=True)
         data = request.data
-        if not data.get("item"):
-            return success_response(message="item is required.", data={}, status_code=400)
-        from apps.items.models import Item
-        item = get_object_or_404(Item, pk=data["item"])
-        if BOMVariantComponent.objects.filter(bom_variant=bom, item=item).exists():
-            return success_response(message="This item is already a component of this BOM variant.", data={}, status_code=400)
-        comp = BOMVariantComponent.objects.create(
-            bom_variant=bom,
-            item=item,
-            target_weight_grams=data.get("target_weight_grams", 0),
-            min_weight_grams=data.get("min_weight_grams", 195),
-            max_weight_grams=data.get("max_weight_grams", 9205),
-            sequence=data.get("sequence", bom.components.count() + 1),
-            is_regrind=data.get("is_regrind", False),
-            unit=data.get("unit", "g"),
-        )
+        payload, error = validate_bom_component_payload(data, bom.components.count() + 1)
+        if error:
+            return success_response(message=error, data={}, status_code=400)
+
+        duplicate_filter = {"product_subtype": payload["product_subtype"]} if payload["product_subtype"] else {"item": payload["item"]}
+        if BOMVariantComponent.objects.filter(bom_variant=bom, **duplicate_filter).exists():
+            return success_response(message="This component is already mapped to this BOM variant.", data={}, status_code=400)
+
+        comp = BOMVariantComponent.objects.create(bom_variant=bom, **payload)
+        comp = bom_component_queryset().get(pk=comp.pk)
         return success_response(message="Component added.", data=BOMVariantComponentSerializer(comp).data, status_code=201)
+
+    def put(self, request, pk, *args, **kwargs):
+        bom = get_object_or_404(BOMVariant, pk=pk, is_active=True)
+        components = request.data.get("components", [])
+        if not isinstance(components, list):
+            return success_response(message="components must be a list.", data={}, status_code=400)
+
+        seen_keys = set()
+        new_components = []
+        for index, comp_data in enumerate(components, start=1):
+            payload, error = validate_bom_component_payload(comp_data, index)
+            if error:
+                return success_response(
+                    message=f"Component {index}: {error}",
+                    data={},
+                    status_code=400,
+                )
+
+            duplicate_key = (
+                ("product_subtype", payload["product_subtype"].pk)
+                if payload["product_subtype"] is not None
+                else ("item", payload["item"].pk)
+            )
+            if duplicate_key in seen_keys:
+                return success_response(
+                    message=f"Component {index}: duplicate component selection is not allowed.",
+                    data={},
+                    status_code=400,
+                )
+            seen_keys.add(duplicate_key)
+            new_components.append(BOMVariantComponent(bom_variant=bom, **payload))
+
+        with transaction.atomic():
+            bom.components.all().delete()
+            if new_components:
+                BOMVariantComponent.objects.bulk_create(new_components)
+
+        refreshed = bom_variant_queryset().get(pk=bom.pk)
+        return success_response(
+            message="BOM components saved.",
+            data=BOMVariantDetailSerializer(refreshed).data,
+        )
 
     def delete(self, request, pk, comp_id, *args, **kwargs):
         comp = get_object_or_404(BOMVariantComponent, pk=comp_id, bom_variant_id=pk)
@@ -412,7 +520,7 @@ class BOMVariantRecipeAPIView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, *args, **kwargs):
-        bom = get_object_or_404(BOMVariant, pk=pk, is_active=True)
+        bom = get_object_or_404(bom_variant_queryset(), pk=pk, is_active=True)
         password = request.data.get("password", "")
         if not bom.check_password(str(password)):
             return success_response(message="Invalid password.", data={}, status_code=403)
@@ -428,7 +536,9 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
         return ProductionBatch.objects.filter(
             production_order_id=self.kwargs["order_pk"]
         ).select_related("machine", "bom_variant", "operator").prefetch_related(
-            "weight_entries__item", "weight_entries__bom_component",
+            "weight_entries__item",
+            "weight_entries__bom_component__item",
+            "weight_entries__bom_component__product_subtype__category",
             "regrind_entries__item",
         ).order_by("stage", "created_at")
 
@@ -458,7 +568,7 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
         )
 
         if bom_variant_id:
-            bom = BOMVariant.objects.prefetch_related("components__item").get(pk=bom_variant_id)
+            bom = bom_variant_queryset().get(pk=bom_variant_id)
             for component in bom.components.all():
                 BatchWeightEntry.objects.get_or_create(
                     batch=batch,
@@ -472,7 +582,9 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
 
         batch.refresh_from_db()
         full_batch = ProductionBatch.objects.prefetch_related(
-            "weight_entries__item", "weight_entries__bom_component",
+            "weight_entries__item",
+            "weight_entries__bom_component__item",
+            "weight_entries__bom_component__product_subtype__category",
             "regrind_entries__item"
         ).get(pk=batch.pk)
         return success_response(message="Batch created.", data=ProductionBatchSerializer(full_batch).data, status_code=201)
