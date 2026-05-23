@@ -52,6 +52,56 @@ class BOMVariantSubtypeMappingTests(APITestCase):
 
         self.components_url = f"/api/production/bom-variants/{self.bom.id}/components/"
 
+    def test_create_variant_without_password_is_allowed(self):
+        response = self.client.post(
+            "/api/production/bom-variants/",
+            {
+                "variant_code": f"BOM-NOPASS-{self.unique_suffix.upper()}",
+                "name": "Passwordless BOM",
+                "components": [
+                    {
+                        "product_subtype": self.adhesive.id,
+                        "target_weight_grams": "250.000",
+                        "unit": "g",
+                    }
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(response.data["data"]["has_password"])
+
+    def test_recipe_endpoint_allows_passwordless_variant(self):
+        response = self.client.post(
+            "/api/production/bom-variants/",
+            {
+                "variant_code": f"BOM-OPEN-{self.unique_suffix.upper()}",
+                "name": "Open Recipe BOM",
+                "components": [
+                    {
+                        "product_subtype": self.adhesive.id,
+                        "target_weight_grams": "250.000",
+                        "unit": "g",
+                    }
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        bom_id = response.data["data"]["id"]
+
+        recipe_response = self.client.post(
+            f"/api/production/bom-variants/{bom_id}/recipe/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(recipe_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(recipe_response.data["data"]["id"], bom_id)
+        self.assertFalse(recipe_response.data["data"]["has_password"])
+
     def test_bulk_save_persists_subtype_components(self):
         response = self.client.put(
             self.components_url,

@@ -305,19 +305,21 @@ class BOMVariantComponentSerializer(serializers.ModelSerializer):
 class BOMVariantListSerializer(serializers.ModelSerializer):
     product_item_name = serializers.CharField(source="product_item.item_name", read_only=True, default=None)
     component_count = serializers.IntegerField(read_only=True, default=0)
+    has_password = serializers.ReadOnlyField()
 
     class Meta:
         model = BOMVariant
-        fields = ("id", "variant_code", "name", "product_item", "product_item_name", "revision", "is_active", "notes", "component_count", "created_at", "updated_at")
+        fields = ("id", "variant_code", "name", "product_item", "product_item_name", "revision", "is_active", "notes", "component_count", "has_password", "created_at", "updated_at")
 
 
 class BOMVariantDetailSerializer(serializers.ModelSerializer):
     product_item_name = serializers.CharField(source="product_item.item_name", read_only=True, default=None)
     components = BOMVariantComponentSerializer(many=True, read_only=True)
+    has_password = serializers.ReadOnlyField()
 
     class Meta:
         model = BOMVariant
-        fields = ("id", "variant_code", "name", "product_item", "product_item_name", "revision", "is_active", "notes", "components", "created_at", "updated_at")
+        fields = ("id", "variant_code", "name", "product_item", "product_item_name", "revision", "is_active", "notes", "components", "has_password", "created_at", "updated_at")
 
 
 class BatchWeightEntrySerializer(serializers.ModelSerializer):
