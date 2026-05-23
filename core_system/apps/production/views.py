@@ -346,7 +346,7 @@ class BOMVariantListAPIView(generics.ListAPIView):
 
     def post(self, request, *args, **kwargs):
         data = request.data
-        required = ("variant_code", "name", "password")
+        required = ("variant_code", "name")
         for field in required:
             if not data.get(field):
                 return success_response(message=f"{field} is required.", data={}, status_code=400)
@@ -368,7 +368,10 @@ class BOMVariantListAPIView(generics.ListAPIView):
                 is_active=True,
                 created_by=request.user,
             )
-            bom.set_password(str(data["password"]))
+            if data.get("password"):
+                bom.set_password(str(data["password"]))
+            else:
+                bom.access_password_hash = ""
             bom.save()
 
             seen_keys = set()
@@ -514,6 +517,8 @@ class BOMVariantVerifyPasswordAPIView(generics.GenericAPIView):
 
     def post(self, request, pk, *args, **kwargs):
         bom = get_object_or_404(BOMVariant, pk=pk, is_active=True)
+        if not bom.access_password_hash:
+            return success_response(message="Recipe has no password configured.", data={"verified": True})
         password = request.data.get("password", "")
         if not password:
             return success_response(message="Password is required.", data={"verified": False}, status_code=400)
@@ -527,6 +532,8 @@ class BOMVariantRecipeAPIView(generics.GenericAPIView):
 
     def post(self, request, pk, *args, **kwargs):
         bom = get_object_or_404(bom_variant_queryset(), pk=pk, is_active=True)
+        if not bom.access_password_hash:
+            return success_response(message="Recipe fetched.", data=BOMVariantDetailSerializer(bom).data)
         password = request.data.get("password", "")
         if not bom.check_password(str(password)):
             return success_response(message="Invalid password.", data={}, status_code=403)

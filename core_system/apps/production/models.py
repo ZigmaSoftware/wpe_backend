@@ -460,6 +460,10 @@ class BOMVariant(models.Model):
     def check_password(self, raw_password: str) -> bool:
         return self.access_password_hash == hashlib.sha256(raw_password.encode()).hexdigest()
 
+    @property
+    def has_password(self) -> bool:
+        return bool(self.access_password_hash)
+
     def __str__(self):
         return f"{self.variant_code} — {self.name}"
 
