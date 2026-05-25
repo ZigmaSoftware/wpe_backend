@@ -37,8 +37,16 @@ class AdminMasterRBACPermission(BasePermission):
         if not user or not user.is_authenticated:
             return False
 
-        screen_code = getattr(view, "permission_screen_code", None)
-        if not screen_code:
+        screen_codes = tuple(
+            code
+            for code in getattr(view, "permission_screen_codes", ())
+            if code
+        )
+        if not screen_codes:
+            screen_code = getattr(view, "permission_screen_code", None)
+            screen_codes = (screen_code,) if screen_code else ()
+
+        if not screen_codes:
             return True
 
         action_map = {**self.default_action_map, **getattr(view, "permission_action_map", {})}
@@ -46,4 +54,7 @@ class AdminMasterRBACPermission(BasePermission):
             request.method,
             "view",
         )
-        return user_has_screen_action(user, screen_code=screen_code, action=resolved_action)
+        return any(
+            user_has_screen_action(user, screen_code=screen_code, action=resolved_action)
+            for screen_code in screen_codes
+        )

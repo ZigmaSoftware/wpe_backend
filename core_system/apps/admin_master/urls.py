@@ -11,7 +11,6 @@ from core_system.api_router import ExtendedDefaultRouter
 from .views import (
     MainScreenViewSet,
     ScreenSectionViewSet,
-    StaffViewSet,
     UserCreationViewSet,
     UserScreenViewSet,
     UserTypePermissionViewSet,
@@ -23,7 +22,6 @@ router = ExtendedDefaultRouter()
 router.register(r"main-screens", MainScreenViewSet, basename="main-screen")
 router.register(r"screen-sections", ScreenSectionViewSet, basename="screen-section")
 router.register(r"user-screens", UserScreenViewSet, basename="user-screen")
-router.register(r"staff", StaffViewSet, basename="staff")
 router.register(r"user-types", UserTypeViewSet, basename="user-type")
 router.register(r"users-creation", UserCreationViewSet, basename="user-creation")
 router.register(r"user-permissions", UserTypePermissionViewSet, basename="user-permission")

@@ -221,31 +221,57 @@ class Command(BaseCommand):
         store_role, _ = first_or_create(Role, {"name": "Store Manager"})
         operator_role, _ = first_or_create(Role, {"name": "Production Operator"})
 
+        wpe_admin_role, _ = RoleMaster.objects.update_or_create(
+            name="Administrator",
+            defaults={"is_active": True},
+        )
+        wpe_operator_role, _ = RoleMaster.objects.update_or_create(
+            name="Operator",
+            defaults={"is_active": True},
+        )
+        wpe_admin_department, _ = DepartmentMaster.objects.update_or_create(
+            name="Administration",
+            defaults={"is_active": True},
+        )
+        wpe_production_department, _ = DepartmentMaster.objects.update_or_create(
+            name="Production",
+            defaults={"is_active": True},
+        )
+
         ticket_admin, _ = first_or_create(TicketUserType, {"name": "Internal Admin"})
         ticket_operator, _ = first_or_create(TicketUserType, {"name": "Plant Operator"})
 
-        full_access_type, _ = UserType.objects.update_or_create(
-            name="Full Access",
-            defaults={
-                "code": "full-access",
-                "is_active": True,
-                "under_users": "All Users",
-                "company_wise": True,
-                "project_wise": True,
-                "department_wise": True,
-                "user_wise": True,
-            },
+        full_access_type = (
+            UserType.objects.filter(department=wpe_admin_department, role=wpe_admin_role).first()
+            or UserType.objects.filter(name__in=["Full Access", "Administration - Administrator"]).first()
         )
-        production_type, _ = UserType.objects.update_or_create(
-            name="Production User",
-            defaults={
-                "code": "production-user",
-                "is_active": True,
-                "under_users": "Production",
-                "department_wise": True,
-                "user_wise": True,
-            },
+        if full_access_type is None:
+            full_access_type = UserType.objects.create(
+                department=wpe_admin_department,
+                role=wpe_admin_role,
+                is_active=True,
+            )
+        else:
+            full_access_type.department = wpe_admin_department
+            full_access_type.role = wpe_admin_role
+            full_access_type.is_active = True
+            full_access_type.save()
+
+        production_type = (
+            UserType.objects.filter(department=wpe_production_department, role=wpe_operator_role).first()
+            or UserType.objects.filter(name__in=["Production User", "Production - Operator"]).first()
         )
+        if production_type is None:
+            production_type = UserType.objects.create(
+                department=wpe_production_department,
+                role=wpe_operator_role,
+                is_active=True,
+            )
+        else:
+            production_type.department = wpe_production_department
+            production_type.role = wpe_operator_role
+            production_type.is_active = True
+            production_type.save()
 
         staff_admin, _ = Staff.objects.update_or_create(
             staff_code="9001",
@@ -342,9 +368,14 @@ class Command(BaseCommand):
             "Masters": {
                 "order": 1,
                 "sections": {
-                    "Admin Master": ["Main Screen Master", "Screen Section Master", "User Screen Master"],
+                    "Admin Master": [
+                        "Main Screen Master",
+                        "Screen Section Master",
+                        "User Screen Master",
+                        "User Creation Master",
+                        "User Screen Permission Master",
+                    ],
                     "Common Master": ["Customer Master", "Supplier Master", "Company Master", "Project Master"],
-                    "HR Master": ["Staff Master", "User Account Master", "User Permission Master"],
                 },
             },
             "Sales": {

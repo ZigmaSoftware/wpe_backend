@@ -88,24 +88,51 @@ class TicketUserType(UniqueIDMixin):
 class UserType(UniqueIDMixin):
     name = models.CharField(max_length=150, unique=True, db_index=True)
     code = models.CharField(max_length=100, unique=True, blank=True, null=True)
+    department = models.ForeignKey(
+        "wpe_masters.DepartmentMaster",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="admin_user_types",
+    )
+    role = models.ForeignKey(
+        "wpe_masters.RoleMaster",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="admin_user_types",
+    )
     is_active = models.BooleanField(default=True, db_index=True)
-    under_users = models.CharField(max_length=150, null=True, blank=True)
-    company_wise = models.BooleanField(default=False)
-    project_wise = models.BooleanField(default=False)
-    department_wise = models.BooleanField(default=False)
-    user_wise = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta(UniqueIDMixin.Meta):
         abstract = False
         ordering = ["name", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["department", "role"],
+                name="admin_user_type_department_role_uniq",
+            ),
+        ]
 
     def __str__(self) -> str:
+        if self.department_id and self.role_id:
+            return f"{self.department.name} - {self.role.name}"
         return self.name
 
     def save(self, *args, **kwargs):
-        if not self.code:
+        self.name = (self.name or "").strip()
+
+        if self.department_id and self.role_id:
+            self.name = f"{self.department.name} - {self.role.name}"
+            self.code = build_unique_code(
+                UserType,
+                f"{self.department.name}-{self.role.name}",
+                instance=self,
+                prefix="user-type",
+            )
+        elif self.name and not self.code:
             self.code = build_unique_code(
                 UserType,
                 self.name,

@@ -6,7 +6,6 @@ from .models import (
     MainScreen,
     Role,
     ScreenSection,
-    Staff,
     TicketUserType,
     UserCreation,
     UserScreen,
@@ -51,20 +50,12 @@ class UserScreenAdmin(admin.ModelAdmin):
     ordering = ("main_screen__order_no", "screen_section__order_no", "order_no")
 
 
-@admin.register(Staff)
-class StaffAdmin(admin.ModelAdmin):
-    list_display = ("staff_code", "name", "mobile", "email", "department", "designation", "is_active")
-    list_filter = ("department", "is_active")
-    search_fields = ("staff_code", "name", "mobile", "email")
-    ordering = ("staff_code", "name")
-
-
 @admin.register(UserType)
 class UserTypeAdmin(admin.ModelAdmin):
-    list_display = ("name", "code", "is_active", "company_wise", "project_wise", "department_wise", "user_wise")
-    list_filter = ("is_active", "company_wise", "project_wise", "department_wise", "user_wise")
-    search_fields = ("name", "code")
-    ordering = ("name",)
+    list_display = ("department", "role", "name", "code", "is_active")
+    list_filter = ("is_active", "department", "role")
+    search_fields = ("department__name", "role__name", "name", "code")
+    ordering = ("department__name", "role__name", "name")
 
 
 @admin.register(UserCreation)
@@ -72,7 +63,8 @@ class UserCreationAdmin(admin.ModelAdmin):
     list_display = ("user", "staff", "user_type", "account_status", "is_active", "failed_login_attempts")
     list_filter = ("account_status", "is_active", "user_type", "company", "department")
     search_fields = ("user__username", "staff__name", "staff__staff_code")
-    autocomplete_fields = ("staff", "user_type", "team_members", "role", "ticket_user_type")
+    raw_id_fields = ("staff",)
+    autocomplete_fields = ("user_type", "team_members", "role", "ticket_user_type")
 
 
 @admin.register(UserTypePermission)
