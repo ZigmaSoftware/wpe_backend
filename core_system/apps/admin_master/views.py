@@ -16,7 +16,6 @@ from .serializers import (
     MainScreenSerializer,
     PermissionAssignmentSerializer,
     ScreenSectionSerializer,
-    StaffSerializer,
     UserCreationReadSerializer,
     UserCreationWriteSerializer,
     UserScreenSerializer,
@@ -247,50 +246,38 @@ class UserScreenViewSet(StandardizedModelViewSet):
         return Response(list(queryset))
 
 
-class StaffViewSet(StandardizedModelViewSet):
-    queryset = Staff.objects.select_related("department").all().order_by("staff_code", "name", "id")
-    serializer_class = StaffSerializer
-    resource_name = "Staff"
-    permission_screen_code = "staff-master"
-    search_fields = ("staff_code", "name", "mobile", "email", "designation", "department__name")
-    ordering_fields = ("staff_code", "name", "id")
-    filterset_map = {
-        "department": "department_id",
-        "is_active": "is_active",
-    }
-
-    @action(detail=False, methods=["get"], url_path="lookup")
-    def lookup(self, request):
-        queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True).values(
-            "id",
-            "staff_code",
-            "name",
-            "mobile",
-            "email",
-        )
-        return Response(list(queryset))
-
-
 class UserTypeViewSet(StandardizedModelViewSet):
-    queryset = UserType.objects.all().order_by("name", "id")
+    queryset = UserType.objects.select_related("department", "role").all().order_by(
+        "department__name",
+        "role__name",
+        "id",
+    )
     serializer_class = UserTypeSerializer
     resource_name = "User type"
     permission_screen_code = "user-type-master"
-    search_fields = ("name", "code")
-    ordering_fields = ("name", "created_at", "id")
+    search_fields = ("department__name", "role__name", "name", "code")
+    ordering_fields = ("department__name", "role__name", "created_at", "id")
     filterset_map = {
         "is_active": "is_active",
-        "code": "code",
+        "department": "department_id",
+        "department_id": "department_id",
+        "role": "role_id",
+        "role_id": "role_id",
     }
 
     @action(detail=False, methods=["get"], url_path="lookup")
     def lookup(self, request):
-        queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True).values(
-            "id",
-            "name",
-            "code",
+        queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True)
+        return Response(
+            [
+                {
+                    "id": user_type.id,
+                    "name": user_type.name,
+                    "code": user_type.code,
+                }
+                for user_type in queryset
+            ]
         )
-        return Response(list(queryset))
 
 
 class UserCreationViewSet(StandardizedModelViewSet):
@@ -298,21 +285,25 @@ class UserCreationViewSet(StandardizedModelViewSet):
         "user",
         "staff",
         "user_type",
+        "user_type__department",
+        "user_type__role",
         "company",
         "department",
         "role",
-    ).prefetch_related("team_members")
+    )
     serializer_class = UserCreationReadSerializer
     response_serializer_class = UserCreationReadSerializer
-    resource_name = "User account"
-    permission_screen_code = "user-account-master"
+    resource_name = "User creation"
+    permission_screen_code = "user-creation-master"
+    permission_screen_codes = ("user-creation-master", "user-account-master")
     search_fields = (
         "user__username",
         "staff__name",
         "staff__mobile",
-        "user_type__name",
+        "staff__email",
+        "user_type__department__name",
+        "user_type__role__name",
         "company__name",
-        "department__name",
     )
     ordering_fields = ("created_at", "updated_at", "user__username", "staff__name", "id")
     filterset_map = {
@@ -320,8 +311,10 @@ class UserCreationViewSet(StandardizedModelViewSet):
         "user_type_id": "user_type_id",
         "company": "company_id",
         "company_id": "company_id",
-        "department": "department_id",
-        "department_id": "department_id",
+        "department": "user_type__department_id",
+        "department_id": "user_type__department_id",
+        "role": "user_type__role_id",
+        "role_id": "user_type__role_id",
         "account_status": "account_status",
         "is_active": "is_active",
     }
@@ -330,6 +323,73 @@ class UserCreationViewSet(StandardizedModelViewSet):
         if self.action in {"create", "update", "partial_update"}:
             return UserCreationWriteSerializer
         return UserCreationReadSerializer
+
+    @action(detail=False, methods=["get"], url_path="lookup-options")
+    def lookup_options(self, request):
+        queryset = (
+            Staff.objects.filter(is_active=True)
+            .order_by("staff_code", "name", "id")
+            .values("id", "staff_code", "name", "mobile", "email")
+        )
+        return Response(list(queryset))
+
+    @action(detail=False, methods=["get"], url_path="department-options")
+    def department_options(self, request):
+        user_types = (
+            UserType.objects.select_related("department")
+            .filter(is_active=True, department__isnull=False)
+            .order_by("department__name", "department_id", "id")
+        )
+
+        options = []
+        seen_department_ids = set()
+        for user_type in user_types:
+            department = user_type.department
+            if not department or department.id in seen_department_ids:
+                continue
+            seen_department_ids.add(department.id)
+            options.append(
+                {
+                    "id": department.id,
+                    "name": department.name,
+                    "code": getattr(department, "code", None),
+                }
+            )
+
+        return Response(options)
+
+    @action(detail=False, methods=["get"], url_path="role-options")
+    def role_options(self, request):
+        department_id = request.query_params.get("department") or request.query_params.get("department_id")
+        if not department_id:
+            return Response([])
+
+        user_types = (
+            UserType.objects.select_related("role")
+            .filter(
+                is_active=True,
+                department_id=department_id,
+                role__isnull=False,
+            )
+            .order_by("role__name", "role_id", "id")
+        )
+
+        options = []
+        seen_role_ids = set()
+        for user_type in user_types:
+            role = user_type.role
+            if not role or role.id in seen_role_ids:
+                continue
+            seen_role_ids.add(role.id)
+            options.append(
+                {
+                    "id": role.id,
+                    "name": role.name,
+                    "code": getattr(role, "code", None),
+                }
+            )
+
+        return Response(options)
 
     @action(detail=True, methods=["patch"], url_path="toggle-status")
     def toggle_status(self, request, pk=None):
@@ -374,8 +434,9 @@ class UserTypePermissionViewSet(StandardizedModelViewSet):
     )
     serializer_class = UserTypePermissionSerializer
     response_serializer_class = UserTypePermissionSerializer
-    resource_name = "User permission"
-    permission_screen_code = "user-permission-master"
+    resource_name = "User screen permission"
+    permission_screen_code = "user-screen-permission-master"
+    permission_screen_codes = ("user-screen-permission-master", "user-permission-master")
     status_field = "status"
     search_fields = (
         "user_type__name",
@@ -441,7 +502,7 @@ class UserTypePermissionViewSet(StandardizedModelViewSet):
         elif user_id:
             user_profile = UserCreation.objects.select_related("user_type").filter(pk=user_id).first()
             if not user_profile:
-                raise ValidationError({"user_id": "User account not found."})
+                raise ValidationError({"user_id": "User creation record not found."})
             data = resolve_subject_permissions(user_type=user_profile.user_type)
         else:
             data = resolve_subject_permissions(user=request.user)

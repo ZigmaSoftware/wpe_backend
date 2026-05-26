@@ -117,6 +117,9 @@ class RequestBlendingStockAPIView(generics.GenericAPIView):
             user=request.user,
             request_type=StockRequest.RequestType.ADDITIVE,
             department=serializer.validated_data.get("department") or BLENDING_DEPARTMENT,
+            request_date=serializer.validated_data.get("request_date"),
+            require_date=serializer.validated_data.get("require_date"),
+            require_time=serializer.validated_data.get("require_time"),
             requested_for_name=serializer.validated_data["requested_for_name"],
             request_reason=serializer.validated_data["request_reason"],
         )
@@ -196,6 +199,9 @@ class BlendingStoreRequestListCreateAPIView(WrappedBlendingListAPIView, generics
             remarks=serializer.validated_data.get("remarks"),
             request_type=serializer.validated_data.get("request_type", StockRequest.RequestType.GENERAL),
             department=serializer.validated_data.get("department", BLENDING_DEPARTMENT),
+            request_date=serializer.validated_data.get("request_date"),
+            require_date=serializer.validated_data.get("require_date"),
+            require_time=serializer.validated_data.get("require_time"),
             requested_for_name=serializer.validated_data.get("requested_for_name", ""),
             request_reason=serializer.validated_data.get("request_reason", ""),
         )
@@ -253,6 +259,9 @@ class BlendingStoreRequestDetailAPIView(generics.RetrieveUpdateAPIView):
             remarks=serializer.validated_data.get("remarks"),
             request_type=serializer.validated_data.get("request_type", StockRequest.RequestType.GENERAL),
             department=serializer.validated_data.get("department", BLENDING_DEPARTMENT),
+            request_date=serializer.validated_data.get("request_date"),
+            require_date=serializer.validated_data.get("require_date"),
+            require_time=serializer.validated_data.get("require_time"),
             requested_for_name=serializer.validated_data.get("requested_for_name", ""),
             request_reason=serializer.validated_data.get("request_reason", ""),
         )
