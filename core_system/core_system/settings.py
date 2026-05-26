@@ -75,6 +75,7 @@ INSTALLED_APPS = [
     "apps.presales",
     "apps.production.apps.ProductionConfig",
     "apps.wpe_masters.apps.WpeMastersConfig",
+    "apps.scale.apps.ScaleConfig",
     "grn_app.apps.PurchasesIwardsConfig",
 ]
 
@@ -188,3 +189,8 @@ SIMPLE_JWT = {
 
 GRN_SERVICE_BASE_URL = os.getenv("GRN_SERVICE_BASE_URL", "").strip()
 GRN_SERVICE_API_KEY = os.getenv("GRN_SERVICE_API_KEY", "").strip()
+
+# Point Digi Scale serial connection
+# Set SERIAL_PORT=AUTO to auto-detect CH340 by VID/PID, or use explicit port e.g. /dev/ttyUSB0
+SERIAL_PORT      = os.getenv("SERIAL_PORT", "AUTO")
+SERIAL_BAUD_RATE = int(os.getenv("SERIAL_BAUD_RATE", "9600"))
