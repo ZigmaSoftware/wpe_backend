@@ -400,6 +400,9 @@ def create_store_request(
     remarks: str | None = None,
     request_type: str = StockRequest.RequestType.GENERAL,
     department: str = "BLENDING",
+    request_date=None,
+    require_date=None,
+    require_time=None,
     requested_for_name: str = "",
     request_reason: str = "",
 ) -> StockRequest:
@@ -416,6 +419,9 @@ def create_store_request(
             issuing_warehouse=issuing_warehouse,
             request_type=request_type,
             department=normalize_text(department) or "BLENDING",
+            request_date=request_date or timezone.localdate(),
+            require_date=require_date,
+            require_time=require_time,
             requested_for_name=normalize_text(requested_for_name),
             request_reason=normalize_text(request_reason),
             remarks=normalize_text(remarks) or None,
@@ -460,6 +466,9 @@ def request_stock(
     user,
     request_type: str = StockRequest.RequestType.GENERAL,
     department: str = "BLENDING",
+    request_date=None,
+    require_date=None,
+    require_time=None,
     requested_for_name: str = "",
     request_reason: str = "",
 ) -> StockRequest:
@@ -469,6 +478,9 @@ def request_stock(
         remarks=None,
         request_type=request_type,
         department=department,
+        request_date=request_date,
+        require_date=require_date,
+        require_time=require_time,
         requested_for_name=requested_for_name,
         request_reason=request_reason,
     )
@@ -482,6 +494,9 @@ def update_store_request(
     remarks: str | None = None,
     request_type: str = StockRequest.RequestType.GENERAL,
     department: str = "BLENDING",
+    request_date=None,
+    require_date=None,
+    require_time=None,
     requested_for_name: str = "",
     request_reason: str = "",
 ) -> StockRequest:
@@ -524,6 +539,9 @@ def update_store_request(
 
         stock_request.request_type = request_type
         stock_request.department = normalize_text(department) or "BLENDING"
+        stock_request.request_date = request_date or stock_request.request_date or timezone.localdate()
+        stock_request.require_date = require_date
+        stock_request.require_time = require_time
         stock_request.requested_for_name = normalize_text(requested_for_name)
         stock_request.request_reason = normalize_text(request_reason)
         stock_request.remarks = normalize_text(remarks) or None
@@ -531,6 +549,9 @@ def update_store_request(
             update_fields=[
                 "request_type",
                 "department",
+                "request_date",
+                "require_date",
+                "require_time",
                 "requested_for_name",
                 "request_reason",
                 "remarks",

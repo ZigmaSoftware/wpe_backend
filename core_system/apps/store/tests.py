@@ -96,6 +96,9 @@ class StoreWorkflowTests(APITestCase):
                 "quantity": "5.000",
                 "request_type": "ADDITIVE",
                 "department": "BLENDING",
+                "request_date": "2026-05-24",
+                "require_date": "2026-05-25",
+                "require_time": "10:45:00",
                 "requested_for_name": "Shift Lead",
                 "request_reason": "Batch replenishment",
             },
@@ -106,6 +109,9 @@ class StoreWorkflowTests(APITestCase):
         stock_request = StockRequest.objects.prefetch_related("items").get(pk=response.data["request"]["id"])
         self.assertEqual(stock_request.request_type, StockRequest.RequestType.ADDITIVE)
         self.assertEqual(stock_request.department, "BLENDING")
+        self.assertEqual(str(stock_request.request_date), "2026-05-24")
+        self.assertEqual(str(stock_request.require_date), "2026-05-25")
+        self.assertEqual(str(stock_request.require_time), "10:45:00")
         self.assertEqual(stock_request.requested_for_name, "Shift Lead")
         self.assertEqual(stock_request.request_reason, "Batch replenishment")
         self.assertEqual(stock_request.items.first().requested_qty, Decimal("5.000"))
@@ -125,6 +131,9 @@ class StoreWorkflowTests(APITestCase):
                 "quantity": "2.500",
                 "request_type": "ADDITIVE",
                 "department": "BLENDING",
+                "request_date": "2026-05-26",
+                "require_date": "2026-05-27",
+                "require_time": "09:30:00",
                 "requested_for_name": "Mixer Operator",
                 "request_reason": "Line refill",
             },
@@ -138,6 +147,9 @@ class StoreWorkflowTests(APITestCase):
         self.assertEqual(row["item"], item.id)
         self.assertEqual(row["quantity"], "2.500")
         self.assertEqual(row["request_type"], "ADDITIVE")
+        self.assertEqual(row["request_date"], "2026-05-26")
+        self.assertEqual(row["require_date"], "2026-05-27")
+        self.assertEqual(row["require_time"], "09:30:00")
         self.assertEqual(row["requested_for_name"], "Mixer Operator")
 
     def test_store_stock_list_is_readable_by_blending_user(self):

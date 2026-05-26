@@ -34,6 +34,9 @@ def create_blending_store_request(
     remarks=None,
     request_type="GENERAL",
     department=BLENDING_DEPARTMENT,
+    request_date=None,
+    require_date=None,
+    require_time=None,
     requested_for_name="",
     request_reason="",
 ):
@@ -43,6 +46,9 @@ def create_blending_store_request(
         remarks=remarks,
         request_type=request_type,
         department=department,
+        request_date=request_date,
+        require_date=require_date,
+        require_time=require_time,
         requested_for_name=requested_for_name,
         request_reason=request_reason,
     )
@@ -60,6 +66,9 @@ def update_blending_store_request(
     remarks=None,
     request_type="GENERAL",
     department=BLENDING_DEPARTMENT,
+    request_date=None,
+    require_date=None,
+    require_time=None,
     requested_for_name="",
     request_reason="",
 ):
@@ -70,6 +79,9 @@ def update_blending_store_request(
         remarks=remarks,
         request_type=request_type,
         department=department,
+        request_date=request_date,
+        require_date=require_date,
+        require_time=require_time,
         requested_for_name=requested_for_name,
         request_reason=request_reason,
     )

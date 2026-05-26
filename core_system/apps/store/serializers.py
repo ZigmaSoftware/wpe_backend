@@ -131,6 +131,9 @@ class LegacyStockRequestCreateSerializer(serializers.Serializer):
         required=False,
     )
     department = serializers.CharField(max_length=100, default="BLENDING", required=False)
+    request_date = serializers.DateField(required=False)
+    require_date = serializers.DateField(required=False, allow_null=True)
+    require_time = serializers.TimeField(required=False, allow_null=True)
     requested_for_name = serializers.CharField(max_length=255, allow_blank=True, required=False)
     request_reason = serializers.CharField(allow_blank=True, required=False)
 
@@ -159,6 +162,9 @@ class StockRequestCreateSerializer(serializers.Serializer):
         required=False,
     )
     department = serializers.CharField(max_length=100, default="BLENDING", required=False)
+    request_date = serializers.DateField(required=False)
+    require_date = serializers.DateField(required=False, allow_null=True)
+    require_time = serializers.TimeField(required=False, allow_null=True)
     requested_for_name = serializers.CharField(max_length=255, allow_blank=True, required=False)
     request_reason = serializers.CharField(allow_blank=True, required=False)
     items = StockRequestItemWriteSerializer(many=True)
@@ -260,6 +266,9 @@ class StockRequestSerializer(serializers.ModelSerializer):
             "quantity",
             "request_type",
             "department",
+            "request_date",
+            "require_date",
+            "require_time",
             "requested_for_name",
             "request_reason",
             "status",

@@ -100,7 +100,7 @@ def _get_or_prepare_auth_user(
         except UserCreation.DoesNotExist:
             existing_profile = None
         if existing_profile and (instance is None or existing_profile.pk != instance.pk):
-            raise ValidationError({"username": "This username is already linked to another user account."})
+            raise ValidationError({"username": "This username is already linked to another user creation record."})
         return existing_user
 
     return UserModel(username=username)

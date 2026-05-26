@@ -274,6 +274,9 @@ class StockRequest(models.Model):
         db_index=True,
     )
     department = models.CharField(max_length=100, default="BLENDING")
+    request_date = models.DateField(default=timezone.localdate, db_index=True)
+    require_date = models.DateField(null=True, blank=True, db_index=True)
+    require_time = models.TimeField(null=True, blank=True)
     requested_for_name = models.CharField(max_length=255, blank=True)
     request_reason = models.TextField(blank=True)
     issuing_warehouse = models.ForeignKey(

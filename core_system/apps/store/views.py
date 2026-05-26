@@ -76,6 +76,9 @@ class StoreStockRequestAPIView(generics.GenericAPIView):
             user=request.user,
             request_type=serializer.validated_data.get("request_type", StockRequest.RequestType.GENERAL),
             department=serializer.validated_data.get("department", "BLENDING"),
+            request_date=serializer.validated_data.get("request_date"),
+            require_date=serializer.validated_data.get("require_date"),
+            require_time=serializer.validated_data.get("require_time"),
             requested_for_name=serializer.validated_data.get("requested_for_name", ""),
             request_reason=serializer.validated_data.get("request_reason", ""),
         )

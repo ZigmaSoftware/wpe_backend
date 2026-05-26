@@ -76,12 +76,6 @@ def ensure_dev_master_data() -> None:
         defaults={"code": "common-master", "order_no": 2, "is_active": True},
     )
 
-    hr_section, _ = ScreenSection.objects.get_or_create(
-        name="HR Master",
-        main_screen=masters_screen,
-        defaults={"code": "hr-master", "order_no": 3, "is_active": True},
-    )
-
     dev_screens = (
         {
             "screen_name": "Main Screen Master",
@@ -102,28 +96,22 @@ def ensure_dev_master_data() -> None:
             "order_no": 3,
         },
         {
-            "screen_name": "Staff Master",
-            "code": "staff-master",
-            "section": hr_section,
+            "screen_name": "User Type Master",
+            "code": "user-type-master",
+            "section": admin_section,
             "order_no": 4,
         },
         {
-            "screen_name": "User Type Master",
-            "code": "user-type-master",
+            "screen_name": "User Creation Master",
+            "code": "user-creation-master",
             "section": admin_section,
             "order_no": 5,
         },
         {
-            "screen_name": "User Account Master",
-            "code": "user-account-master",
+            "screen_name": "User Screen Permission Master",
+            "code": "user-screen-permission-master",
             "section": admin_section,
             "order_no": 6,
-        },
-        {
-            "screen_name": "User Permission Master",
-            "code": "user-permission-master",
-            "section": admin_section,
-            "order_no": 7,
         },
     )
 
