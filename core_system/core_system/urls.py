@@ -22,6 +22,7 @@ urlpatterns = [
     path("api/masters/", include("apps.common_master.urls")),
     path("api/production/", include("apps.production.urls")),
     path("api/wpe-masters/", include("apps.wpe_masters.urls")),
+    path("api/scale/", include("apps.scale.urls")),
     path("api/", include("grn_app.urls")),
 ]
 
