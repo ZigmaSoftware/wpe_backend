@@ -50,6 +50,9 @@ class BlendingStoreRequestTests(APITestCase):
                 "remarks": "Need material for mixing line 1",
                 "request_type": "ADDITIVE",
                 "department": "BLENDING",
+                "request_date": "2026-05-20",
+                "require_date": "2026-05-21",
+                "require_time": "14:30:00",
                 "requested_for_name": "Blending Supervisor",
                 "request_reason": "Required for additive batch run",
                 "items": [{"item_id": item.id, "quantity": "50.000"}],
@@ -61,6 +64,9 @@ class BlendingStoreRequestTests(APITestCase):
         self.assertEqual(response.data["data"]["status"], StockRequest.Status.PENDING)
         self.assertEqual(response.data["data"]["request_type"], StockRequest.RequestType.ADDITIVE)
         self.assertEqual(response.data["data"]["item"], item.id)
+        self.assertEqual(str(response.data["data"]["request_date"]), "2026-05-20")
+        self.assertEqual(str(response.data["data"]["require_date"]), "2026-05-21")
+        self.assertEqual(str(response.data["data"]["require_time"]), "14:30:00")
 
     def test_legacy_additive_request_endpoint_still_works(self):
         item = Item.objects.create(
@@ -229,6 +235,9 @@ class BlendingStoreRequestTests(APITestCase):
             {
                 "remarks": "Updated request",
                 "request_type": "ADDITIVE",
+                "request_date": "2026-05-22",
+                "require_date": "2026-05-23",
+                "require_time": "08:15:00",
                 "requested_for_name": "Shift Lead",
                 "request_reason": "Need both additives",
                 "items": [
@@ -241,6 +250,9 @@ class BlendingStoreRequestTests(APITestCase):
 
         self.assertEqual(update_response.status_code, 200)
         self.assertEqual(update_response.data["data"]["requested_for_name"], "Shift Lead")
+        self.assertEqual(str(update_response.data["data"]["request_date"]), "2026-05-22")
+        self.assertEqual(str(update_response.data["data"]["require_date"]), "2026-05-23")
+        self.assertEqual(str(update_response.data["data"]["require_time"]), "08:15:00")
         self.assertEqual(len(update_response.data["data"]["items"]), 2)
 
         detail_response = self.client.get(f"/api/blending/store-requests/{request_id}/")
