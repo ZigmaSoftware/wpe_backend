@@ -357,6 +357,7 @@ class ProfileCreationMasterSerializer(ProductionCodeMasterSerializer):
     profile_size_name = serializers.CharField(source="profile_size.name", read_only=True)
     color_name = serializers.CharField(source="color.name", read_only=True)
     packing_type_name = serializers.CharField(source="packing_type.name", read_only=True, default=None)
+    image_url = serializers.SerializerMethodField()
 
     class Meta(ProductionCodeMasterSerializer.Meta):
         model = ProfileCreationMaster
@@ -372,7 +373,18 @@ class ProfileCreationMasterSerializer(ProductionCodeMasterSerializer):
             "uom",
             "packing_type",
             "packing_type_name",
+            "image",
+            "image_url",
         )
+        read_only_fields = ProductionCodeMasterSerializer.Meta.read_only_fields + ("image_url",)
+
+    def get_image_url(self, obj):
+        if not obj.image:
+            return None
+        request = self.context.get("request")
+        if request:
+            return request.build_absolute_uri(obj.image.url)
+        return obj.image.url
 
 
 class ProductionLineMasterSerializer(ProductionCodeMasterSerializer):
