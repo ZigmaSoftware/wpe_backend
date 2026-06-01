@@ -1,4 +1,6 @@
+import os
 import re
+import uuid
 from decimal import Decimal
 from string import ascii_uppercase
 
@@ -681,6 +683,13 @@ class PackingTypeMaster(ProductionCodeTrackedModel):
         verbose_name_plural = "Packing Types"
 
 
+def profile_creation_image_upload_path(instance, filename: str) -> str:
+    _, ext = os.path.splitext(filename or "")
+    ext = ext.lower() or ".bin"
+    ref = instance.code or instance.pk or "profile"
+    return f"production/profiles/{ref}/{uuid.uuid4().hex}{ext}"
+
+
 class ProfileCreationMaster(ProductionCodeTrackedModel):
     class Uom(models.TextChoices):
         NOS = "NOS", "Nos"
@@ -708,8 +717,7 @@ class ProfileCreationMaster(ProductionCodeTrackedModel):
     weight_per_piece = models.DecimalField(
         max_digits=12,
         decimal_places=3,
-        blank=True,
-        null=True,
+        default=Decimal("0"),
         validators=[MinValueValidator(Decimal("0"))],
     )
     uom = models.CharField(max_length=16, choices=Uom.choices)
@@ -720,6 +728,7 @@ class ProfileCreationMaster(ProductionCodeTrackedModel):
         on_delete=models.SET_NULL,
         related_name="profiles",
     )
+    image = models.ImageField(upload_to=profile_creation_image_upload_path, null=True, blank=True)
 
     class Meta(ProductionCodeTrackedModel.Meta):
         verbose_name = "Profile Creation"
