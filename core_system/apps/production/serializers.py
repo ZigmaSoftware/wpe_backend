@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from apps.wpe_masters.models import ProductionTypeMaster
 from .models import (
     ProductionOrder,
     MaterialMovement,
@@ -98,6 +99,7 @@ class ProductionOrderListSerializer(serializers.ModelSerializer):
             "id",
             "production_id",
             "status",
+            "production_for",
             "production_type",
             "batch_number",
             "production_date",
@@ -162,6 +164,7 @@ class ProductionOrderDetailSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "production_id",
+            "production_for",
             "production_type",
             "status",
             "batch_number",
@@ -194,12 +197,14 @@ class ProductionOrderDetailSerializer(serializers.ModelSerializer):
 
 class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
     """Serializer for creating and updating Production Orders"""
+    production_type = serializers.CharField()
     materials = serializers.ListField(child=serializers.DictField(), required=False, write_only=True)
 
     class Meta:
         model = ProductionOrder
         fields = [
             "production_id",
+            "production_for",
             "production_type",
             "status",
             "batch_number",
@@ -228,6 +233,31 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
                     {"end_date_time": "End time must be after start time."}
                 )
         return data
+
+    def validate_production_type(self, value):
+        normalized = str(value).strip()
+        if not normalized:
+            raise serializers.ValidationError("Production type is required.")
+
+        current_value = getattr(self.instance, "production_type", "")
+        if current_value and current_value.strip().casefold() == normalized.casefold():
+            return current_value
+
+        legacy_values = {choice for choice, _ in ProductionOrder.PRODUCTION_TYPE_CHOICES}
+        if normalized in legacy_values:
+            return normalized
+
+        master_name = (
+            ProductionTypeMaster.objects.filter(name__iexact=normalized, is_active=True)
+            .values_list("name", flat=True)
+            .first()
+        )
+        if master_name:
+            return master_name
+
+        raise serializers.ValidationError(
+            "Select an active Production Type from Inventory & Store Masters."
+        )
 
     def create(self, validated_data):
         materials = validated_data.pop("materials", [])

@@ -5,7 +5,7 @@ from string import ascii_uppercase
 from django.conf import settings
 from django.core.validators import MinValueValidator
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -101,9 +101,10 @@ class ProductionCodeTrackedModel(models.Model):
         )
 
     def save(self, *args, **kwargs):
-        self.ensure_code()
-        self.full_clean()
-        return super().save(*args, **kwargs)
+        with transaction.atomic():
+            self.ensure_code()
+            self.full_clean()
+            return super().save(*args, **kwargs)
 
 
 class ProductionOrder(models.Model):
@@ -139,6 +140,12 @@ class ProductionOrder(models.Model):
         choices=STATUS_CHOICES,
         default="IN_PROGRESS",
         db_index=True
+    )
+    production_for = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Production purpose, customer, or internal job reference"
     )
 
     # Batch Information
@@ -587,16 +594,17 @@ class ProductionMachine(models.Model):
         self.notes = str(self.notes or "").strip()
 
     def save(self, *args, **kwargs):
-        if not self.machine_code:
-            self.machine_code = build_prefixed_running_number(
-                type(self),
-                field_name="machine_code",
-                prefix="MCH",
-                width=3,
-                instance=self,
-            )
-        self.full_clean()
-        return super().save(*args, **kwargs)
+        with transaction.atomic():
+            if not self.machine_code:
+                self.machine_code = build_prefixed_running_number(
+                    type(self),
+                    field_name="machine_code",
+                    prefix="MCH",
+                    width=3,
+                    instance=self,
+                )
+            self.full_clean()
+            return super().save(*args, **kwargs)
 
 
 class ProfileSizeMaster(ProductionCodeTrackedModel):
@@ -983,16 +991,17 @@ class BOMVariant(models.Model):
         self.notes = str(self.notes or "").strip()
 
     def save(self, *args, **kwargs):
-        if not self.variant_code:
-            self.variant_code = build_prefixed_running_number(
-                type(self),
-                field_name="variant_code",
-                prefix="REC",
-                width=3,
-                instance=self,
-            )
-        self.full_clean()
-        return super().save(*args, **kwargs)
+        with transaction.atomic():
+            if not self.variant_code:
+                self.variant_code = build_prefixed_running_number(
+                    type(self),
+                    field_name="variant_code",
+                    prefix="REC",
+                    width=3,
+                    instance=self,
+                )
+            self.full_clean()
+            return super().save(*args, **kwargs)
 
 
 class BOMVariantComponent(models.Model):

@@ -8,7 +8,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.items.models import Item
 from apps.production.models import BOMVariant, BOMVariantComponent, BatchWeightEntry, ProductionOrder, ProductionOrderMaterialPlan
-from apps.wpe_masters.models import ProductTypeCategory, ProductTypeSubtype
+from apps.wpe_masters.models import ProductTypeCategory, ProductTypeSubtype, ProductionTypeMaster
 
 
 UserModel = get_user_model()
@@ -267,6 +267,7 @@ class ProductionOrderMaterialPlanTests(APITestCase):
             "/api/production/production/",
             {
                 "production_id": f"PO-MAT-{self.unique_suffix.upper()}",
+                "production_for": "HSN - 500",
                 "production_type": "RECYCLING_PRODUCTION",
                 "status": "PLANNED",
                 "production_date": str(date.today()),
@@ -305,7 +306,82 @@ class ProductionOrderMaterialPlanTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         order = ProductionOrder.objects.get(production_id=f"PO-MAT-{self.unique_suffix.upper()}")
         material_plan = ProductionOrderMaterialPlan.objects.get(production_order=order)
+        self.assertEqual(order.production_for, "HSN - 500")
         self.assertEqual(material_plan.bom_variant_id, self.bom.id)
         self.assertEqual(material_plan.bom_component_id, self.component.id)
         self.assertEqual(str(material_plan.required_quantity), "150.000")
         self.assertEqual(str(material_plan.rate), "16.500")
+
+        list_response = self.client.get("/api/production/production/")
+
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        rows = list_response.data["results"] if isinstance(list_response.data, dict) else list_response.data
+        saved_row = next(
+            row for row in rows if row["production_id"] == f"PO-MAT-{self.unique_suffix.upper()}"
+        )
+        self.assertEqual(saved_row["production_for"], "HSN - 500")
+
+    def test_create_order_accepts_active_master_name_as_production_type(self):
+        production_type = ProductionTypeMaster.objects.create(
+            name=f"Granulation Production {self.unique_suffix}",
+            is_active=True,
+        )
+
+        response = self.client.post(
+            "/api/production/production/",
+            {
+                "production_id": f"PO-MASTER-{self.unique_suffix.upper()}",
+                "production_type": production_type.name,
+                "status": "PLANNED",
+                "production_date": str(date.today()),
+                "shift": "Shift 1 (6:00 am - 2:00 pm)",
+                "planned_quantity": "50.000",
+                "planned_weight": "0.000",
+                "material_cost": "0.00",
+                "total_cost": "0.00",
+                "start_date_time": f"{date.today()}T06:00:00Z",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        order = ProductionOrder.objects.get(production_id=f"PO-MASTER-{self.unique_suffix.upper()}")
+        self.assertEqual(order.production_type, production_type.name)
+
+
+class RecipeMasterApiTests(APITestCase):
+    def setUp(self):
+        self.unique_suffix = uuid4().hex[:8]
+        self.user = UserModel.objects.create_superuser(
+            username=f"recipe-admin-{self.unique_suffix}",
+            email=f"recipe-admin-{self.unique_suffix}@example.com",
+            password="password123",
+        )
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh.access_token}")
+
+    def test_create_recipe_returns_201_and_is_available_in_lookup(self):
+        response = self.client.post(
+            "/api/production/recipes/",
+            {
+                "name": f"Recipe {self.unique_suffix}",
+                "description": "Recipe notes",
+                "recipe_version": "v1",
+                "batch_size": "5.000",
+                "batch_uom": "KG",
+                "status": "DRAFT",
+                "approved_by": None,
+                "approved_at": None,
+                "is_active": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        recipe_id = response.data["id"]
+        self.assertTrue(response.data["code"].startswith("REC"))
+
+        lookup_response = self.client.get("/api/production/recipes/lookup/")
+
+        self.assertEqual(lookup_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(any(row["id"] == recipe_id for row in lookup_response.data))

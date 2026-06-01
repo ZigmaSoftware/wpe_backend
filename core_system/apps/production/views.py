@@ -41,7 +41,7 @@ class ProductionOrderViewSet(viewsets.ModelViewSet):
     )
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['status', 'production_type', 'batch_number', 'production_date']
-    search_fields = ['production_id', 'batch_number', 'plan_id', 'line_name']
+    search_fields = ['production_id', 'production_for', 'batch_number', 'plan_id', 'line_name']
     ordering_fields = ['production_date', 'created_at', 'total_cost']
     ordering = ['-production_date', '-created_at']
 
