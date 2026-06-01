@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
-from django.db import models
+from django.core.exceptions import ValidationError
+from django.db import models, transaction
 from django.utils.text import slugify
+
+from apps.common_master.services import build_running_number
 
 
 def build_unique_code(
@@ -50,6 +54,39 @@ class BaseMaster(models.Model):
         return self.name
 
 
+class CodeTrackedMaster(BaseMaster):
+    code = models.CharField(
+        max_length=40,
+        unique=True,
+        db_index=True,
+        blank=True,
+        null=True,
+        editable=False,
+    )
+    description = models.TextField(blank=True)
+
+    code_prefix = ""
+    code_width = 3
+
+    class Meta(BaseMaster.Meta):
+        abstract = True
+
+    def save(self, *args, **kwargs):
+        self.name = (self.name or "").strip()
+        self.description = (self.description or "").strip()
+        if not self.code and self.code_prefix:
+            with transaction.atomic():
+                self.code = build_running_number(
+                    type(self),
+                    field_name="code",
+                    prefix=self.code_prefix,
+                    width=self.code_width,
+                    instance=self,
+                )
+                return super().save(*args, **kwargs)
+        return super().save(*args, **kwargs)
+
+
 class ProductTypeGovernedMaster(models.Model):
     unique_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     name = models.CharField(
@@ -72,6 +109,9 @@ class ProductTypeGovernedMaster(models.Model):
     class Meta:
         abstract = True
 
+    code_prefix = ""
+    code_width = 3
+
     def __str__(self) -> str:
         return self.name
 
@@ -79,6 +119,16 @@ class ProductTypeGovernedMaster(models.Model):
         self.name = (self.name or "").strip()
         self.description = (self.description or "").strip()
         if not self.code:
+            if self.code_prefix:
+                with transaction.atomic():
+                    self.code = build_running_number(
+                        type(self),
+                        field_name="code",
+                        prefix=self.code_prefix,
+                        width=self.code_width,
+                        instance=self,
+                    )
+                    return super().save(*args, **kwargs)
             self.code = build_unique_code(
                 type(self),
                 self.name,
@@ -112,7 +162,20 @@ class PriceBookMaster(BaseMaster):
         verbose_name_plural = "Price Book Masters"
 
 
-class WarehouseMaster(BaseMaster):
+class WarehouseMaster(CodeTrackedMaster):
+    class WarehouseType(models.TextChoices):
+        FG = "FG", "FG"
+        RM = "RM", "RM"
+        SCRAP = "SCRAP", "Scrap"
+
+    warehouse_type = models.CharField(
+        max_length=10,
+        choices=WarehouseType.choices,
+        default=WarehouseType.RM,
+    )
+    code_prefix = "WH"
+    code_width = 3
+
     class Meta(BaseMaster.Meta):
         abstract = False
         db_table = "wpe_warehouse_master"
@@ -144,15 +207,17 @@ class PurchaseTypeMaster(BaseMaster):
         verbose_name_plural = "Purchase Type Masters"
 
 
-class RoleMaster(BaseMaster):
-    class Meta(BaseMaster.Meta):
-        abstract = False
-        db_table = "wpe_role_master"
-        verbose_name = "Role Master"
-        verbose_name_plural = "Role Masters"
+class DepartmentMaster(CodeTrackedMaster):
+    department_head = models.ForeignKey(
+        "WPEUserCreation",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="headed_departments",
+    )
+    code_prefix = "DEPT"
+    code_width = 3
 
-
-class DepartmentMaster(BaseMaster):
     class Meta(BaseMaster.Meta):
         abstract = False
         db_table = "wpe_department_master"
@@ -160,7 +225,96 @@ class DepartmentMaster(BaseMaster):
         verbose_name_plural = "Department Masters"
 
 
+class DesignationMaster(CodeTrackedMaster):
+    name = models.CharField(max_length=200, db_index=True)
+    department = models.ForeignKey(
+        DepartmentMaster,
+        on_delete=models.PROTECT,
+        related_name="designations",
+    )
+    code_prefix = "DES"
+    code_width = 3
+
+    class Meta(BaseMaster.Meta):
+        abstract = False
+        db_table = "wpe_designation_master"
+        verbose_name = "Designation Master"
+        verbose_name_plural = "Designation Masters"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["department", "name"],
+                name="wpe_designation_department_name_uniq",
+            ),
+        ]
+
+
+class RoleMaster(CodeTrackedMaster):
+    designation = models.ForeignKey(
+        DesignationMaster,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="roles",
+    )
+    code_prefix = "ROLE"
+    code_width = 3
+
+    class Meta(BaseMaster.Meta):
+        abstract = False
+        db_table = "wpe_role_master"
+        verbose_name = "Role Master"
+        verbose_name_plural = "Role Masters"
+
+
+class StoreMaster(CodeTrackedMaster):
+    code_prefix = "STORE"
+    code_width = 3
+
+    class Meta(BaseMaster.Meta):
+        abstract = False
+        db_table = "wpe_store_master"
+        verbose_name = "Store Master"
+        verbose_name_plural = "Store Masters"
+
+
+class UnitMaster(models.Model):
+    unique_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    uom_code = models.CharField(max_length=20, unique=True, db_index=True)
+    name = models.CharField(max_length=120, unique=True, db_index=True)
+    decimal_allowed = models.BooleanField(default=False)
+    decimal_places = models.PositiveSmallIntegerField(default=0)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "wpe_unit_master"
+        ordering = ["name", "id"]
+        verbose_name = "Unit Master"
+        verbose_name_plural = "Unit Masters"
+
+    def __str__(self) -> str:
+        return f"{self.uom_code} - {self.name}"
+
+    def clean(self):
+        self.uom_code = (self.uom_code or "").strip().upper()
+        self.name = (self.name or "").strip()
+        if not self.uom_code:
+            raise ValidationError({"uom_code": "UOM code is required."})
+        if not self.name:
+            raise ValidationError({"name": "UOM name is required."})
+        if not self.decimal_allowed:
+            self.decimal_places = 0
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        return super().save(*args, **kwargs)
+
+
 class ProductTypeCategory(ProductTypeGovernedMaster):
+    code_prefix = "CAT"
+    code_width = 3
+
     class Meta:
         db_table = "wpe_product_type_category"
         verbose_name = "Product Type Category"
@@ -190,6 +344,8 @@ class ProductTypeSubtype(ProductTypeGovernedMaster):
         on_delete=models.PROTECT,
         related_name="subtypes",
     )
+    code_prefix = "SUB"
+    code_width = 3
 
     class Meta:
         db_table = "wpe_product_type_subtype"
@@ -218,17 +374,214 @@ class ProductTypeSubtype(ProductTypeGovernedMaster):
         ]
 
     def save(self, *args, **kwargs):
-        self.name = (self.name or "").strip()
-        self.description = (self.description or "").strip()
-        if not self.code:
-            category_name = self.category.name if self.category_id else "category"
-            self.code = build_unique_code(
-                type(self),
-                f"{category_name}-{self.name}",
-                instance=self,
-                prefix="product-type-subtype",
-            )
         return super().save(*args, **kwargs)
+
+
+class ItemMaster(models.Model):
+    class ItemType(models.TextChoices):
+        RM = "RM", "RM"
+        ADDITIVE = "ADDITIVE", "Additive"
+        PACKING = "PACKING", "Packing"
+        FG = "FG", "FG"
+
+    unique_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    item_code = models.CharField(max_length=40, unique=True, db_index=True, blank=True, null=True, editable=False)
+    item_name = models.CharField(max_length=200, unique=True, db_index=True)
+    sub_category = models.ForeignKey(
+        ProductTypeSubtype,
+        on_delete=models.PROTECT,
+        related_name="items",
+    )
+    item_type = models.CharField(max_length=12, choices=ItemType.choices, default=ItemType.RM, db_index=True)
+    uom = models.ForeignKey(
+        UnitMaster,
+        on_delete=models.PROTECT,
+        related_name="items",
+    )
+    hsn_code = models.CharField(max_length=50, blank=True)
+    gst_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
+    minimum_stock = models.DecimalField(max_digits=14, decimal_places=3, default=Decimal("0.000"))
+    maximum_stock = models.DecimalField(max_digits=14, decimal_places=3, default=Decimal("0.000"))
+    reorder_level = models.DecimalField(max_digits=14, decimal_places=3, default=Decimal("0.000"))
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "wpe_item_master"
+        ordering = ["item_name", "id"]
+        verbose_name = "Item Master"
+        verbose_name_plural = "Item Masters"
+        indexes = [
+            models.Index(fields=["sub_category", "is_active"], name="wpe_item_subcat_active_idx"),
+            models.Index(fields=["item_type", "is_active"], name="wpe_item_type_active_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.item_name} ({self.item_code or 'pending'})"
+
+    def clean(self):
+        self.item_name = (self.item_name or "").strip()
+        self.hsn_code = (self.hsn_code or "").strip()
+        if not self.item_name:
+            raise ValidationError({"item_name": "Item name is required."})
+        for field_name in ("gst_percentage", "minimum_stock", "maximum_stock", "reorder_level"):
+            current_value = getattr(self, field_name)
+            try:
+                normalized_value = Decimal(str(current_value or "0"))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise ValidationError({field_name: f"Invalid numeric value for {field_name.replace('_', ' ')}."}) from exc
+            setattr(self, field_name, normalized_value)
+        if self.minimum_stock > self.maximum_stock:
+            raise ValidationError({"minimum_stock": "Minimum stock cannot exceed maximum stock."})
+        if self.reorder_level > self.maximum_stock:
+            raise ValidationError({"reorder_level": "Reorder level cannot exceed maximum stock."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        if not self.item_code:
+            with transaction.atomic():
+                self.item_code = build_running_number(
+                    type(self),
+                    field_name="item_code",
+                    prefix="RM",
+                    width=3,
+                    instance=self,
+                )
+                return super().save(*args, **kwargs)
+        return super().save(*args, **kwargs)
+
+
+class WeighmentScaleMaster(CodeTrackedMaster):
+    class ConnectionType(models.TextChoices):
+        SERIAL = "SERIAL", "Serial"
+        USB = "USB", "USB"
+        API = "API", "API"
+
+    class Parity(models.TextChoices):
+        NONE = "NONE", "None"
+
+    department = models.ForeignKey(
+        DepartmentMaster,
+        on_delete=models.PROTECT,
+        related_name="weighment_scales",
+    )
+    machine = models.ForeignKey(
+        "production.ProductionMachine",
+        on_delete=models.PROTECT,
+        related_name="weighment_scales",
+    )
+    connection_type = models.CharField(
+        max_length=20,
+        choices=ConnectionType.choices,
+        default=ConnectionType.SERIAL,
+    )
+    port_name = models.CharField(max_length=50, blank=True, default="COM1")
+    baud_rate = models.PositiveIntegerField(default=9600)
+    data_bits = models.PositiveSmallIntegerField(default=8)
+    parity = models.CharField(max_length=20, choices=Parity.choices, default=Parity.NONE)
+    stop_bits = models.PositiveSmallIntegerField(default=1)
+    unit = models.ForeignKey(
+        UnitMaster,
+        on_delete=models.PROTECT,
+        related_name="weighment_scales",
+        null=True,
+        blank=True,
+    )
+    is_auto_capture = models.BooleanField(default=False)
+    code_prefix = "SCALE"
+    code_width = 3
+
+    class Meta(BaseMaster.Meta):
+        abstract = False
+        db_table = "wpe_weighment_scale_master"
+        verbose_name = "Weighment Scale Master"
+        verbose_name_plural = "Weighment Scale Masters"
+
+
+class PrinterMaster(CodeTrackedMaster):
+    class PrinterType(models.TextChoices):
+        BARCODE = "BARCODE", "Barcode"
+        QR = "QR", "QR"
+        STICKER = "STICKER", "Sticker"
+
+    class ConnectionType(models.TextChoices):
+        USB = "USB", "USB"
+        NETWORK = "NETWORK", "Network"
+
+    department = models.ForeignKey(
+        DepartmentMaster,
+        on_delete=models.PROTECT,
+        related_name="printers",
+    )
+    printer_type = models.CharField(max_length=20, choices=PrinterType.choices)
+    connection_type = models.CharField(max_length=20, choices=ConnectionType.choices)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    port = models.PositiveIntegerField(null=True, blank=True)
+    paper_size = models.CharField(max_length=40, default="LABEL")
+    code_prefix = "PRN"
+    code_width = 3
+
+    class Meta(BaseMaster.Meta):
+        abstract = False
+        db_table = "wpe_printer_master"
+        verbose_name = "Printer Master"
+        verbose_name_plural = "Printer Masters"
+
+
+class QRLabelTemplateMaster(CodeTrackedMaster):
+    class LabelType(models.TextChoices):
+        BIN = "BIN", "Bin"
+        BAG = "BAG", "Bag"
+        PRODUCT = "PRODUCT", "Product"
+        REGRIND = "REGRIND", "Regrind"
+
+    class DataFormat(models.TextChoices):
+        JSON = "JSON", "JSON"
+        TEXT = "TEXT", "Text"
+
+    label_type = models.CharField(max_length=20, choices=LabelType.choices)
+    width = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    height = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    qr_data_format = models.CharField(max_length=20, choices=DataFormat.choices, default=DataFormat.JSON)
+    printer = models.ForeignKey(
+        PrinterMaster,
+        on_delete=models.PROTECT,
+        related_name="qr_label_templates",
+    )
+    code_prefix = "QR"
+    code_width = 3
+
+    class Meta(BaseMaster.Meta):
+        abstract = False
+        db_table = "wpe_qr_label_template_master"
+        verbose_name = "QR Label Template Master"
+        verbose_name_plural = "QR Label Template Masters"
+
+
+class SerialPortConfigurationMaster(CodeTrackedMaster):
+    class Parity(models.TextChoices):
+        NONE = "NONE", "None"
+
+    class ReadFormat(models.TextChoices):
+        ASCII = "ASCII", "ASCII"
+        HEX = "HEX", "HEX"
+
+    port_name = models.CharField(max_length=100, blank=True, default="/dev/ttyS1")
+    baud_rate = models.PositiveIntegerField(default=9600)
+    parity = models.CharField(max_length=20, choices=Parity.choices, default=Parity.NONE)
+    data_bits = models.PositiveSmallIntegerField(default=8)
+    stop_bits = models.PositiveSmallIntegerField(default=1)
+    timeout = models.PositiveIntegerField(null=True, blank=True)
+    read_format = models.CharField(max_length=20, choices=ReadFormat.choices, default=ReadFormat.ASCII)
+    code_prefix = "SERIAL"
+    code_width = 3
+
+    class Meta(BaseMaster.Meta):
+        abstract = False
+        db_table = "wpe_serial_port_configuration_master"
+        verbose_name = "Serial Port Configuration Master"
+        verbose_name_plural = "Serial Port Configuration Masters"
 
 
 class WPEUserCreation(models.Model):

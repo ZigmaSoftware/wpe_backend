@@ -11,19 +11,28 @@ from rest_framework.response import Response
 
 from apps.admin_master.models import MainScreen, UserScreen
 from apps.admin_master.permissions import AdminMasterRBACPermission
+from apps.common_master.services import build_running_number
 
 from .models import (
     BranchMaster,
     DepartmentMaster,
+    DesignationMaster,
+    ItemMaster,
     LocationMaster,
+    PrinterMaster,
     PriceBookMaster,
     ProductTypeCategory,
     ProductTypeSubtype,
     ProductionTypeMaster,
     PurchaseTypeMaster,
+    QRLabelTemplateMaster,
     RoleMaster,
     SaleTypeMaster,
+    SerialPortConfigurationMaster,
+    StoreMaster,
+    UnitMaster,
     WarehouseMaster,
+    WeighmentScaleMaster,
     WPEUserCreation,
     WPERolePermission,
     WPEUserScreenPermission,
@@ -31,16 +40,24 @@ from .models import (
 from .serializers import (
     BranchMasterSerializer,
     DepartmentMasterSerializer,
+    DesignationMasterSerializer,
+    ItemMasterSerializer,
     LocationMasterSerializer,
+    PrinterMasterSerializer,
     PriceBookMasterSerializer,
     ProductTypeCategorySerializer,
     ProductTypeCategoryTreeSerializer,
     ProductTypeSubtypeSerializer,
     ProductionTypeMasterSerializer,
     PurchaseTypeMasterSerializer,
+    QRLabelTemplateMasterSerializer,
     RoleMasterSerializer,
     SaleTypeMasterSerializer,
+    SerialPortConfigurationMasterSerializer,
+    StoreMasterSerializer,
+    UnitMasterSerializer,
     WarehouseMasterSerializer,
+    WeighmentScaleMasterSerializer,
     WPEUserCreationReadSerializer,
     WPEUserCreationWriteSerializer,
     PERMISSION_FIELDS,
@@ -55,6 +72,17 @@ def _coerce_filter_value(value: str):
     if normalized in {"false", "0", "no", "off"}:
         return False
     return value
+
+
+def _next_code_response(model_cls, *, field_name: str, prefix: str, width: int) -> Response:
+    with transaction.atomic():
+        code = build_running_number(
+            model_cls,
+            field_name=field_name,
+            prefix=prefix,
+            width=width,
+        )
+    return Response({"code": code})
 
 
 class QueryParamFilterMixin:
@@ -129,6 +157,29 @@ class BaseMasterViewSet(QueryParamFilterMixin, viewsets.ModelViewSet):
             )
 
 
+class CodeTrackedMasterViewSet(BaseMasterViewSet):
+    search_fields = ["name", "code", "description"]
+    ordering_fields = ["name", "code", "created_at", "is_active"]
+    next_code_prefix: str | None = None
+    next_code_width = 3
+
+    @action(detail=False, methods=["get"])
+    def lookup(self, request):
+        queryset = self.get_queryset().filter(is_active=True).values("id", "name", "code")
+        return Response(list(queryset))
+
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        if not self.next_code_prefix:
+            return Response({"detail": "Next code preview is not configured for this resource."}, status=status.HTTP_404_NOT_FOUND)
+        return _next_code_response(
+            self.get_queryset().model,
+            field_name="code",
+            prefix=self.next_code_prefix,
+            width=self.next_code_width,
+        )
+
+
 class ProductTypeManagedViewSet(BaseMasterViewSet):
     permission_classes = [AdminMasterRBACPermission]
     permission_screen_code = "wpe-product-type-master"
@@ -154,9 +205,12 @@ class PriceBookMasterViewSet(BaseMasterViewSet):
     serializer_class = PriceBookMasterSerializer
 
 
-class WarehouseMasterViewSet(BaseMasterViewSet):
+class WarehouseMasterViewSet(CodeTrackedMasterViewSet):
     queryset = WarehouseMaster.objects.all()
     serializer_class = WarehouseMasterSerializer
+    search_fields = ["name", "code", "warehouse_type", "description"]
+    ordering_fields = ["name", "code", "warehouse_type", "created_at", "is_active"]
+    next_code_prefix = "WH"
 
 
 class ProductionTypeMasterViewSet(BaseMasterViewSet):
@@ -174,14 +228,159 @@ class PurchaseTypeMasterViewSet(BaseMasterViewSet):
     serializer_class = PurchaseTypeMasterSerializer
 
 
-class RoleMasterViewSet(BaseMasterViewSet):
-    queryset = RoleMaster.objects.all()
-    serializer_class = RoleMasterSerializer
+class StoreMasterViewSet(CodeTrackedMasterViewSet):
+    queryset = StoreMaster.objects.all()
+    serializer_class = StoreMasterSerializer
+    next_code_prefix = "STORE"
 
 
-class DepartmentMasterViewSet(BaseMasterViewSet):
-    queryset = DepartmentMaster.objects.all()
+class DepartmentMasterViewSet(CodeTrackedMasterViewSet):
+    queryset = DepartmentMaster.objects.select_related("department_head").all()
     serializer_class = DepartmentMasterSerializer
+    search_fields = ["name", "code", "description", "department_head__full_name", "department_head__user__username"]
+    next_code_prefix = "DEPT"
+
+
+class DesignationMasterViewSet(CodeTrackedMasterViewSet):
+    queryset = DesignationMaster.objects.select_related("department").all()
+    serializer_class = DesignationMasterSerializer
+    search_fields = ["name", "code", "description", "department__name"]
+    filterset_map = {
+        "department": "department_id",
+        "department_id": "department_id",
+        "is_active": "is_active",
+    }
+    ordering_fields = ["department__name", "name", "code", "created_at", "is_active"]
+    ordering = ["department__name", "name"]
+    next_code_prefix = "DES"
+
+
+class RoleMasterViewSet(CodeTrackedMasterViewSet):
+    queryset = RoleMaster.objects.select_related("designation", "designation__department").all()
+    serializer_class = RoleMasterSerializer
+    search_fields = ["name", "code", "description", "designation__name", "designation__department__name"]
+    filterset_map = {
+        "designation": "designation_id",
+        "designation_id": "designation_id",
+        "is_active": "is_active",
+    }
+    ordering_fields = ["designation__name", "name", "code", "created_at", "is_active"]
+    ordering = ["designation__name", "name"]
+    next_code_prefix = "ROLE"
+
+
+class UnitMasterViewSet(BaseMasterViewSet):
+    queryset = UnitMaster.objects.all()
+    serializer_class = UnitMasterSerializer
+    search_fields = ["name", "uom_code"]
+    ordering_fields = ["name", "uom_code", "decimal_places", "created_at", "is_active"]
+    ordering = ["name"]
+
+    @action(detail=False, methods=["get"])
+    def lookup(self, request):
+        queryset = self.get_queryset().filter(is_active=True).values("id", "name", "uom_code", "decimal_allowed", "decimal_places")
+        return Response(list(queryset))
+
+
+class ItemMasterViewSet(BaseMasterViewSet):
+    queryset = ItemMaster.objects.select_related("sub_category", "sub_category__category", "uom").all()
+    serializer_class = ItemMasterSerializer
+    search_fields = [
+        "item_name",
+        "item_code",
+        "sub_category__name",
+        "sub_category__category__name",
+        "uom__uom_code",
+        "uom__name",
+    ]
+    ordering_fields = ["item_name", "item_code", "item_type", "created_at", "is_active"]
+    ordering = ["item_name", "id"]
+    filterset_map = {
+        "sub_category": "sub_category_id",
+        "sub_category_id": "sub_category_id",
+        "category": "sub_category__category_id",
+        "category_id": "sub_category__category_id",
+        "uom": "uom_id",
+        "uom_id": "uom_id",
+        "item_type": "item_type",
+        "is_active": "is_active",
+    }
+
+    @action(detail=False, methods=["get"])
+    def lookup(self, request):
+        queryset = (
+            self.filter_queryset(self.get_queryset())
+            .filter(is_active=True, sub_category__is_active=True, sub_category__category__is_active=True, uom__is_active=True)
+            .values("id", "item_name", "item_code")
+        )
+        return Response(
+            [{"id": row["id"], "name": row["item_name"], "code": row["item_code"]} for row in queryset]
+        )
+
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        return _next_code_response(ItemMaster, field_name="item_code", prefix="RM", width=3)
+
+
+class WeighmentScaleMasterViewSet(CodeTrackedMasterViewSet):
+    queryset = WeighmentScaleMaster.objects.select_related("department", "machine", "unit").all()
+    serializer_class = WeighmentScaleMasterSerializer
+    search_fields = ["name", "code", "department__name", "machine__name", "machine__machine_code", "port_name"]
+    ordering_fields = ["name", "code", "department__name", "machine__name", "created_at", "is_active"]
+    filterset_map = {
+        "department": "department_id",
+        "department_id": "department_id",
+        "machine": "machine_id",
+        "machine_id": "machine_id",
+        "unit": "unit_id",
+        "unit_id": "unit_id",
+        "connection_type": "connection_type",
+        "is_auto_capture": "is_auto_capture",
+        "is_active": "is_active",
+    }
+    next_code_prefix = "SCALE"
+
+
+class PrinterMasterViewSet(CodeTrackedMasterViewSet):
+    queryset = PrinterMaster.objects.select_related("department").all()
+    serializer_class = PrinterMasterSerializer
+    search_fields = ["name", "code", "printer_type", "department__name", "connection_type", "ip_address", "paper_size"]
+    ordering_fields = ["name", "code", "printer_type", "department__name", "created_at", "is_active"]
+    filterset_map = {
+        "department": "department_id",
+        "department_id": "department_id",
+        "printer_type": "printer_type",
+        "connection_type": "connection_type",
+        "is_active": "is_active",
+    }
+    next_code_prefix = "PRN"
+
+
+class QRLabelTemplateMasterViewSet(CodeTrackedMasterViewSet):
+    queryset = QRLabelTemplateMaster.objects.select_related("printer", "printer__department").all()
+    serializer_class = QRLabelTemplateMasterSerializer
+    search_fields = ["name", "code", "label_type", "printer__name", "printer__code", "qr_data_format"]
+    ordering_fields = ["name", "code", "label_type", "printer__name", "created_at", "is_active"]
+    filterset_map = {
+        "printer": "printer_id",
+        "printer_id": "printer_id",
+        "label_type": "label_type",
+        "qr_data_format": "qr_data_format",
+        "is_active": "is_active",
+    }
+    next_code_prefix = "QR"
+
+
+class SerialPortConfigurationMasterViewSet(CodeTrackedMasterViewSet):
+    queryset = SerialPortConfigurationMaster.objects.all()
+    serializer_class = SerialPortConfigurationMasterSerializer
+    search_fields = ["name", "code", "port_name", "read_format"]
+    ordering_fields = ["name", "code", "port_name", "created_at", "is_active"]
+    filterset_map = {
+        "read_format": "read_format",
+        "is_active": "is_active",
+    }
+    next_code_prefix = "SERIAL"
 
 
 class ProductTypeCategoryViewSet(ProductTypeManagedViewSet):
@@ -223,6 +422,10 @@ class ProductTypeCategoryViewSet(ProductTypeManagedViewSet):
         serializer = ProductTypeCategoryTreeSerializer(queryset, many=True)
         return Response(serializer.data)
 
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        return _next_code_response(ProductTypeCategory, field_name="code", prefix="CAT", width=3)
+
 
 class ProductTypeSubtypeViewSet(ProductTypeManagedViewSet):
     serializer_class = ProductTypeSubtypeSerializer
@@ -258,6 +461,10 @@ class ProductTypeSubtypeViewSet(ProductTypeManagedViewSet):
                 for row in queryset
             ]
         )
+
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        return _next_code_response(ProductTypeSubtype, field_name="code", prefix="SUB", width=3)
 
 
 class WPEUserCreationViewSet(viewsets.ModelViewSet):
@@ -325,6 +532,25 @@ class WPEUserCreationViewSet(viewsets.ModelViewSet):
                 {"detail": "Cannot delete: this user is referenced by other data."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+    @action(detail=False, methods=["get"])
+    def lookup(self, request):
+        queryset = (
+            self.get_queryset()
+            .filter(is_active=True)
+            .values("id", "full_name", "user__username")
+            .order_by("full_name", "id")
+        )
+        return Response(
+            [
+                {
+                    "id": row["id"],
+                    "name": row["full_name"],
+                    "username": row["user__username"],
+                }
+                for row in queryset
+            ]
+        )
 
 
 class RolePermissionMatrixView(viewsets.ViewSet):
