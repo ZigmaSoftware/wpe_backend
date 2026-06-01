@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from django.db import transaction
 from django.db.models import Prefetch, ProtectedError, Q
 from rest_framework import filters, status, viewsets
 from rest_framework.decorators import action
@@ -33,6 +34,7 @@ from .models import (
     SupplierDocument,
     Tax,
 )
+from .services import build_running_number
 from .serializers import (
     CitySerializer,
     CompanySerializer,
@@ -58,6 +60,12 @@ def _coerce_filter_value(value: str):
     if normalized in {"false", "0", "no", "off"}:
         return False
     return value
+
+
+def _next_code_response(model_cls, *, field_name: str, prefix: str, width: int) -> Response:
+    with transaction.atomic():
+        code = build_running_number(model_cls, field_name=field_name, prefix=prefix, width=width)
+    return Response({"code": code})
 
 
 class QueryParamFilterMixin:
@@ -185,17 +193,23 @@ class ContinentViewSet(CommonMasterViewSet):
         queryset = self.get_queryset().filter(status=True).values("id", "name", "code", "order_no")
         return Response(list(queryset))
 
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        return _next_code_response(Continent, field_name="code", prefix="Con", width=2)
+
 
 class CountryViewSet(CommonMasterViewSet):
-    queryset = Country.objects.select_related("continent").all().order_by("name", "id")
+    queryset = Country.objects.select_related("continent", "currency").all().order_by("name", "id")
     serializer_class = CountrySerializer
     resource_name = "Country"
     status_field = "status"
-    search_fields = ("name", "code", "continent__name")
-    ordering_fields = ("name", "code", "continent__name", "id")
+    search_fields = ("name", "code", "continent__name", "currency__name", "currency__code")
+    ordering_fields = ("name", "code", "continent__name", "currency__name", "id")
     filterset_map = {
         "continent": "continent_id",
         "continent_id": "continent_id",
+        "currency": "currency_id",
+        "currency_id": "currency_id",
         "is_active": "status",
         "status": "status",
         "code": "code",
@@ -206,16 +220,21 @@ class CountryViewSet(CommonMasterViewSet):
         queryset = self.filter_queryset(self.get_queryset()).filter(status=True).values("id", "name", "code")
         return Response(list(queryset))
 
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        return _next_code_response(Country, field_name="code", prefix="Coun", width=2)
+
 
 class StateViewSet(CommonMasterViewSet):
     queryset = State.objects.select_related("country").all().order_by("name", "id")
     serializer_class = StateSerializer
     resource_name = "State"
-    search_fields = ("name", "country__name")
-    ordering_fields = ("name", "country__name", "id")
+    search_fields = ("name", "code", "country__name")
+    ordering_fields = ("name", "code", "country__name", "id")
     filterset_map = {
         "country": "country_id",
         "country_id": "country_id",
+        "code": "code",
         "is_active": "is_active",
     }
 
@@ -229,13 +248,17 @@ class StateViewSet(CommonMasterViewSet):
         queryset = self.get_queryset().filter(country_id=country_id, is_active=True).values("id", "name")
         return Response(list(queryset))
 
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        return _next_code_response(State, field_name="code", prefix="St", width=2)
+
 
 class CityViewSet(CommonMasterViewSet):
     queryset = City.objects.select_related("country", "state", "city_type").all().order_by("name", "id")
     serializer_class = CitySerializer
     resource_name = "City"
-    search_fields = ("name", "pincode", "state__name", "country__name")
-    ordering_fields = ("name", "pincode", "state__name", "country__name", "id")
+    search_fields = ("name", "code", "pincode", "state__name", "country__name")
+    ordering_fields = ("name", "code", "pincode", "state__name", "country__name", "id")
     filterset_map = {
         "country": "country_id",
         "country_id": "country_id",
@@ -243,6 +266,7 @@ class CityViewSet(CommonMasterViewSet):
         "state_id": "state_id",
         "city_type": "city_type_id",
         "city_type_id": "city_type_id",
+        "code": "code",
         "is_active": "is_active",
     }
 
@@ -256,16 +280,21 @@ class CityViewSet(CommonMasterViewSet):
         queryset = CommonMaster.objects.filter(type="CITY_TYPE", is_active=True).values("id", "name")
         return Response(list(queryset))
 
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        return _next_code_response(City, field_name="code", prefix="Ci", width=2)
+
 
 class TaxViewSet(CommonMasterViewSet):
     queryset = Tax.objects.select_related("country").all().order_by("name", "id")
     serializer_class = TaxSerializer
     resource_name = "Tax"
-    search_fields = ("name", "country__name", "value")
-    ordering_fields = ("name", "value", "country__name", "id")
+    search_fields = ("name", "code", "country__name", "value")
+    ordering_fields = ("name", "code", "value", "country__name", "id")
     filterset_map = {
         "country": "country_id",
         "country_id": "country_id",
+        "code": "code",
         "is_active": "is_active",
     }
 
@@ -274,12 +303,16 @@ class TaxViewSet(CommonMasterViewSet):
         queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True).values("id", "name", "value")
         return Response(list(queryset))
 
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        return _next_code_response(Tax, field_name="code", prefix="Tx", width=2)
+
 
 class CurrencyViewSet(CommonMasterViewSet):
     queryset = Currency.objects.select_related("country").all().order_by("name", "code", "id")
     serializer_class = CurrencySerializer
     resource_name = "Currency"
-    search_fields = ("name", "code", "country__name")
+    search_fields = ("name", "code", "symbol", "country__name")
     ordering_fields = ("name", "code", "country__name", "id")
     filterset_map = {
         "country": "country_id",
@@ -292,6 +325,10 @@ class CurrencyViewSet(CommonMasterViewSet):
     def lookup(self, request):
         queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True).values("id", "name", "code")
         return Response(list(queryset))
+
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        return _next_code_response(Currency, field_name="code", prefix="Cur", width=2)
 
 
 class CustomerViewSet(CommonMasterViewSet):
@@ -460,7 +497,7 @@ class CompanyViewSet(CommonMasterViewSet):
     queryset = Company.objects.select_related("country", "state", "city").all().order_by("-id")
     serializer_class = CompanySerializer
     resource_name = "Company"
-    search_fields = ("name", "code", "city__name", "state__name")
+    search_fields = ("name", "code", "gst_number", "pan_number", "contact_person", "email", "city__name", "state__name")
     ordering_fields = ("name", "code", "created_at", "id")
     filterset_map = {
         "country": "country_id",
@@ -477,6 +514,10 @@ class CompanyViewSet(CommonMasterViewSet):
     def lookup(self, request):
         queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True).values("id", "name", "code")
         return Response(list(queryset))
+
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        return _next_code_response(Company, field_name="code", prefix="COMP", width=3)
 
 
 class ProjectViewSet(CommonMasterViewSet):

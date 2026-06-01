@@ -5,7 +5,7 @@ from apps.items.models import Item
 
 
 class Command(BaseCommand):
-    help = "Seed production machines and BOM variants"
+    help = "Seed production machines and recipe definitions"
 
     def handle(self, *args, **options):
         machines_data = [

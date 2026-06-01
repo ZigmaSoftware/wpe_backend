@@ -5,6 +5,18 @@ from .models import (
     ProductionTransaction,
     ProductionSummary,
     ProductionOrderMaterialPlan,
+    BagCreationMaster,
+    BinCreationMaster,
+    BOMCreationMaster,
+    BOMItemCreationMaster,
+    ColorCreationMaster,
+    PackingMaterialMaster,
+    PackingTypeMaster,
+    ProductionLineMaster,
+    ProfileCreationMaster,
+    ProfileSizeMaster,
+    ProductionMachine,
+    WorkCentreCreationMaster,
 )
 
 
@@ -264,15 +276,166 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
             ProductionOrderMaterialPlan.objects.bulk_create(rows)
 
 
-# ===== NEW OIMS SERIALIZERS =====
+# ===== RECIPE / BOM AND PRODUCTION MASTER SERIALIZERS =====
 
-from .models import ProductionMachine, BOMVariant, BOMVariantComponent, ProductionBatch, BatchWeightEntry, RegrindMaterialEntry
+from .models import BOMVariant, BOMVariantComponent, ProductionBatch, BatchWeightEntry, RegrindMaterialEntry
+
+
+class ProductionCodeMasterSerializer(serializers.ModelSerializer):
+    class Meta:
+        fields = ("id", "code", "name", "description", "is_active", "created_at", "updated_at")
+        read_only_fields = ("id", "code", "created_at", "updated_at")
 
 
 class ProductionMachineSerializer(serializers.ModelSerializer):
+    code = serializers.CharField(source="machine_code", read_only=True)
+    department_name = serializers.CharField(source="department.name", read_only=True, default=None)
+
     class Meta:
         model = ProductionMachine
-        fields = ("id", "machine_code", "name", "machine_type", "applicable_stages", "is_active", "location", "notes", "created_at", "updated_at")
+        fields = (
+            "id",
+            "code",
+            "machine_code",
+            "name",
+            "machine_type",
+            "applicable_stages",
+            "department",
+            "department_name",
+            "capacity",
+            "capacity_uom",
+            "serial_no",
+            "manufacturer",
+            "status",
+            "is_active",
+            "location",
+            "notes",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("id", "code", "machine_code", "created_at", "updated_at")
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        if not attrs.get("name") and not getattr(self.instance, "name", ""):
+            raise serializers.ValidationError({"name": "Machine name is required."})
+        if not attrs.get("machine_type") and not getattr(self.instance, "machine_type", ""):
+            raise serializers.ValidationError({"machine_type": "Machine type is required."})
+        if not attrs.get("serial_no") and not getattr(self.instance, "serial_no", ""):
+            raise serializers.ValidationError({"serial_no": "Machine serial is required."})
+        return attrs
+
+
+class ProfileSizeMasterSerializer(ProductionCodeMasterSerializer):
+    class Meta(ProductionCodeMasterSerializer.Meta):
+        model = ProfileSizeMaster
+        fields = ProductionCodeMasterSerializer.Meta.fields + ("width", "thickness", "length", "uom")
+
+
+class ColorCreationMasterSerializer(ProductionCodeMasterSerializer):
+    class Meta(ProductionCodeMasterSerializer.Meta):
+        model = ColorCreationMaster
+        fields = ProductionCodeMasterSerializer.Meta.fields + ("color_group",)
+
+
+class WorkCentreCreationMasterSerializer(ProductionCodeMasterSerializer):
+    department_name = serializers.CharField(source="department.name", read_only=True, default=None)
+
+    class Meta(ProductionCodeMasterSerializer.Meta):
+        model = WorkCentreCreationMaster
+        fields = ProductionCodeMasterSerializer.Meta.fields + ("department", "department_name", "capacity")
+
+
+class PackingTypeMasterSerializer(ProductionCodeMasterSerializer):
+    class Meta(ProductionCodeMasterSerializer.Meta):
+        model = PackingTypeMaster
+        fields = ProductionCodeMasterSerializer.Meta.fields + ("standard_pcs", "standard_weight", "uom")
+
+
+class ProfileCreationMasterSerializer(ProductionCodeMasterSerializer):
+    profile_type_name = serializers.CharField(source="profile_type.name", read_only=True)
+    profile_size_name = serializers.CharField(source="profile_size.name", read_only=True)
+    color_name = serializers.CharField(source="color.name", read_only=True)
+    packing_type_name = serializers.CharField(source="packing_type.name", read_only=True, default=None)
+
+    class Meta(ProductionCodeMasterSerializer.Meta):
+        model = ProfileCreationMaster
+        fields = ProductionCodeMasterSerializer.Meta.fields + (
+            "profile_type",
+            "profile_type_name",
+            "profile_size",
+            "profile_size_name",
+            "color",
+            "color_name",
+            "length",
+            "weight_per_piece",
+            "uom",
+            "packing_type",
+            "packing_type_name",
+        )
+
+
+class ProductionLineMasterSerializer(ProductionCodeMasterSerializer):
+    department_name = serializers.CharField(source="department.name", read_only=True, default=None)
+    machine_name = serializers.CharField(source="machine.name", read_only=True, default=None)
+    machine_code = serializers.CharField(source="machine.machine_code", read_only=True, default=None)
+
+    class Meta(ProductionCodeMasterSerializer.Meta):
+        model = ProductionLineMaster
+        fields = ProductionCodeMasterSerializer.Meta.fields + (
+            "department",
+            "department_name",
+            "machine",
+            "machine_name",
+            "machine_code",
+            "line_capacity",
+            "capacity_uom",
+            "status",
+        )
+
+
+class BinCreationMasterSerializer(ProductionCodeMasterSerializer):
+    department_name = serializers.CharField(source="department.name", read_only=True)
+
+    class Meta(ProductionCodeMasterSerializer.Meta):
+        model = BinCreationMaster
+        fields = ProductionCodeMasterSerializer.Meta.fields + (
+            "department",
+            "department_name",
+            "capacity",
+            "capacity_uom",
+            "current_status",
+            "current_material",
+        )
+
+
+class BagCreationMasterSerializer(ProductionCodeMasterSerializer):
+    department_name = serializers.CharField(source="department.name", read_only=True)
+
+    class Meta(ProductionCodeMasterSerializer.Meta):
+        model = BagCreationMaster
+        fields = ProductionCodeMasterSerializer.Meta.fields + (
+            "standard_weight",
+            "uom",
+            "department",
+            "department_name",
+            "current_status",
+        )
+
+
+class PackingMaterialMasterSerializer(ProductionCodeMasterSerializer):
+    item_name = serializers.CharField(source="item.item_name", read_only=True)
+    item_code = serializers.CharField(source="item.item_code", read_only=True)
+
+    class Meta(ProductionCodeMasterSerializer.Meta):
+        model = PackingMaterialMaster
+        fields = ProductionCodeMasterSerializer.Meta.fields + (
+            "item",
+            "item_name",
+            "item_code",
+            "uom",
+            "standard_consumption",
+        )
 
 
 class BOMVariantComponentSerializer(serializers.ModelSerializer):
@@ -280,7 +443,7 @@ class BOMVariantComponentSerializer(serializers.ModelSerializer):
     item_name = serializers.CharField(source="component_name", read_only=True)
     category = serializers.CharField(source="component_category_name", read_only=True)
     source_type = serializers.ReadOnlyField()
-    is_active = serializers.BooleanField(source="component_is_active", read_only=True, allow_null=True)
+    source_active = serializers.BooleanField(source="component_is_active", read_only=True, allow_null=True)
 
     class Meta:
         model = BOMVariantComponent
@@ -293,6 +456,7 @@ class BOMVariantComponentSerializer(serializers.ModelSerializer):
             "item_name",
             "category",
             "is_active",
+            "source_active",
             "target_weight_grams",
             "min_weight_grams",
             "max_weight_grams",
@@ -306,20 +470,148 @@ class BOMVariantListSerializer(serializers.ModelSerializer):
     product_item_name = serializers.CharField(source="product_item.item_name", read_only=True, default=None)
     component_count = serializers.IntegerField(read_only=True, default=0)
     has_password = serializers.ReadOnlyField()
+    approved_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = BOMVariant
-        fields = ("id", "variant_code", "name", "product_item", "product_item_name", "revision", "is_active", "notes", "component_count", "has_password", "created_at", "updated_at")
+        fields = (
+            "id",
+            "variant_code",
+            "name",
+            "product_item",
+            "product_item_name",
+            "revision",
+            "batch_size",
+            "batch_uom",
+            "status",
+            "approved_by",
+            "approved_by_name",
+            "approved_at",
+            "is_active",
+            "notes",
+            "component_count",
+            "has_password",
+            "created_at",
+            "updated_at",
+        )
+
+    def get_approved_by_name(self, obj):
+        return getattr(obj.approved_by, "username", None)
 
 
 class BOMVariantDetailSerializer(serializers.ModelSerializer):
     product_item_name = serializers.CharField(source="product_item.item_name", read_only=True, default=None)
     components = BOMVariantComponentSerializer(many=True, read_only=True)
     has_password = serializers.ReadOnlyField()
+    approved_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = BOMVariant
-        fields = ("id", "variant_code", "name", "product_item", "product_item_name", "revision", "is_active", "notes", "components", "has_password", "created_at", "updated_at")
+        fields = (
+            "id",
+            "variant_code",
+            "name",
+            "product_item",
+            "product_item_name",
+            "revision",
+            "batch_size",
+            "batch_uom",
+            "status",
+            "approved_by",
+            "approved_by_name",
+            "approved_at",
+            "is_active",
+            "notes",
+            "components",
+            "has_password",
+            "created_at",
+            "updated_at",
+        )
+
+    def get_approved_by_name(self, obj):
+        return getattr(obj.approved_by, "username", None)
+
+
+class RecipeMasterSerializer(serializers.ModelSerializer):
+    code = serializers.CharField(source="variant_code", read_only=True)
+    description = serializers.CharField(source="notes", required=False, allow_blank=True)
+    recipe_version = serializers.CharField(source="revision", required=False, allow_blank=True)
+    approved_by_name = serializers.SerializerMethodField()
+    component_count = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = BOMVariant
+        fields = (
+            "id",
+            "code",
+            "name",
+            "description",
+            "recipe_version",
+            "batch_size",
+            "batch_uom",
+            "status",
+            "approved_by",
+            "approved_by_name",
+            "approved_at",
+            "is_active",
+            "component_count",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("id", "code", "approved_by_name", "component_count", "created_at", "updated_at")
+
+    def get_approved_by_name(self, obj):
+        return getattr(obj.approved_by, "username", None)
+
+
+class RecipeMasterDetailSerializer(RecipeMasterSerializer):
+    components = BOMVariantComponentSerializer(many=True, read_only=True)
+
+    class Meta(RecipeMasterSerializer.Meta):
+        fields = RecipeMasterSerializer.Meta.fields + ("components",)
+
+
+class BOMCreationMasterSerializer(ProductionCodeMasterSerializer):
+    product_name = serializers.CharField(source="product.name", read_only=True, default=None)
+    product_code = serializers.CharField(source="product.code", read_only=True, default=None)
+
+    class Meta(ProductionCodeMasterSerializer.Meta):
+        model = BOMCreationMaster
+        fields = ProductionCodeMasterSerializer.Meta.fields + (
+            "product",
+            "product_name",
+            "product_code",
+            "bom_version",
+            "output_quantity",
+            "output_uom",
+            "status",
+        )
+
+
+class BOMItemCreationMasterSerializer(serializers.ModelSerializer):
+    bom_name = serializers.CharField(source="bom.name", read_only=True)
+    bom_code = serializers.CharField(source="bom.code", read_only=True)
+    item_name = serializers.CharField(source="item.item_name", read_only=True)
+    item_code = serializers.CharField(source="item.item_code", read_only=True)
+
+    class Meta:
+        model = BOMItemCreationMaster
+        fields = (
+            "id",
+            "bom",
+            "bom_name",
+            "bom_code",
+            "item",
+            "item_name",
+            "item_code",
+            "item_type",
+            "required_quantity",
+            "uom",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("id", "bom_name", "bom_code", "item_name", "item_code", "created_at", "updated_at")
 
 
 class BatchWeightEntrySerializer(serializers.ModelSerializer):
@@ -382,3 +674,19 @@ class ProductionBatchSerializer(serializers.ModelSerializer):
         if not entries:
             return False
         return all(e.is_valid for e in entries)
+
+
+class ProductionStageRecordSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    order_id = serializers.IntegerField()
+    production_id = serializers.CharField()
+    stage = serializers.CharField()
+    production_type = serializers.CharField()
+    batch_no = serializers.CharField(allow_blank=True, allow_null=True)
+    production_date = serializers.DateField()
+    shift = serializers.CharField(allow_blank=True, allow_null=True)
+    line_no = serializers.CharField()
+    start_date_time = serializers.DateTimeField(allow_null=True)
+    end_date_time = serializers.DateTimeField(allow_null=True)
+    plan_id = serializers.CharField(allow_blank=True, allow_null=True)
+    status = serializers.CharField()

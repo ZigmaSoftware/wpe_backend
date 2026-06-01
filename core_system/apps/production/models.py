@@ -1,4 +1,9 @@
+import re
 from decimal import Decimal
+from string import ascii_uppercase
+
+from django.conf import settings
+from django.core.validators import MinValueValidator
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
@@ -6,6 +11,99 @@ from django.utils import timezone
 
 
 ZERO_DECIMAL = Decimal("0.000")
+
+
+def build_prefixed_running_number(model_cls, *, field_name: str, prefix: str, width: int = 3, instance=None) -> str:
+    queryset = model_cls.objects.select_for_update().values_list(field_name, flat=True)
+    if instance and instance.pk:
+        queryset = model_cls.objects.select_for_update().exclude(pk=instance.pk).values_list(field_name, flat=True)
+
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
+    highest_number = 0
+    for raw_value in queryset:
+        value = str(raw_value or "").strip().upper()
+        match = pattern.match(value)
+        if match:
+            highest_number = max(highest_number, int(match.group(1)))
+
+    return f"{prefix}{highest_number + 1:0{width}d}"
+
+
+def _alpha_suffix_to_index(value: str) -> int:
+    index = 0
+    for character in value:
+        index = index * 26 + (ascii_uppercase.index(character) + 1)
+    return index - 1
+
+
+def _index_to_alpha_suffix(index: int) -> str:
+    index += 1
+    characters: list[str] = []
+    while index > 0:
+        index, remainder = divmod(index - 1, 26)
+        characters.append(ascii_uppercase[remainder])
+    return "".join(reversed(characters))
+
+
+def build_alpha_running_code(model_cls, *, field_name: str, prefix: str, separator: str = "-", instance=None) -> str:
+    queryset = model_cls.objects.select_for_update().values_list(field_name, flat=True)
+    if instance and instance.pk:
+        queryset = model_cls.objects.select_for_update().exclude(pk=instance.pk).values_list(field_name, flat=True)
+
+    pattern = re.compile(rf"^{re.escape(prefix)}{re.escape(separator)}([A-Z]+)$")
+    highest_index = -1
+    for raw_value in queryset:
+        value = str(raw_value or "").strip().upper()
+        match = pattern.match(value)
+        if match:
+            highest_index = max(highest_index, _alpha_suffix_to_index(match.group(1)))
+
+    return f"{prefix}{separator}{_index_to_alpha_suffix(highest_index + 1)}"
+
+
+class ProductionCodeTrackedModel(models.Model):
+    code = models.CharField(max_length=50, unique=True, db_index=True, blank=True)
+    name = models.CharField(max_length=200, db_index=True)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    code_prefix: str = ""
+    code_width: int = 3
+    code_field_name = "code"
+
+    class Meta:
+        abstract = True
+        ordering = ["name"]
+
+    def clean(self):
+        super().clean()
+        self.name = str(self.name or "").strip()
+        self.description = str(self.description or "").strip()
+        current_code = getattr(self, self.code_field_name, "") or ""
+        if current_code:
+            setattr(self, self.code_field_name, str(current_code).strip().upper())
+
+    def ensure_code(self):
+        if getattr(self, self.code_field_name, "") or not self.code_prefix:
+            return
+        setattr(
+            self,
+            self.code_field_name,
+            build_prefixed_running_number(
+                type(self),
+                field_name=self.code_field_name,
+                prefix=self.code_prefix,
+                width=self.code_width,
+                instance=self,
+            ),
+        )
+
+    def save(self, *args, **kwargs):
+        self.ensure_code()
+        self.full_clean()
+        return super().save(*args, **kwargs)
 
 
 class ProductionOrder(models.Model):
@@ -421,12 +519,53 @@ class ProductionMachine(models.Model):
     class MachineType(models.TextChoices):
         HIGH_SPEED_MIX = "HIGH_SPEED_MIX", "High Speed Mix"
         GRANULATOR = "GRANULATOR", "Granulator"
+        BLENDING = "BLENDING", "Blending"
+        GRANULATION = "GRANULATION", "Granulation"
+        EXTRUSION = "EXTRUSION", "Extrusion"
+        EXTRUDER = "EXTRUDER", "Extruder"
+        MIXER = "MIXER", "Mixer"
+
+    class CapacityUom(models.TextChoices):
+        KG = "KG", "KG"
+        HOUR = "HOUR", "Hour"
+        KG_PER_HOUR = "KG_PER_HOUR", "KG / Hour"
+
+    class Status(models.TextChoices):
+        AVAILABLE = "AVAILABLE", "Available"
+        MAINTENANCE = "MAINTENANCE", "Maintenance"
+        BREAKDOWN = "BREAKDOWN", "Breakdown"
 
     machine_code = models.CharField(max_length=30, unique=True)
     name = models.CharField(max_length=100)
     machine_type = models.CharField(max_length=30, choices=MachineType.choices)
     applicable_stages = models.CharField(max_length=20, default="AD,BL")
     is_active = models.BooleanField(default=True)
+    department = models.ForeignKey(
+        "wpe_masters.DepartmentMaster",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="production_machines",
+    )
+    capacity = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(Decimal("0"))],
+    )
+    capacity_uom = models.CharField(
+        max_length=20,
+        choices=CapacityUom.choices,
+        blank=True,
+    )
+    serial_no = models.CharField(max_length=100, blank=True)
+    manufacturer = models.CharField(max_length=150, blank=True)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.AVAILABLE,
+    )
     location = models.CharField(max_length=100, blank=True)
     notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -438,14 +577,382 @@ class ProductionMachine(models.Model):
     def __str__(self):
         return f"{self.machine_code} — {self.name}"
 
+    def clean(self):
+        super().clean()
+        self.machine_code = str(self.machine_code or "").strip().upper()
+        self.name = str(self.name or "").strip()
+        self.serial_no = str(self.serial_no or "").strip()
+        self.manufacturer = str(self.manufacturer or "").strip()
+        self.location = str(self.location or "").strip()
+        self.notes = str(self.notes or "").strip()
+
+    def save(self, *args, **kwargs):
+        if not self.machine_code:
+            self.machine_code = build_prefixed_running_number(
+                type(self),
+                field_name="machine_code",
+                prefix="MCH",
+                width=3,
+                instance=self,
+            )
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class ProfileSizeMaster(ProductionCodeTrackedModel):
+    class Uom(models.TextChoices):
+        MM = "MM", "MM"
+        METER = "METER", "Meter"
+
+    code_prefix = "SIZE"
+    code_width = 3
+
+    width = models.DecimalField(max_digits=12, decimal_places=3, validators=[MinValueValidator(Decimal("0"))])
+    thickness = models.DecimalField(max_digits=12, decimal_places=3, validators=[MinValueValidator(Decimal("0"))])
+    length = models.DecimalField(max_digits=12, decimal_places=3, validators=[MinValueValidator(Decimal("0"))])
+    uom = models.CharField(max_length=16, choices=Uom.choices)
+
+    class Meta(ProductionCodeTrackedModel.Meta):
+        verbose_name = "Profile Size"
+        verbose_name_plural = "Profile Sizes"
+
+
+class ColorCreationMaster(ProductionCodeTrackedModel):
+    class ColorGroup(models.TextChoices):
+        DARK = "DARK", "Dark"
+        LIGHT = "LIGHT", "Light"
+
+    code_prefix = "COLR"
+    code_width = 3
+
+    color_group = models.CharField(max_length=16, choices=ColorGroup.choices, blank=True)
+
+    class Meta(ProductionCodeTrackedModel.Meta):
+        verbose_name = "Color Creation"
+        verbose_name_plural = "Color Creations"
+
+
+class WorkCentreCreationMaster(ProductionCodeTrackedModel):
+    code_prefix = "WC"
+    code_width = 3
+
+    department = models.ForeignKey(
+        "wpe_masters.DepartmentMaster",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="work_centres",
+    )
+    capacity = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(Decimal("0"))],
+    )
+
+    class Meta(ProductionCodeTrackedModel.Meta):
+        verbose_name = "Work Centre Creation"
+        verbose_name_plural = "Work Centre Creations"
+
+
+class PackingTypeMaster(ProductionCodeTrackedModel):
+    class Uom(models.TextChoices):
+        NOS = "NOS", "Nos"
+        KG = "KG", "KG"
+
+    code_prefix = "PACK"
+    code_width = 3
+
+    standard_pcs = models.PositiveIntegerField(default=0)
+    standard_weight = models.DecimalField(max_digits=14, decimal_places=3, validators=[MinValueValidator(Decimal("0"))])
+    uom = models.CharField(max_length=16, choices=Uom.choices)
+
+    class Meta(ProductionCodeTrackedModel.Meta):
+        verbose_name = "Packing Type"
+        verbose_name_plural = "Packing Types"
+
+
+class ProfileCreationMaster(ProductionCodeTrackedModel):
+    class Uom(models.TextChoices):
+        NOS = "NOS", "Nos"
+        METER = "METER", "Meter"
+
+    code_prefix = "PRD"
+    code_width = 3
+
+    profile_type = models.ForeignKey(
+        "wpe_masters.ProductTypeCategory",
+        on_delete=models.PROTECT,
+        related_name="production_profiles",
+    )
+    profile_size = models.ForeignKey(
+        "production.ProfileSizeMaster",
+        on_delete=models.PROTECT,
+        related_name="profiles",
+    )
+    color = models.ForeignKey(
+        "production.ColorCreationMaster",
+        on_delete=models.PROTECT,
+        related_name="profiles",
+    )
+    length = models.DecimalField(max_digits=12, decimal_places=3, validators=[MinValueValidator(Decimal("0"))])
+    weight_per_piece = models.DecimalField(
+        max_digits=12,
+        decimal_places=3,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(Decimal("0"))],
+    )
+    uom = models.CharField(max_length=16, choices=Uom.choices)
+    packing_type = models.ForeignKey(
+        "production.PackingTypeMaster",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="profiles",
+    )
+
+    class Meta(ProductionCodeTrackedModel.Meta):
+        verbose_name = "Profile Creation"
+        verbose_name_plural = "Profile Creations"
+
+
+class ProductionLineMaster(ProductionCodeTrackedModel):
+    class CapacityUom(models.TextChoices):
+        KG = "KG", "KG"
+        HOUR = "HOUR", "Hour"
+        KG_PER_HOUR = "KG_PER_HOUR", "KG / Hour"
+
+    class LineStatus(models.TextChoices):
+        FREE = "FREE", "Free"
+        RUNNING = "RUNNING", "Running"
+        MAINTENANCE = "MAINTENANCE", "Maintenance"
+
+    code_prefix = "LINE"
+    code_width = 2
+
+    department = models.ForeignKey(
+        "wpe_masters.DepartmentMaster",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="production_lines",
+    )
+    machine = models.ForeignKey(
+        "production.ProductionMachine",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="production_lines",
+    )
+    line_capacity = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(Decimal("0"))],
+    )
+    capacity_uom = models.CharField(max_length=20, choices=CapacityUom.choices, blank=True)
+    status = models.CharField(max_length=20, choices=LineStatus.choices, default=LineStatus.FREE)
+
+    class Meta(ProductionCodeTrackedModel.Meta):
+        verbose_name = "Production Line"
+        verbose_name_plural = "Production Lines"
+
+
+class BinCreationMaster(ProductionCodeTrackedModel):
+    class CapacityUom(models.TextChoices):
+        KG = "KG", "KG"
+        NOS = "NOS", "Nos"
+
+    class BinStatus(models.TextChoices):
+        FREE = "FREE", "Free"
+        OCCUPIED = "OCCUPIED", "Occupied"
+        HOLD = "HOLD", "Hold"
+
+    code_prefix = "BIN"
+    code_width = 0
+
+    department = models.ForeignKey(
+        "wpe_masters.DepartmentMaster",
+        on_delete=models.PROTECT,
+        related_name="production_bins",
+    )
+    capacity = models.DecimalField(max_digits=14, decimal_places=3, validators=[MinValueValidator(Decimal("0"))])
+    capacity_uom = models.CharField(max_length=16, choices=CapacityUom.choices)
+    current_status = models.CharField(max_length=16, choices=BinStatus.choices, blank=True)
+    current_material = models.CharField(max_length=200, blank=True)
+
+    class Meta(ProductionCodeTrackedModel.Meta):
+        verbose_name = "Bin Creation"
+        verbose_name_plural = "Bin Creations"
+
+    def ensure_code(self):
+        if self.code:
+            return
+        self.code = build_alpha_running_code(type(self), field_name="code", prefix="BIN", instance=self)
+
+
+class BagCreationMaster(ProductionCodeTrackedModel):
+    class Uom(models.TextChoices):
+        KG = "KG", "KG"
+
+    class BagStatus(models.TextChoices):
+        FREE = "FREE", "Free"
+        OCCUPIED = "OCCUPIED", "Occupied"
+        USED = "USED", "Used"
+
+    code_prefix = "BAG"
+    code_width = 3
+
+    standard_weight = models.DecimalField(max_digits=14, decimal_places=3, validators=[MinValueValidator(Decimal("0"))])
+    uom = models.CharField(max_length=16, choices=Uom.choices, default=Uom.KG)
+    department = models.ForeignKey(
+        "wpe_masters.DepartmentMaster",
+        on_delete=models.PROTECT,
+        related_name="production_bags",
+    )
+    current_status = models.CharField(max_length=16, choices=BagStatus.choices)
+
+    class Meta(ProductionCodeTrackedModel.Meta):
+        verbose_name = "Bag Creation"
+        verbose_name_plural = "Bag Creations"
+
+
+class PackingMaterialMaster(ProductionCodeTrackedModel):
+    class Uom(models.TextChoices):
+        KG = "KG", "KG"
+        NOS = "NOS", "Nos"
+
+    code_prefix = "PM"
+    code_width = 3
+
+    item = models.ForeignKey(
+        "wpe_masters.ItemMaster",
+        on_delete=models.PROTECT,
+        related_name="packing_materials",
+    )
+    uom = models.CharField(max_length=16, choices=Uom.choices)
+    standard_consumption = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(Decimal("0"))],
+    )
+
+    class Meta(ProductionCodeTrackedModel.Meta):
+        verbose_name = "Packing Material"
+        verbose_name_plural = "Packing Materials"
+
+
+class BOMCreationMaster(ProductionCodeTrackedModel):
+    class OutputUom(models.TextChoices):
+        NOS = "NOS", "Nos"
+        KG = "KG", "KG"
+
+    class BOMStatus(models.TextChoices):
+        DRAFT = "DRAFT", "Draft"
+        APPROVED = "APPROVED", "Approved"
+
+    code_prefix = "BOM"
+    code_width = 3
+
+    product = models.ForeignKey(
+        "production.ProfileCreationMaster",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="bom_creations",
+    )
+    bom_version = models.CharField(max_length=30, blank=True)
+    output_quantity = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(Decimal("0"))],
+    )
+    output_uom = models.CharField(max_length=16, choices=OutputUom.choices, blank=True)
+    status = models.CharField(max_length=16, choices=BOMStatus.choices, default=BOMStatus.DRAFT, db_index=True)
+
+    class Meta(ProductionCodeTrackedModel.Meta):
+        verbose_name = "BOM Creation"
+        verbose_name_plural = "BOM Creations"
+
+
+class BOMItemCreationMaster(models.Model):
+    class ItemType(models.TextChoices):
+        RM = "RM", "RM"
+        PACKING = "PACKING", "Packing"
+        CONSUMABLE = "CONSUMABLE", "Consumable"
+
+    bom = models.ForeignKey(
+        "production.BOMCreationMaster",
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    item = models.ForeignKey(
+        "wpe_masters.ItemMaster",
+        on_delete=models.PROTECT,
+        related_name="bom_item_creations",
+    )
+    item_type = models.CharField(max_length=16, choices=ItemType.choices)
+    required_quantity = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(Decimal("0"))],
+    )
+    uom = models.CharField(max_length=50, blank=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["bom__code", "item__item_code", "id"]
+        verbose_name = "BOM Item Creation"
+        verbose_name_plural = "BOM Item Creations"
+
+    def __str__(self):
+        return f"{self.bom.code} — {self.item.item_name}"
+
+    def clean(self):
+        super().clean()
+        self.uom = str(self.uom or "").strip().upper()
+
 
 class BOMVariant(models.Model):
+    class RecipeStatus(models.TextChoices):
+        DRAFT = "DRAFT", "Draft"
+        APPROVED = "APPROVED", "Approved"
+        INACTIVE = "INACTIVE", "Inactive"
+
     variant_code = models.CharField(max_length=30, unique=True)
     name = models.CharField(max_length=255)
     product_item = models.ForeignKey("Items.Item", null=True, blank=True, on_delete=models.SET_NULL, related_name="bom_variants")
     revision = models.CharField(max_length=10, default="v1")
+    batch_size = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(Decimal("0"))],
+    )
+    batch_uom = models.CharField(max_length=50, blank=True)
+    status = models.CharField(max_length=16, choices=RecipeStatus.choices, default=RecipeStatus.DRAFT, db_index=True)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="approved_production_recipes",
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
-    access_password_hash = models.CharField(max_length=64)
+    access_password_hash = models.CharField(max_length=64, blank=True)
     notes = models.TextField(blank=True)
     created_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -467,6 +974,26 @@ class BOMVariant(models.Model):
     def __str__(self):
         return f"{self.variant_code} — {self.name}"
 
+    def clean(self):
+        super().clean()
+        self.variant_code = str(self.variant_code or "").strip().upper()
+        self.name = str(self.name or "").strip()
+        self.revision = str(self.revision or "").strip() or "v1"
+        self.batch_uom = str(self.batch_uom or "").strip().upper()
+        self.notes = str(self.notes or "").strip()
+
+    def save(self, *args, **kwargs):
+        if not self.variant_code:
+            self.variant_code = build_prefixed_running_number(
+                type(self),
+                field_name="variant_code",
+                prefix="REC",
+                width=3,
+                instance=self,
+            )
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
 
 class BOMVariantComponent(models.Model):
     bom_variant = models.ForeignKey(BOMVariant, on_delete=models.CASCADE, related_name="components")
@@ -484,6 +1011,7 @@ class BOMVariantComponent(models.Model):
     sequence = models.PositiveIntegerField(default=1)
     is_regrind = models.BooleanField(default=False)
     unit = models.CharField(max_length=20, default="g")
+    is_active = models.BooleanField(default=True, db_index=True)
 
     class Meta:
         ordering = ["sequence"]
@@ -498,21 +1026,44 @@ class BOMVariantComponent(models.Model):
         return f"{self.bom_variant.variant_code} — {self.component_name or f'Component {self.pk}'}"
 
     def clean(self):
+        super().clean()
         if not self.item_id and not self.product_subtype_id:
             raise ValidationError("item or product_subtype is required.")
 
         if not self.bom_variant_id:
             return
 
+        if self.target_weight_grams is None or Decimal(self.target_weight_grams) <= Decimal("0"):
+            raise ValidationError({"target_weight_grams": "Standard weight must be greater than zero."})
+
+        if self.min_weight_grams is None or Decimal(self.min_weight_grams) < Decimal("0"):
+            raise ValidationError({"min_weight_grams": "Minimum weight must be zero or greater."})
+
+        if self.max_weight_grams is None or Decimal(self.max_weight_grams) < Decimal("0"):
+            raise ValidationError({"max_weight_grams": "Maximum weight must be zero or greater."})
+
+        target_weight = Decimal(self.target_weight_grams)
+        min_weight = Decimal(self.min_weight_grams)
+        max_weight = Decimal(self.max_weight_grams)
+
+        if min_weight > target_weight:
+            raise ValidationError({"min_weight_grams": "Minimum weight cannot exceed standard weight."})
+
+        if max_weight < target_weight:
+            raise ValidationError({"max_weight_grams": "Maximum weight cannot be less than standard weight."})
+
+        if min_weight > max_weight:
+            raise ValidationError({"min_weight_grams": "Minimum weight cannot exceed maximum weight."})
+
         queryset = type(self).objects.filter(bom_variant_id=self.bom_variant_id)
         if self.pk:
             queryset = queryset.exclude(pk=self.pk)
 
         if self.item_id and queryset.filter(item_id=self.item_id).exists():
-            raise ValidationError({"item": "This item is already mapped to the BOM variant."})
+            raise ValidationError({"item": "This item is already mapped to the recipe."})
 
         if self.product_subtype_id and queryset.filter(product_subtype_id=self.product_subtype_id).exists():
-            raise ValidationError({"product_subtype": "This product subtype is already mapped to the BOM variant."})
+            raise ValidationError({"product_subtype": "This item sub category is already mapped to the recipe."})
 
     def save(self, *args, **kwargs):
         self.full_clean()

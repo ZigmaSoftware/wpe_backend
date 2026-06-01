@@ -11,7 +11,6 @@ from django.db import models, transaction
 
 from .services import (
     build_running_number,
-    build_unique_code,
     company_document_upload_path,
     company_logo_upload_path,
     customer_document_upload_path,
@@ -19,8 +18,6 @@ from .services import (
 )
 from .validators import (
     blank_to_none,
-    normalize_country_code,
-    normalize_currency_code,
     normalize_gst_number,
     normalize_ifsc_code,
     normalize_mobile_number,
@@ -153,28 +150,24 @@ class Continent(UniqueIDMixin):
 
     def clean(self):
         self.name = normalize_name(self.name, field_label="continent name")
-        if self.code:
-            self.code = build_unique_code(
-                Continent,
-                self.code,
-                field_name="code",
-                prefix="continent",
-                max_length=50,
-                instance=self,
-            )
+        self.code = blank_to_none(self.code)
 
     def save(self, *args, **kwargs):
         self.name = normalize_name(self.name, field_label="continent name")
-        if not self.code:
-            self.code = build_unique_code(
+        self.code = blank_to_none(self.code)
+        if self.code:
+            super().save(*args, **kwargs)
+            return
+
+        with transaction.atomic():
+            self.code = build_running_number(
                 Continent,
-                self.name,
                 field_name="code",
-                prefix="continent",
-                max_length=50,
+                prefix="Con",
+                width=2,
                 instance=self,
             )
-        super().save(*args, **kwargs)
+            super().save(*args, **kwargs)
 
 
 class Country(UniqueIDMixin):
@@ -185,6 +178,13 @@ class Country(UniqueIDMixin):
     )
     name = models.CharField(max_length=150, db_index=True)
     code = models.CharField(max_length=10, db_index=True)
+    currency = models.ForeignKey(
+        "Currency",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="mapped_countries",
+    )
     status = models.BooleanField(default=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -195,6 +195,7 @@ class Country(UniqueIDMixin):
         ordering = ["name", "id"]
         indexes = [
             models.Index(fields=["continent", "status"], name="cm_country_cont_st_idx"),
+            models.Index(fields=["currency", "status"], name="cm_country_curr_st_idx"),
             models.Index(fields=["code"], name="cm_country_code_idx"),
         ]
 
@@ -211,17 +212,29 @@ class Country(UniqueIDMixin):
 
     def clean(self):
         self.name = normalize_name(self.name, field_label="country name")
-        self.code = normalize_country_code(self.code)
+        self.code = blank_to_none(self.code)
         queryset = Country.objects.exclude(pk=self.pk)
         if queryset.filter(name__iexact=self.name).exists():
             raise ValidationError({"name": "Country name must be unique."})
-        if queryset.filter(code__iexact=self.code).exists():
+        if self.code and queryset.filter(code__iexact=self.code).exists():
             raise ValidationError({"code": "Country code must be unique."})
 
     def save(self, *args, **kwargs):
         self.name = normalize_name(self.name, field_label="country name")
-        self.code = normalize_country_code(self.code)
-        super().save(*args, **kwargs)
+        self.code = blank_to_none(self.code)
+        if self.code:
+            super().save(*args, **kwargs)
+            return
+
+        with transaction.atomic():
+            self.code = build_running_number(
+                Country,
+                field_name="code",
+                prefix="Coun",
+                width=2,
+                instance=self,
+            )
+            super().save(*args, **kwargs)
 
 
 class State(UniqueIDMixin):
@@ -231,6 +244,7 @@ class State(UniqueIDMixin):
         related_name="states",
     )
     name = models.CharField(max_length=100, db_index=True)
+    code = models.CharField(max_length=20, unique=True, null=True, blank=True, db_index=True)
     is_active = models.BooleanField(default=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -240,6 +254,7 @@ class State(UniqueIDMixin):
         ordering = ["name", "id"]
         indexes = [
             models.Index(fields=["country", "is_active"], name="cm_state_country_act_idx"),
+            models.Index(fields=["code"], name="cm_state_code_idx"),
         ]
 
     def __str__(self):
@@ -247,10 +262,24 @@ class State(UniqueIDMixin):
 
     def clean(self):
         self.name = normalize_name(self.name, field_label="state name")
+        self.code = blank_to_none(self.code)
 
     def save(self, *args, **kwargs):
         self.name = normalize_name(self.name, field_label="state name")
-        super().save(*args, **kwargs)
+        self.code = blank_to_none(self.code)
+        if self.code:
+            super().save(*args, **kwargs)
+            return
+
+        with transaction.atomic():
+            self.code = build_running_number(
+                State,
+                field_name="code",
+                prefix="St",
+                width=2,
+                instance=self,
+            )
+            super().save(*args, **kwargs)
 
 
 class CommonMaster(UniqueIDMixin):
@@ -287,6 +316,7 @@ class City(UniqueIDMixin):
         related_name="cities",
     )
     name = models.CharField(max_length=100, db_index=True)
+    code = models.CharField(max_length=20, unique=True, null=True, blank=True, db_index=True)
     pincode = models.CharField(max_length=12, null=True, blank=True, db_index=True)
     city_type = models.ForeignKey(
         CommonMaster,
@@ -305,6 +335,7 @@ class City(UniqueIDMixin):
         indexes = [
             models.Index(fields=["state"], name="cm_city_state_idx"),
             models.Index(fields=["name"], name="cm_city_name_idx"),
+            models.Index(fields=["code"], name="cm_city_code_idx"),
             models.Index(fields=["country", "pincode"], name="cm_city_country_pin_idx"),
         ]
         ordering = ["name", "id"]
@@ -314,13 +345,27 @@ class City(UniqueIDMixin):
 
     def clean(self):
         self.name = normalize_name(self.name, field_label="city name")
+        self.code = blank_to_none(self.code)
         self.pincode = normalize_pincode(self.pincode)
         validate_state_country_relationship(state=self.state, country=self.country)
 
     def save(self, *args, **kwargs):
         self.name = normalize_name(self.name, field_label="city name")
+        self.code = blank_to_none(self.code)
         self.pincode = normalize_pincode(self.pincode)
-        super().save(*args, **kwargs)
+        if self.code:
+            super().save(*args, **kwargs)
+            return
+
+        with transaction.atomic():
+            self.code = build_running_number(
+                City,
+                field_name="code",
+                prefix="Ci",
+                width=2,
+                instance=self,
+            )
+            super().save(*args, **kwargs)
 
 
 class Tax(UniqueIDMixin):
@@ -332,6 +377,7 @@ class Tax(UniqueIDMixin):
         related_name="taxes",
     )
     name = models.CharField(max_length=100, db_index=True)
+    code = models.CharField(max_length=20, unique=True, null=True, blank=True, db_index=True)
     value = models.DecimalField(
         max_digits=5,
         decimal_places=2,
@@ -347,6 +393,7 @@ class Tax(UniqueIDMixin):
         indexes = [
             models.Index(fields=["name"], name="cm_tax_name_idx"),
             models.Index(fields=["country"], name="cm_tax_country_idx"),
+            models.Index(fields=["code"], name="cm_tax_code_idx"),
         ]
         ordering = ["name", "id"]
 
@@ -355,12 +402,26 @@ class Tax(UniqueIDMixin):
 
     def clean(self):
         self.name = normalize_name(self.name, field_label="tax name")
+        self.code = blank_to_none(self.code)
         self.value = validate_tax_percentage(self.value)
 
     def save(self, *args, **kwargs):
         self.name = normalize_name(self.name, field_label="tax name")
+        self.code = blank_to_none(self.code)
         self.value = validate_tax_percentage(self.value)
-        super().save(*args, **kwargs)
+        if self.code:
+            super().save(*args, **kwargs)
+            return
+
+        with transaction.atomic():
+            self.code = build_running_number(
+                Tax,
+                field_name="code",
+                prefix="Tx",
+                width=2,
+                instance=self,
+            )
+            super().save(*args, **kwargs)
 
 
 class Currency(ActiveTimestampedModel):
@@ -391,12 +452,24 @@ class Currency(ActiveTimestampedModel):
 
     def clean(self):
         self.name = normalize_name(self.name, field_label="currency name")
-        self.code = normalize_currency_code(self.code)
+        self.code = blank_to_none(self.code)
 
     def save(self, *args, **kwargs):
         self.name = normalize_name(self.name, field_label="currency name")
-        self.code = normalize_currency_code(self.code)
-        super().save(*args, **kwargs)
+        self.code = blank_to_none(self.code)
+        if self.code:
+            super().save(*args, **kwargs)
+            return
+
+        with transaction.atomic():
+            self.code = build_running_number(
+                Currency,
+                field_name="code",
+                prefix="Cur",
+                width=2,
+                instance=self,
+            )
+            super().save(*args, **kwargs)
 
 
 class Customer(ActiveTimestampedModel, LocationFieldsMixin):
@@ -890,6 +963,9 @@ class SupplierDocument(ActiveTimestampedModel):
 class Company(UniqueIDMixin):
     name = models.CharField(max_length=255)
     code = models.CharField(max_length=50, unique=True)
+    gst_number = models.CharField(max_length=15, null=True, blank=True)
+    pan_number = models.CharField(max_length=10, null=True, blank=True)
+    address = models.TextField(null=True, blank=True)
     country = models.ForeignKey(
         Country,
         on_delete=models.SET_NULL,
@@ -912,6 +988,9 @@ class Company(UniqueIDMixin):
         related_name="companies",
     )
     pincode = models.CharField(max_length=12, null=True, blank=True)
+    contact_person = models.CharField(max_length=150, null=True, blank=True)
+    mobile_no = models.CharField(max_length=20, null=True, blank=True)
+    email = models.EmailField(null=True, blank=True)
     latitude = models.DecimalField(max_digits=10, decimal_places=7, null=True, blank=True)
     longitude = models.DecimalField(max_digits=10, decimal_places=7, null=True, blank=True)
     logo = models.ImageField(upload_to=company_logo_upload_path, null=True, blank=True)
@@ -932,12 +1011,30 @@ class Company(UniqueIDMixin):
 
     def save(self, *args, **kwargs):
         self.name = normalize_name(self.name, field_label="company name")
+        self.code = blank_to_none(self.code)
+        self.gst_number = normalize_gst_number(self.gst_number)
+        self.pan_number = normalize_pan_number(self.pan_number)
+        self.address = blank_to_none(self.address)
+        self.contact_person = normalize_name(self.contact_person, field_label="manager name")
+        self.mobile_no = normalize_phone_number(self.mobile_no)
         self.pincode = normalize_pincode(self.pincode)
         validate_state_country_relationship(state=self.state, country=self.country)
         validate_city_state_country_relationship(city=self.city, state=self.state, country=self.country)
         if self.document:
             validate_uploaded_document(self.document)
-        super().save(*args, **kwargs)
+        if self.code:
+            super().save(*args, **kwargs)
+            return
+
+        with transaction.atomic():
+            self.code = build_running_number(
+                Company,
+                field_name="code",
+                prefix="COMP",
+                width=3,
+                instance=self,
+            )
+            super().save(*args, **kwargs)
 
 
 class Project(UniqueIDMixin):
