@@ -30,8 +30,6 @@ from .models import (
 )
 from .services import extract_nested_payload, save_customer_relations, save_supplier_relations
 from .validators import (
-    normalize_country_code,
-    normalize_currency_code,
     normalize_gst_number,
     normalize_ifsc_code,
     normalize_mobile_number,
@@ -61,11 +59,13 @@ class ContinentSerializer(LegacyStatusAliasSerializer):
     class Meta:
         model = Continent
         fields = ("id", "unique_id", "name", "code", "order_no", "is_active")
-        read_only_fields = ("unique_id",)
+        read_only_fields = ("unique_id", "code")
 
 
 class CountrySerializer(LegacyStatusAliasSerializer):
     continent_name = serializers.CharField(source="continent.name", read_only=True)
+    currency_name = serializers.CharField(source="currency.name", read_only=True)
+    currency_code = serializers.CharField(source="currency.code", read_only=True)
 
     class Meta:
         model = Country
@@ -76,11 +76,14 @@ class CountrySerializer(LegacyStatusAliasSerializer):
             "continent_name",
             "name",
             "code",
+            "currency",
+            "currency_name",
+            "currency_code",
             "is_active",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("unique_id", "created_at", "updated_at")
+        read_only_fields = ("unique_id", "code", "created_at", "updated_at", "currency_name", "currency_code")
 
     def validate_name(self, value):
         normalized = normalize_name(value, field_label="country name")
@@ -89,21 +92,14 @@ class CountrySerializer(LegacyStatusAliasSerializer):
             raise serializers.ValidationError("Country name must be unique.")
         return normalized
 
-    def validate_code(self, value):
-        normalized = normalize_country_code(value)
-        queryset = Country.objects.exclude(pk=getattr(self.instance, "pk", None))
-        if queryset.filter(code__iexact=normalized).exists():
-            raise serializers.ValidationError("Country code must be unique.")
-        return normalized
-
 
 class StateSerializer(serializers.ModelSerializer):
     country_name = serializers.CharField(source="country.name", read_only=True)
 
     class Meta:
         model = State
-        fields = ("id", "unique_id", "country", "country_name", "name", "is_active", "created_at")
-        read_only_fields = ("unique_id", "created_at")
+        fields = ("id", "unique_id", "country", "country_name", "name", "code", "is_active", "created_at")
+        read_only_fields = ("unique_id", "code", "created_at")
 
     def validate_name(self, value):
         return normalize_name(value, field_label="state name")
@@ -132,13 +128,14 @@ class CitySerializer(serializers.ModelSerializer):
             "state",
             "state_name",
             "name",
+            "code",
             "pincode",
             "city_type",
             "city_type_name",
             "is_active",
             "created_at",
         )
-        read_only_fields = ("unique_id", "created_at")
+        read_only_fields = ("unique_id", "code", "created_at")
 
     def validate_name(self, value):
         return normalize_name(value, field_label="city name")
@@ -150,8 +147,11 @@ class CitySerializer(serializers.ModelSerializer):
         country = attrs.get("country") or getattr(self.instance, "country", None)
         state = attrs.get("state") or getattr(self.instance, "state", None)
         name = attrs.get("name") or getattr(self.instance, "name", None)
+        pincode = attrs.get("pincode") or getattr(self.instance, "pincode", None)
 
         validate_state_country_relationship(state=state, country=country)
+        if not pincode:
+            raise serializers.ValidationError({"pincode": "Pincode is required."})
 
         queryset = City.objects.exclude(pk=getattr(self.instance, "pk", None))
         if state and name and queryset.filter(state=state, name__iexact=name).exists():
@@ -170,11 +170,12 @@ class TaxSerializer(serializers.ModelSerializer):
             "country",
             "country_name",
             "name",
+            "code",
             "value",
             "is_active",
             "created_at",
         )
-        read_only_fields = ("unique_id", "created_at")
+        read_only_fields = ("unique_id", "code", "created_at")
 
     def validate_name(self, value):
         return normalize_name(value, field_label="tax name")
@@ -185,6 +186,8 @@ class TaxSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         country = attrs.get("country") or getattr(self.instance, "country", None)
         name = attrs.get("name") or getattr(self.instance, "name", None)
+        if country is None:
+            raise serializers.ValidationError({"country": "Country is required."})
         queryset = Tax.objects.exclude(pk=getattr(self.instance, "pk", None))
         if name and queryset.filter(country=country, name__iexact=name).exists():
             raise serializers.ValidationError({"name": "Tax name already exists for the selected nation."})
@@ -208,23 +211,23 @@ class CurrencySerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("unique_id", "created_at", "updated_at")
+        read_only_fields = ("unique_id", "code", "created_at", "updated_at")
 
     def validate_name(self, value):
         return normalize_name(value, field_label="currency name")
 
-    def validate_code(self, value):
-        return normalize_currency_code(value)
+    def validate_symbol(self, value):
+        normalized = (value or "").strip()
+        if not normalized:
+            raise serializers.ValidationError("Currency symbol is required.")
+        return normalized
 
     def validate(self, attrs):
         country = attrs.get("country") or getattr(self.instance, "country", None)
         name = attrs.get("name") or getattr(self.instance, "name", None)
-        code = attrs.get("code") or getattr(self.instance, "code", None)
         queryset = Currency.objects.exclude(pk=getattr(self.instance, "pk", None))
         if country and name and queryset.filter(country=country, name__iexact=name).exists():
             raise serializers.ValidationError({"name": "Currency name already exists for the selected country."})
-        if country and code and queryset.filter(country=country, code__iexact=code).exists():
-            raise serializers.ValidationError({"code": "Currency code already exists for the selected country."})
         return attrs
 
 
@@ -1061,6 +1064,9 @@ class CompanySerializer(serializers.ModelSerializer):
             "unique_id",
             "name",
             "code",
+            "gst_number",
+            "pan_number",
+            "address",
             "country",
             "country_name",
             "state",
@@ -1068,6 +1074,9 @@ class CompanySerializer(serializers.ModelSerializer):
             "city",
             "city_name",
             "pincode",
+            "contact_person",
+            "mobile_no",
+            "email",
             "latitude",
             "longitude",
             "logo",
@@ -1077,7 +1086,7 @@ class CompanySerializer(serializers.ModelSerializer):
             "is_active",
             "created_at",
         )
-        read_only_fields = ("unique_id", "created_at", "logo_url", "document_url")
+        read_only_fields = ("unique_id", "code", "created_at", "logo_url", "document_url")
 
     def get_logo_url(self, obj):
         return obj.logo.url if obj.logo else None
@@ -1088,6 +1097,21 @@ class CompanySerializer(serializers.ModelSerializer):
     def validate_name(self, value):
         return normalize_name(value, field_label="company name")
 
+    def validate_gst_number(self, value):
+        return normalize_gst_number(value)
+
+    def validate_pan_number(self, value):
+        return normalize_pan_number(value)
+
+    def validate_address(self, value):
+        return normalize_name(value, field_label="company address")
+
+    def validate_contact_person(self, value):
+        return normalize_name(value, field_label="manager name")
+
+    def validate_mobile_no(self, value):
+        return normalize_phone_number(value)
+
     def validate_pincode(self, value):
         return normalize_pincode(value)
 
@@ -1096,9 +1120,24 @@ class CompanySerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
+        address = attrs.get("address") if "address" in attrs else getattr(self.instance, "address", None)
         country = attrs.get("country") or getattr(self.instance, "country", None)
         state = attrs.get("state") or getattr(self.instance, "state", None)
         city = attrs.get("city") or getattr(self.instance, "city", None)
+        pincode = attrs.get("pincode") if "pincode" in attrs else getattr(self.instance, "pincode", None)
+        email = attrs.get("email") if "email" in attrs else getattr(self.instance, "email", None)
+        if not address:
+            raise serializers.ValidationError({"address": "Company address is required."})
+        if not country:
+            raise serializers.ValidationError({"country": "Country is required."})
+        if not state:
+            raise serializers.ValidationError({"state": "State is required."})
+        if not city:
+            raise serializers.ValidationError({"city": "City is required."})
+        if not pincode:
+            raise serializers.ValidationError({"pincode": "Pincode is required."})
+        if not email:
+            raise serializers.ValidationError({"email": "Company email is required."})
         validate_state_country_relationship(state=state, country=country)
         validate_city_state_country_relationship(city=city, state=state, country=country)
         return attrs
