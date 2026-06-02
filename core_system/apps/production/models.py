@@ -1225,6 +1225,7 @@ class ProductionBatch(models.Model):
         FAILED = "FAILED", "Failed"
 
     batch_no = models.CharField(max_length=30, unique=True, blank=True)
+    workflow_batch_no = models.CharField(max_length=30, blank=True, null=True, db_index=True)
     production_order = models.ForeignKey(ProductionOrder, on_delete=models.CASCADE, related_name="batches")
     bom_variant = models.ForeignKey(BOMVariant, null=True, blank=True, on_delete=models.SET_NULL)
     stage = models.CharField(max_length=10, choices=Stage.choices)
@@ -1242,9 +1243,15 @@ class ProductionBatch(models.Model):
 
     def save(self, *args, **kwargs):
         super().save(*args, **kwargs)
+        updates = {}
         if not self.batch_no:
             self.batch_no = f"BATCH-{self.pk:08d}"
-            ProductionBatch.objects.filter(pk=self.pk).update(batch_no=self.batch_no)
+            updates["batch_no"] = self.batch_no
+        if not self.workflow_batch_no:
+            self.workflow_batch_no = self.batch_no
+            updates["workflow_batch_no"] = self.workflow_batch_no
+        if updates:
+            ProductionBatch.objects.filter(pk=self.pk).update(**updates)
 
     def __str__(self):
         return self.batch_no or f"Batch-{self.pk}"
