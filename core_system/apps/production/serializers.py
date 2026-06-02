@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 from apps.wpe_masters.models import ProductionTypeMaster
 from .models import (
@@ -308,7 +310,7 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
 
 # ===== RECIPE / BOM AND PRODUCTION MASTER SERIALIZERS =====
 
-from .models import BOMVariant, BOMVariantComponent, ProductionBatch, BatchWeightEntry, RegrindMaterialEntry
+from .models import BOMVariant, BOMVariantComponent, ProductionBatch, ProductionOutputCapture, BatchWeightEntry, RegrindMaterialEntry
 
 
 class ProductionCodeMasterSerializer(serializers.ModelSerializer):
@@ -716,6 +718,62 @@ class ProductionBatchSerializer(serializers.ModelSerializer):
         if not entries:
             return False
         return all(e.is_valid for e in entries)
+
+
+class ProductionOutputCaptureSerializer(serializers.ModelSerializer):
+    source_batch_no = serializers.CharField(source="source_batch.batch_no", read_only=True)
+    component_columns = serializers.SerializerMethodField()
+    details = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProductionOutputCapture
+        fields = (
+            "id",
+            "production_order",
+            "source_batch",
+            "source_batch_no",
+            "sequence",
+            "scancode_id",
+            "recipe_no",
+            "quantity_kg",
+            "weight_kg",
+            "binlot",
+            "session_key",
+            "captured_at",
+            "component_columns",
+            "details",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+    @staticmethod
+    def _get_required_entries(obj: ProductionOutputCapture):
+        entries = list(obj.source_batch.weight_entries.all())
+        entries.sort(key=lambda entry: (getattr(entry.bom_component, "sequence", 0), entry.id))
+        positive_entries = [entry for entry in entries if float(entry.target_weight_grams or 0) > 0]
+        return positive_entries or entries
+
+    def get_component_columns(self, obj):
+        return [
+            {
+                "id": entry.bom_component_id,
+                "label": entry.component_name,
+            }
+            for entry in self._get_required_entries(obj)
+        ]
+
+    def get_details(self, obj):
+        return [
+            {
+                "component_id": entry.bom_component_id,
+                "item_code": entry.component_code,
+                "item_name": entry.component_name,
+                "weight_kg": f"{Decimal(entry.entered_weight_grams or 0):.3f}",
+                "captured_at": entry.entered_at,
+            }
+            for entry in self._get_required_entries(obj)
+        ]
 
 
 class ProductionStageRecordSerializer(serializers.Serializer):

@@ -175,6 +175,7 @@ class ProductionSummaryViewSet(viewsets.ModelViewSet):
 
 # ===== RECIPE / BOM AND PRODUCTION MASTER VIEWS =====
 
+import re
 from decimal import Decimal
 from django.db import transaction
 from django.db.models import Count, Prefetch, ProtectedError, Q
@@ -198,6 +199,7 @@ from .models import (
     PackingMaterialMaster,
     PackingTypeMaster,
     ProductionBatch,
+    ProductionOutputCapture,
     ProductionLineMaster,
     ProductionMachine,
     ProfileCreationMaster,
@@ -220,6 +222,7 @@ from .serializers import (
     RecipeMasterSerializer,
     RecipeMasterDetailSerializer,
     ProductionBatchSerializer,
+    ProductionOutputCaptureSerializer,
     BatchWeightEntrySerializer,
     ColorCreationMasterSerializer,
     PackingMaterialMasterSerializer,
@@ -1212,6 +1215,110 @@ class ProductionBatchStartAPIView(generics.GenericAPIView):
 class ProductionBatchConfirmAPIView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
 
+    NEXT_STAGE_BY_STAGE = {
+        ProductionBatch.Stage.AD: ProductionBatch.Stage.BL,
+        ProductionBatch.Stage.BL: ProductionBatch.Stage.GL,
+    }
+
+    NEXT_PRODUCTION_TYPE_BY_STAGE = {
+        ProductionBatch.Stage.AD: "WPE Blend Production",
+        ProductionBatch.Stage.BL: "WPE Granulated Blend Production",
+    }
+
+    @staticmethod
+    def _sanitize_scancode_token(value: str) -> str:
+        token = re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+        return token or "NA"
+
+    def _get_required_weight_entries(self, batch: ProductionBatch):
+        entries = list(
+            batch.weight_entries.select_related(
+                "bom_component__item",
+                "bom_component__product_subtype__category",
+            ).all()
+        )
+        entries.sort(key=lambda entry: (getattr(entry.bom_component, "sequence", 0), entry.id))
+        positive_entries = [entry for entry in entries if float(entry.target_weight_grams or 0) > 0]
+        return positive_entries or entries
+
+    def _build_output_session_key(self, entries: list[BatchWeightEntry]) -> str:
+        return "|".join(
+            f"{entry.bom_component_id}:{Decimal(entry.entered_weight_grams or 0):.3f}:{entry.entered_at.isoformat()}"
+            for entry in entries
+        )
+
+    def _build_output_scancode(self, batch: ProductionBatch, sequence: int, captured_at):
+        primary_token = self._sanitize_scancode_token(batch.batch_no or batch.production_order.production_id or "PRD")
+        return f"BIN-{primary_token}/ITEM-OUT{sequence:03d}/REF-{captured_at.strftime('%Y%m%d%H%M%S')}"
+
+    def _create_next_stage_batch(self, batch: ProductionBatch):
+        next_stage = self.NEXT_STAGE_BY_STAGE.get(batch.stage)
+        if not next_stage:
+            return None
+
+        next_batch = ProductionBatch.objects.create(
+            production_order=batch.production_order,
+            bom_variant=batch.bom_variant,
+            stage=next_stage,
+            machine=batch.machine,
+            status=ProductionBatch.BatchStatus.PENDING,
+            operator=batch.operator,
+            notes=f"Auto-created from {batch.batch_no} after {batch.stage} completion.",
+        )
+
+        if batch.bom_variant_id:
+            for component in batch.bom_variant.components.filter(is_active=True):
+                BatchWeightEntry.objects.get_or_create(
+                    batch=next_batch,
+                    bom_component=component,
+                    defaults={
+                        "item": component.item,
+                        "target_weight_grams": component.target_weight_grams,
+                        "entered_by": self.request.user,
+                    }
+                )
+
+        next_production_type = self.NEXT_PRODUCTION_TYPE_BY_STAGE.get(batch.stage)
+        if next_production_type:
+            updates = {"production_type": next_production_type}
+            if next_batch.batch_no:
+                updates["batch_number"] = next_batch.batch_no
+            ProductionOrder.objects.filter(pk=batch.production_order_id).update(**updates)
+
+        return next_batch
+
+    def _create_output_capture(self, batch: ProductionBatch):
+        if batch.stage != ProductionBatch.Stage.AD:
+            return None
+
+        existing_capture = getattr(batch, "output_capture", None)
+        if existing_capture is not None:
+            return existing_capture
+
+        entries = self._get_required_weight_entries(batch)
+        captured_at = batch.completed_at or timezone.now()
+        total_weight = sum(((entry.entered_weight_grams or Decimal("0.000")) for entry in entries), Decimal("0.000"))
+        existing_sequences = ProductionOutputCapture.objects.select_for_update().filter(
+            production_order=batch.production_order
+        ).values_list("sequence", flat=True)
+        next_sequence = max(existing_sequences, default=0) + 1
+
+        capture, _ = ProductionOutputCapture.objects.get_or_create(
+            source_batch=batch,
+            defaults={
+                "production_order": batch.production_order,
+                "sequence": next_sequence,
+                "scancode_id": self._build_output_scancode(batch, next_sequence, captured_at),
+                "recipe_no": str(getattr(batch.bom_variant, "variant_code", "") or batch.production_order.production_id or ""),
+                "quantity_kg": total_weight,
+                "weight_kg": total_weight,
+                "binlot": str(batch.batch_no or ""),
+                "session_key": self._build_output_session_key(entries),
+                "captured_at": captured_at,
+            },
+        )
+        return capture
+
     def post(self, request, order_pk, pk, *args, **kwargs):
         batch = get_object_or_404(
             ProductionBatch.objects.prefetch_related("weight_entries"),
@@ -1229,10 +1336,39 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
         if invalid:
             return success_response(message=f"{len(invalid)} weight entry(ies) are out of valid range.", data={"invalid_count": len(invalid)}, status_code=400)
 
-        batch.status = ProductionBatch.BatchStatus.COMPLETED
-        batch.completed_at = timezone.now()
-        batch.save()
+        with transaction.atomic():
+            batch.status = ProductionBatch.BatchStatus.COMPLETED
+            batch.completed_at = timezone.now()
+            batch.save(update_fields=["status", "completed_at", "updated_at"])
+            self._create_output_capture(batch)
+            self._create_next_stage_batch(batch)
+
         return success_response(message="Batch confirmed and completed.", data=ProductionBatchSerializer(batch).data)
+
+
+class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, order_pk, *args, **kwargs):
+        get_object_or_404(ProductionOrder, pk=order_pk)
+        captures = (
+            ProductionOutputCapture.objects.filter(production_order_id=order_pk)
+            .select_related("production_order", "source_batch")
+            .prefetch_related(
+                Prefetch(
+                    "source_batch__weight_entries",
+                    queryset=BatchWeightEntry.objects.select_related(
+                        "bom_component__item",
+                        "bom_component__product_subtype__category",
+                    ).order_by("bom_component__sequence", "id"),
+                )
+            )
+            .order_by("-captured_at", "-id")
+        )
+        return success_response(
+            message="Output captures fetched.",
+            data=list(ProductionOutputCaptureSerializer(captures, many=True).data),
+        )
 
 
 class BatchWeightEntryUpdateAPIView(generics.GenericAPIView):
