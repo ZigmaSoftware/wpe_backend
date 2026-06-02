@@ -184,6 +184,7 @@ class ProductionOrderDetailSerializer(serializers.ModelSerializer):
             "total_cost",
             "start_date_time",
             "end_date_time",
+            "extra_form_data",
             "created_by",
             "updated_by",
             "created_at",
@@ -224,6 +225,7 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
             "total_cost",
             "start_date_time",
             "end_date_time",
+            "extra_form_data",
             "materials",
         ]
 

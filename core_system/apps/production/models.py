@@ -239,6 +239,12 @@ class ProductionOrder(models.Model):
         help_text="Production end date and time"
     )
 
+    extra_form_data = models.JSONField(
+        blank=True,
+        null=True,
+        help_text="Stores additional form fields (stage, resources, plan rows, finished goods, etc.)"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.CharField(max_length=100, blank=True, null=True)

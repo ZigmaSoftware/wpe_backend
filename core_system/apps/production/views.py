@@ -1,3 +1,4 @@
+import re
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -52,6 +53,18 @@ class ProductionOrderViewSet(viewsets.ModelViewSet):
         elif self.action in ['create', 'update', 'partial_update']:
             return ProductionOrderCreateUpdateSerializer
         return ProductionOrderListSerializer
+
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        """Return the next available production order ID (e.g. 005, 006)."""
+        ids = ProductionOrder.objects.values_list("production_id", flat=True)
+        numeric_pattern = re.compile(r"^(\d+)$")
+        highest = 0
+        for pid in ids:
+            match = numeric_pattern.match(str(pid or "").strip())
+            if match:
+                highest = max(highest, int(match.group(1)))
+        return Response({"code": f"{highest + 1:03d}"})
 
     @action(detail=True, methods=['get'])
     def material_movements(self, request, pk=None):
