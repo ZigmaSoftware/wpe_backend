@@ -1,4 +1,7 @@
+from decimal import Decimal
+
 from rest_framework import serializers
+from apps.wpe_masters.models import ProductionTypeMaster
 from .models import (
     ProductionOrder,
     MaterialMovement,
@@ -98,6 +101,7 @@ class ProductionOrderListSerializer(serializers.ModelSerializer):
             "id",
             "production_id",
             "status",
+            "production_for",
             "production_type",
             "batch_number",
             "production_date",
@@ -162,6 +166,7 @@ class ProductionOrderDetailSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "production_id",
+            "production_for",
             "production_type",
             "status",
             "batch_number",
@@ -194,12 +199,14 @@ class ProductionOrderDetailSerializer(serializers.ModelSerializer):
 
 class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
     """Serializer for creating and updating Production Orders"""
+    production_type = serializers.CharField()
     materials = serializers.ListField(child=serializers.DictField(), required=False, write_only=True)
 
     class Meta:
         model = ProductionOrder
         fields = [
             "production_id",
+            "production_for",
             "production_type",
             "status",
             "batch_number",
@@ -228,6 +235,31 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
                     {"end_date_time": "End time must be after start time."}
                 )
         return data
+
+    def validate_production_type(self, value):
+        normalized = str(value).strip()
+        if not normalized:
+            raise serializers.ValidationError("Production type is required.")
+
+        current_value = getattr(self.instance, "production_type", "")
+        if current_value and current_value.strip().casefold() == normalized.casefold():
+            return current_value
+
+        legacy_values = {choice for choice, _ in ProductionOrder.PRODUCTION_TYPE_CHOICES}
+        if normalized in legacy_values:
+            return normalized
+
+        master_name = (
+            ProductionTypeMaster.objects.filter(name__iexact=normalized, is_active=True)
+            .values_list("name", flat=True)
+            .first()
+        )
+        if master_name:
+            return master_name
+
+        raise serializers.ValidationError(
+            "Select an active Production Type from Inventory & Store Masters."
+        )
 
     def create(self, validated_data):
         materials = validated_data.pop("materials", [])
@@ -278,7 +310,7 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
 
 # ===== RECIPE / BOM AND PRODUCTION MASTER SERIALIZERS =====
 
-from .models import BOMVariant, BOMVariantComponent, ProductionBatch, BatchWeightEntry, RegrindMaterialEntry
+from .models import BOMVariant, BOMVariantComponent, ProductionBatch, ProductionOutputCapture, BatchWeightEntry, RegrindMaterialEntry
 
 
 class ProductionCodeMasterSerializer(serializers.ModelSerializer):
@@ -686,6 +718,62 @@ class ProductionBatchSerializer(serializers.ModelSerializer):
         if not entries:
             return False
         return all(e.is_valid for e in entries)
+
+
+class ProductionOutputCaptureSerializer(serializers.ModelSerializer):
+    source_batch_no = serializers.CharField(source="source_batch.batch_no", read_only=True)
+    component_columns = serializers.SerializerMethodField()
+    details = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProductionOutputCapture
+        fields = (
+            "id",
+            "production_order",
+            "source_batch",
+            "source_batch_no",
+            "sequence",
+            "scancode_id",
+            "recipe_no",
+            "quantity_kg",
+            "weight_kg",
+            "binlot",
+            "session_key",
+            "captured_at",
+            "component_columns",
+            "details",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+    @staticmethod
+    def _get_required_entries(obj: ProductionOutputCapture):
+        entries = list(obj.source_batch.weight_entries.all())
+        entries.sort(key=lambda entry: (getattr(entry.bom_component, "sequence", 0), entry.id))
+        positive_entries = [entry for entry in entries if float(entry.target_weight_grams or 0) > 0]
+        return positive_entries or entries
+
+    def get_component_columns(self, obj):
+        return [
+            {
+                "id": entry.bom_component_id,
+                "label": entry.component_name,
+            }
+            for entry in self._get_required_entries(obj)
+        ]
+
+    def get_details(self, obj):
+        return [
+            {
+                "component_id": entry.bom_component_id,
+                "item_code": entry.component_code,
+                "item_name": entry.component_name,
+                "weight_kg": f"{Decimal(entry.entered_weight_grams or 0):.3f}",
+                "captured_at": entry.entered_at,
+            }
+            for entry in self._get_required_entries(obj)
+        ]
 
 
 class ProductionStageRecordSerializer(serializers.Serializer):

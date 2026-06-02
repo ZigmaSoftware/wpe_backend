@@ -7,8 +7,8 @@ from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.items.models import Item
-from apps.production.models import BOMVariant, BOMVariantComponent, BatchWeightEntry, ProductionOrder, ProductionOrderMaterialPlan
-from apps.wpe_masters.models import ProductTypeCategory, ProductTypeSubtype
+from apps.production.models import BatchWeightEntry, BOMVariant, BOMVariantComponent, ProductionBatch, ProductionOutputCapture, ProductionOrder, ProductionOrderMaterialPlan
+from apps.wpe_masters.models import ProductTypeCategory, ProductTypeSubtype, ProductionTypeMaster
 
 
 UserModel = get_user_model()
@@ -248,9 +248,9 @@ class ProductionOrderMaterialPlanTests(APITestCase):
         self.component = BOMVariantComponent.objects.create(
             bom_variant=self.bom,
             item=self.item,
-            target_weight_grams="1.500",
-            min_weight_grams="1.000",
-            max_weight_grams="2.000",
+            target_weight_grams="250.000",
+            min_weight_grams="195.000",
+            max_weight_grams="300.000",
             unit="kgs",
         )
 
@@ -267,6 +267,7 @@ class ProductionOrderMaterialPlanTests(APITestCase):
             "/api/production/production/",
             {
                 "production_id": f"PO-MAT-{self.unique_suffix.upper()}",
+                "production_for": "HSN - 500",
                 "production_type": "RECYCLING_PRODUCTION",
                 "status": "PLANNED",
                 "production_date": str(date.today()),
@@ -305,7 +306,217 @@ class ProductionOrderMaterialPlanTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         order = ProductionOrder.objects.get(production_id=f"PO-MAT-{self.unique_suffix.upper()}")
         material_plan = ProductionOrderMaterialPlan.objects.get(production_order=order)
+        self.assertEqual(order.production_for, "HSN - 500")
         self.assertEqual(material_plan.bom_variant_id, self.bom.id)
         self.assertEqual(material_plan.bom_component_id, self.component.id)
         self.assertEqual(str(material_plan.required_quantity), "150.000")
         self.assertEqual(str(material_plan.rate), "16.500")
+
+        list_response = self.client.get("/api/production/production/")
+
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        rows = list_response.data["results"] if isinstance(list_response.data, dict) else list_response.data
+        saved_row = next(
+            row for row in rows if row["production_id"] == f"PO-MAT-{self.unique_suffix.upper()}"
+        )
+        self.assertEqual(saved_row["production_for"], "HSN - 500")
+
+    def test_create_order_accepts_active_master_name_as_production_type(self):
+        production_type = ProductionTypeMaster.objects.create(
+            name=f"Granulation Production {self.unique_suffix}",
+            is_active=True,
+        )
+
+        response = self.client.post(
+            "/api/production/production/",
+            {
+                "production_id": f"PO-MASTER-{self.unique_suffix.upper()}",
+                "production_type": production_type.name,
+                "status": "PLANNED",
+                "production_date": str(date.today()),
+                "shift": "Shift 1 (6:00 am - 2:00 pm)",
+                "planned_quantity": "50.000",
+                "planned_weight": "0.000",
+                "material_cost": "0.00",
+                "total_cost": "0.00",
+                "start_date_time": f"{date.today()}T06:00:00Z",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        order = ProductionOrder.objects.get(production_id=f"PO-MASTER-{self.unique_suffix.upper()}")
+        self.assertEqual(order.production_type, production_type.name)
+
+
+class ProductionBatchStageTransitionTests(APITestCase):
+    def setUp(self):
+        self.unique_suffix = uuid4().hex[:8]
+        self.user = UserModel.objects.create_superuser(
+            username=f"production-batch-{self.unique_suffix}",
+            email=f"production-batch-{self.unique_suffix}@example.com",
+            password="password123",
+        )
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh.access_token}")
+
+        self.item = Item.objects.create(
+            category="Raw Material",
+            group="Resin",
+            sub_group="Primary",
+            item_name=f"Blend Resin {self.unique_suffix}",
+            unit="kgs",
+        )
+        self.bom = BOMVariant(variant_code=f"BOM-STAGE-{self.unique_suffix.upper()}", name="Stage Transition BOM")
+        self.bom.set_password("secret123")
+        self.bom.save()
+        self.component = BOMVariantComponent.objects.create(
+            bom_variant=self.bom,
+            item=self.item,
+            target_weight_grams="250.000",
+            min_weight_grams="195.000",
+            max_weight_grams="300.000",
+            unit="kgs",
+        )
+        self.order = ProductionOrder.objects.create(
+            production_id=f"PO-STAGE-{self.unique_suffix.upper()}",
+            production_type="WPE Additive Production",
+            production_date=date.today(),
+        )
+
+    def test_confirming_ad_batch_creates_pending_bl_batch_and_updates_order_type(self):
+        create_response = self.client.post(
+            f"/api/production/orders/{self.order.id}/batches/",
+            {
+                "stage": "AD",
+                "bom_variant": self.bom.id,
+            },
+            format="json",
+        )
+
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        batch_id = create_response.data["data"]["id"]
+        weight_entry_id = create_response.data["data"]["weight_entries"][0]["id"]
+
+        start_response = self.client.post(
+            f"/api/production/orders/{self.order.id}/batches/{batch_id}/start/",
+            format="json",
+        )
+        self.assertEqual(start_response.status_code, status.HTTP_200_OK)
+
+        save_response = self.client.post(
+            f"/api/production/orders/{self.order.id}/batches/{batch_id}/weights/{weight_entry_id}/",
+            {"entered_weight_grams": "250.000"},
+            format="json",
+        )
+        self.assertEqual(save_response.status_code, status.HTTP_200_OK)
+
+        confirm_response = self.client.post(
+            f"/api/production/orders/{self.order.id}/batches/{batch_id}/confirm/",
+            format="json",
+        )
+        self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
+
+        confirmed_batch = ProductionBatch.objects.get(pk=batch_id)
+        self.assertEqual(confirmed_batch.status, ProductionBatch.BatchStatus.COMPLETED)
+        self.assertIsNotNone(confirmed_batch.completed_at)
+
+        next_batch = ProductionBatch.objects.get(production_order=self.order, stage=ProductionBatch.Stage.BL)
+        self.assertEqual(next_batch.status, ProductionBatch.BatchStatus.PENDING)
+        self.assertEqual(next_batch.bom_variant_id, self.bom.id)
+        self.assertEqual(next_batch.weight_entries.count(), 1)
+
+        output_capture = ProductionOutputCapture.objects.get(source_batch=confirmed_batch)
+        self.assertEqual(output_capture.production_order_id, self.order.id)
+        self.assertEqual(output_capture.binlot, confirmed_batch.batch_no)
+        self.assertEqual(str(output_capture.weight_kg), "250.000")
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.production_type, "WPE Blend Production")
+        self.assertEqual(self.order.batch_number, next_batch.batch_no)
+
+        stage_response = self.client.get("/api/production/stage-records/?stage=BL")
+        self.assertEqual(stage_response.status_code, status.HTTP_200_OK)
+        stage_rows = stage_response.data["data"]["results"]
+        self.assertTrue(any(row["id"] == next_batch.id for row in stage_rows))
+
+        output_response = self.client.get(f"/api/production/orders/{self.order.id}/output-captures/")
+        self.assertEqual(output_response.status_code, status.HTTP_200_OK)
+        output_rows = output_response.data["data"]
+        self.assertEqual(len(output_rows), 1)
+        self.assertEqual(output_rows[0]["source_batch"], confirmed_batch.id)
+        self.assertEqual(output_rows[0]["source_batch_no"], confirmed_batch.batch_no)
+        self.assertEqual(output_rows[0]["weight_kg"], "250.000")
+
+    def test_ad_weight_validation_respects_component_unit_thresholds(self):
+        self.component.target_weight_grams = "4.500"
+        self.component.min_weight_grams = "4.400"
+        self.component.max_weight_grams = "4.600"
+        self.component.unit = "kgs"
+        self.component.save()
+
+        create_response = self.client.post(
+            f"/api/production/orders/{self.order.id}/batches/",
+            {
+                "stage": "AD",
+                "bom_variant": self.bom.id,
+            },
+            format="json",
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        batch_id = create_response.data["data"]["id"]
+        weight_entry_id = create_response.data["data"]["weight_entries"][0]["id"]
+
+        start_response = self.client.post(
+            f"/api/production/orders/{self.order.id}/batches/{batch_id}/start/",
+            format="json",
+        )
+        self.assertEqual(start_response.status_code, status.HTTP_200_OK)
+
+        save_response = self.client.post(
+            f"/api/production/orders/{self.order.id}/batches/{batch_id}/weights/{weight_entry_id}/",
+            {"entered_weight_grams": "4.500"},
+            format="json",
+        )
+
+        self.assertEqual(save_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(save_response.data["message"], "Weight saved.")
+        self.assertTrue(save_response.data["data"]["is_valid"])
+
+
+class RecipeMasterApiTests(APITestCase):
+    def setUp(self):
+        self.unique_suffix = uuid4().hex[:8]
+        self.user = UserModel.objects.create_superuser(
+            username=f"recipe-admin-{self.unique_suffix}",
+            email=f"recipe-admin-{self.unique_suffix}@example.com",
+            password="password123",
+        )
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh.access_token}")
+
+    def test_create_recipe_returns_201_and_is_available_in_lookup(self):
+        response = self.client.post(
+            "/api/production/recipes/",
+            {
+                "name": f"Recipe {self.unique_suffix}",
+                "description": "Recipe notes",
+                "recipe_version": "v1",
+                "batch_size": "5.000",
+                "batch_uom": "KG",
+                "status": "DRAFT",
+                "approved_by": None,
+                "approved_at": None,
+                "is_active": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        recipe_id = response.data["id"]
+        self.assertTrue(response.data["code"].startswith("REC"))
+
+        lookup_response = self.client.get("/api/production/recipes/lookup/")
+
+        self.assertEqual(lookup_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(any(row["id"] == recipe_id for row in lookup_response.data))

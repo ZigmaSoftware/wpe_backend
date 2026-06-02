@@ -143,6 +143,12 @@ class ProductionOrder(models.Model):
         default="IN_PROGRESS",
         db_index=True
     )
+    production_for = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Production purpose, customer, or internal job reference"
+    )
 
     # Batch Information
     batch_number = models.CharField(
@@ -516,6 +522,21 @@ import hashlib
 
 WEIGHT_MIN_GRAMS = 195
 WEIGHT_MAX_GRAMS = 9205
+WEIGHT_UNIT_KG_ALIASES = {"kg", "kgs", "kilogram", "kilograms"}
+
+
+def normalize_weight_unit(value: str | None) -> str:
+    token = str(value or "").strip().lower()
+    return "kg" if token in WEIGHT_UNIT_KG_ALIASES else "g"
+
+
+def convert_gram_limit_to_component_unit(limit_grams: int | Decimal, unit: str | None) -> Decimal:
+    limit = Decimal(str(limit_grams))
+    return limit / Decimal("1000") if normalize_weight_unit(unit) == "kg" else limit
+
+
+def format_weight_value(value: Decimal | str | int | float) -> str:
+    return format(Decimal(str(value)).normalize(), "f").rstrip("0").rstrip(".") or "0"
 
 
 class ProductionMachine(models.Model):
@@ -590,16 +611,17 @@ class ProductionMachine(models.Model):
         self.notes = str(self.notes or "").strip()
 
     def save(self, *args, **kwargs):
-        if not self.machine_code:
-            self.machine_code = build_prefixed_running_number(
-                type(self),
-                field_name="machine_code",
-                prefix="MCH",
-                width=3,
-                instance=self,
-            )
-        self.full_clean()
-        return super().save(*args, **kwargs)
+        with transaction.atomic():
+            if not self.machine_code:
+                self.machine_code = build_prefixed_running_number(
+                    type(self),
+                    field_name="machine_code",
+                    prefix="MCH",
+                    width=3,
+                    instance=self,
+                )
+            self.full_clean()
+            return super().save(*args, **kwargs)
 
 
 class ProfileSizeMaster(ProductionCodeTrackedModel):
@@ -993,16 +1015,17 @@ class BOMVariant(models.Model):
         self.notes = str(self.notes or "").strip()
 
     def save(self, *args, **kwargs):
-        if not self.variant_code:
-            self.variant_code = build_prefixed_running_number(
-                type(self),
-                field_name="variant_code",
-                prefix="REC",
-                width=3,
-                instance=self,
-            )
-        self.full_clean()
-        return super().save(*args, **kwargs)
+        with transaction.atomic():
+            if not self.variant_code:
+                self.variant_code = build_prefixed_running_number(
+                    type(self),
+                    field_name="variant_code",
+                    prefix="REC",
+                    width=3,
+                    instance=self,
+                )
+            self.full_clean()
+            return super().save(*args, **kwargs)
 
 
 class BOMVariantComponent(models.Model):
@@ -1227,6 +1250,33 @@ class ProductionBatch(models.Model):
         return self.batch_no or f"Batch-{self.pk}"
 
 
+class ProductionOutputCapture(models.Model):
+    production_order = models.ForeignKey(ProductionOrder, on_delete=models.CASCADE, related_name="output_captures")
+    source_batch = models.OneToOneField(ProductionBatch, on_delete=models.CASCADE, related_name="output_capture")
+    sequence = models.PositiveIntegerField()
+    scancode_id = models.CharField(max_length=120, unique=True, db_index=True)
+    recipe_no = models.CharField(max_length=100, blank=True)
+    quantity_kg = models.DecimalField(max_digits=14, decimal_places=3, default=ZERO_DECIMAL)
+    weight_kg = models.DecimalField(max_digits=14, decimal_places=3, default=ZERO_DECIMAL)
+    binlot = models.CharField(max_length=100, blank=True)
+    session_key = models.TextField(blank=True)
+    captured_at = models.DateTimeField(default=timezone.now, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-captured_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(fields=["production_order", "sequence"], name="prod_out_cap_ord_seq_uq"),
+        ]
+        indexes = [
+            models.Index(fields=["production_order", "captured_at"], name="prod_out_cap_ord_cap_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.production_order.production_id} — {self.scancode_id}"
+
+
 class BatchWeightEntry(models.Model):
     batch = models.ForeignKey(ProductionBatch, on_delete=models.CASCADE, related_name="weight_entries")
     bom_component = models.ForeignKey(BOMVariantComponent, on_delete=models.PROTECT)
@@ -1247,16 +1297,36 @@ class BatchWeightEntry(models.Model):
             self.is_valid = False
             self.validation_notes = "No weight entered."
             return
-        w = float(self.entered_weight_grams)
+
+        entered_weight = Decimal(self.entered_weight_grams)
+        component_unit = normalize_weight_unit(getattr(self.bom_component, "unit", "g"))
+        recipe_min = Decimal(self.bom_component.min_weight_grams)
+        recipe_max = Decimal(self.bom_component.max_weight_grams)
+        global_min = Decimal(WEIGHT_MIN_GRAMS)
+        global_max = Decimal(WEIGHT_MAX_GRAMS)
+        validation_unit = "g"
+
+        # Some legacy recipes still store gram-scale values even when the unit label is "kgs".
+        # Only convert the global thresholds when the recipe bounds themselves are clearly kg-scale.
+        if component_unit == "kg":
+            kg_scaled_global_max = convert_gram_limit_to_component_unit(WEIGHT_MAX_GRAMS, component_unit)
+            if recipe_max <= kg_scaled_global_max:
+                global_min = convert_gram_limit_to_component_unit(WEIGHT_MIN_GRAMS, component_unit)
+                global_max = kg_scaled_global_max
+                validation_unit = component_unit
         errors = []
-        if w < WEIGHT_MIN_GRAMS:
-            errors.append(f"Below global min {WEIGHT_MIN_GRAMS}g.")
-        if w > WEIGHT_MAX_GRAMS:
-            errors.append(f"Exceeds global max {WEIGHT_MAX_GRAMS}g.")
-        if w < float(self.bom_component.min_weight_grams):
-            errors.append(f"Below recipe min {self.bom_component.min_weight_grams}g.")
-        if w > float(self.bom_component.max_weight_grams):
-            errors.append(f"Exceeds recipe max {self.bom_component.max_weight_grams}g.")
+        if entered_weight < global_min:
+            errors.append(f"Below global min {format_weight_value(global_min)}{validation_unit}.")
+        if entered_weight > global_max:
+            errors.append(f"Exceeds global max {format_weight_value(global_max)}{validation_unit}.")
+        if entered_weight < recipe_min:
+            errors.append(
+                f"Below recipe min {format_weight_value(self.bom_component.min_weight_grams)}{component_unit}."
+            )
+        if entered_weight > recipe_max:
+            errors.append(
+                f"Exceeds recipe max {format_weight_value(self.bom_component.max_weight_grams)}{component_unit}."
+            )
         self.is_valid = len(errors) == 0
         self.validation_notes = " ".join(errors)
 
