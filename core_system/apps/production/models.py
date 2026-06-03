@@ -1257,6 +1257,81 @@ class ProductionBatch(models.Model):
         return self.batch_no or f"Batch-{self.pk}"
 
 
+_WORKFLOW_SOURCE_BATCH_PATTERN = re.compile(r"Moved from [A-Z]+ batch ([A-Z0-9-]+)", re.IGNORECASE)
+
+
+def _extract_workflow_batch_no_from_notes(notes: str) -> str:
+    match = _WORKFLOW_SOURCE_BATCH_PATTERN.search(str(notes or ""))
+    return str(match.group(1) if match else "").strip().rstrip(".")
+
+
+def _batch_anchor_timestamp(batch: ProductionBatch) -> float:
+    anchor = getattr(batch, "completed_at", None) or getattr(batch, "started_at", None) or getattr(batch, "created_at", None)
+    return anchor.timestamp() if anchor else 0.0
+
+
+def _resolve_related_batches(batch: ProductionBatch, sibling_batches=None) -> list[ProductionBatch]:
+    if sibling_batches is not None:
+        return list(sibling_batches)
+
+    order = getattr(batch, "production_order", None)
+    if order is None:
+        return []
+
+    prefetched_batches = getattr(order, "_prefetched_objects_cache", {}).get("batches")
+    if prefetched_batches is not None:
+        return list(prefetched_batches)
+
+    return list(order.batches.all())
+
+
+def resolve_workflow_batch_no(batch: ProductionBatch | None, sibling_batches=None, visited=None) -> str:
+    if batch is None:
+        return ""
+
+    workflow_batch_no = str(getattr(batch, "workflow_batch_no", "") or "").strip()
+    if workflow_batch_no:
+        return workflow_batch_no
+
+    source_batch_no = _extract_workflow_batch_no_from_notes(getattr(batch, "notes", ""))
+    if source_batch_no:
+        return source_batch_no
+
+    batch_no = str(getattr(batch, "batch_no", "") or "").strip()
+    previous_stage_by_stage = {
+        ProductionBatch.Stage.BL: ProductionBatch.Stage.AD,
+        ProductionBatch.Stage.GL: ProductionBatch.Stage.BL,
+    }
+    previous_stage = previous_stage_by_stage.get(getattr(batch, "stage", ""))
+    if not previous_stage:
+        return batch_no
+
+    visited = set(visited or ())
+    batch_key = getattr(batch, "pk", None) or f"unsaved-{id(batch)}"
+    if batch_key in visited:
+        return batch_no
+    visited.add(batch_key)
+
+    related_batches = _resolve_related_batches(batch, sibling_batches=sibling_batches)
+    current_anchor_timestamp = _batch_anchor_timestamp(batch)
+    candidates = [candidate for candidate in related_batches if candidate.pk != batch.pk and candidate.stage == previous_stage]
+    if not candidates:
+        return batch_no
+
+    def sort_key(candidate: ProductionBatch):
+        candidate_anchor = _batch_anchor_timestamp(candidate)
+        is_not_after_current = current_anchor_timestamp == 0.0 or candidate_anchor <= current_anchor_timestamp
+        return (
+            1 if is_not_after_current else 0,
+            candidate_anchor,
+            getattr(candidate, "id", 0) or 0,
+        )
+
+    source_batch = max(candidates, key=sort_key)
+    resolved_source_batch_no = resolve_workflow_batch_no(source_batch, sibling_batches=related_batches, visited=visited)
+    return resolved_source_batch_no or batch_no
+
+
 class ProductionOutputCapture(models.Model):
     production_order = models.ForeignKey(ProductionOrder, on_delete=models.CASCADE, related_name="output_captures")
     source_batch = models.OneToOneField(ProductionBatch, on_delete=models.CASCADE, related_name="output_capture")

@@ -20,6 +20,7 @@ from .models import (
     ProfileSizeMaster,
     ProductionMachine,
     WorkCentreCreationMaster,
+    resolve_workflow_batch_no,
 )
 
 
@@ -720,8 +721,7 @@ class ProductionBatchSerializer(serializers.ModelSerializer):
         read_only_fields = ("id", "batch_no", "created_at", "updated_at")
 
     def get_display_batch_no(self, obj):
-        workflow_batch_no = str(getattr(obj, "workflow_batch_no", "") or "").strip()
-        return workflow_batch_no or obj.batch_no
+        return resolve_workflow_batch_no(obj)
 
     def get_display_status(self, obj):
         if obj.status != ProductionBatch.BatchStatus.COMPLETED:
@@ -739,7 +739,7 @@ class ProductionBatchSerializer(serializers.ModelSerializer):
         has_next_stage_batch = any(
             sibling.pk != obj.pk
             and sibling.stage == next_stage
-            and str(getattr(sibling, "workflow_batch_no", "") or sibling.batch_no or "").strip() == workflow_batch_no
+            and resolve_workflow_batch_no(sibling, sibling_batches=order_batches) == workflow_batch_no
             for sibling in order_batches
         )
         if has_next_stage_batch:

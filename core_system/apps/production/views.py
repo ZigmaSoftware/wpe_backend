@@ -209,6 +209,7 @@ from .models import (
     WEIGHT_MIN_GRAMS, WEIGHT_MAX_GRAMS,
     build_alpha_running_code,
     build_prefixed_running_number,
+    resolve_workflow_batch_no,
 )
 from .serializers import (
     BagCreationMasterSerializer,
@@ -1184,8 +1185,7 @@ class ProductionStageRecordListAPIView(generics.GenericAPIView):
     def _resolve_batch_display_no(self, preferred_batch: ProductionBatch | None = None):
         if preferred_batch is None:
             return None
-        workflow_batch_no = str(getattr(preferred_batch, "workflow_batch_no", "") or "").strip()
-        return workflow_batch_no or preferred_batch.batch_no
+        return resolve_workflow_batch_no(preferred_batch)
 
 
 class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIView):
@@ -1334,7 +1334,7 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
         next_stage: str,
         transitioned_at,
     ):
-        workflow_batch_no = str(getattr(source_batch, "workflow_batch_no", "") or source_batch.batch_no or "").strip()
+        workflow_batch_no = resolve_workflow_batch_no(source_batch)
         existing_batch = ProductionBatch.objects.filter(
             production_order=source_batch.production_order,
             stage=next_stage,

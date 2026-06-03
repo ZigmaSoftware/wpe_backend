@@ -327,6 +327,7 @@ GRN_LEGACY_VALUE_FIELDS = (
     "status",
 )
 
+
 ACTIVE_QCR_SCOPES = {"", "active", "qcr", "pending", "open"}
 CANCELLED_QCR_SCOPES = {"cancelled", "canceled", "cancel", "rejected", "reject"}
 MOVED_TO_GRN_SCOPES = {"moved to grn", "moved_to_grn", "moved-grn", "grn", "approved", "grn approved", "grn_approved"}

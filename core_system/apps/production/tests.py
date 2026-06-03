@@ -589,6 +589,52 @@ class ProductionBatchStageTransitionTests(APITestCase):
         self.assertEqual(matched_row["batch_count"], 1)
         self.assertEqual(matched_row["workflow_status"], "BL")
 
+    def test_legacy_bl_batches_without_workflow_batch_no_use_ad_batch_number_for_display(self):
+        legacy_order = ProductionOrder.objects.create(
+            production_id=f"PO-LEGACY-BATCH-{self.unique_suffix.upper()}",
+            production_type="WPE Additive Production",
+            production_date=date.today(),
+            status="IN_PROGRESS",
+            batch_number="BATCH-LEGACY-AD",
+        )
+        completed_ad_batch = ProductionBatch.objects.create(
+            production_order=legacy_order,
+            bom_variant=self.bom,
+            stage=ProductionBatch.Stage.AD,
+            status=ProductionBatch.BatchStatus.COMPLETED,
+            batch_no="BATCH-LEGACY-AD",
+        )
+        ProductionBatch.objects.filter(pk=completed_ad_batch.pk).update(workflow_batch_no=None)
+        completed_ad_batch.refresh_from_db()
+        pending_bl_batch = ProductionBatch.objects.create(
+            production_order=legacy_order,
+            bom_variant=self.bom,
+            stage=ProductionBatch.Stage.BL,
+            status=ProductionBatch.BatchStatus.PENDING,
+            batch_no="BATCH-LEGACY-BL",
+            notes="Moved from AD batch BATCH-LEGACY-AD.",
+        )
+        ProductionBatch.objects.filter(pk=pending_bl_batch.pk).update(workflow_batch_no=None)
+        pending_bl_batch.refresh_from_db()
+
+        batch_response = self.client.get(
+            f"/api/production/orders/{legacy_order.id}/batches/",
+            {"stage": "BL"},
+        )
+        self.assertEqual(batch_response.status_code, status.HTTP_200_OK)
+        batch_rows = batch_response.data["data"]
+        matched_bl_row = next(row for row in batch_rows if row["id"] == pending_bl_batch.id)
+        self.assertEqual(matched_bl_row["batch_no"], pending_bl_batch.batch_no)
+        self.assertEqual(matched_bl_row["display_batch_no"], completed_ad_batch.batch_no)
+
+        stage_response = self.client.get("/api/production/stage-records/?stage=BL")
+        self.assertEqual(stage_response.status_code, status.HTTP_200_OK)
+        stage_rows = stage_response.data["data"]["results"]
+        matched_stage_row = next(row for row in stage_rows if row["order_id"] == legacy_order.id)
+        self.assertEqual(matched_stage_row["batch_no"], completed_ad_batch.batch_no)
+        self.assertEqual(matched_stage_row["display_batch_no"], completed_ad_batch.batch_no)
+        self.assertEqual(matched_stage_row["workflow_status"], "BL")
+
 
 class RecipeMasterApiTests(APITestCase):
     def setUp(self):
