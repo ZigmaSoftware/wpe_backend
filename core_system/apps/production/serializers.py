@@ -443,7 +443,7 @@ class ProductionLineMasterSerializer(ProductionCodeMasterSerializer):
 
 
 class BinCreationMasterSerializer(ProductionCodeMasterSerializer):
-    department_name = serializers.CharField(source="department.name", read_only=True)
+    department_name = serializers.CharField(source="department.name", read_only=True, default=None)
 
     class Meta(ProductionCodeMasterSerializer.Meta):
         model = BinCreationMaster
@@ -713,6 +713,11 @@ class ProductionBatchSerializer(serializers.ModelSerializer):
         ProductionBatch.Stage.BL: "BL - Blending",
         ProductionBatch.Stage.GL: "GL - Granulation",
     }
+    STAGE_STATUS_ORDER = {
+        ProductionBatch.Stage.AD: 0,
+        ProductionBatch.Stage.BL: 1,
+        ProductionBatch.Stage.GL: 2,
+    }
 
     class Meta:
         model = ProductionBatch
@@ -730,29 +735,32 @@ class ProductionBatchSerializer(serializers.ModelSerializer):
         if obj.status != ProductionBatch.BatchStatus.COMPLETED:
             return obj.status
 
-        next_stage = self.NEXT_STAGE_BY_STAGE.get(obj.stage)
-        if not next_stage:
-            return obj.status
-
         workflow_batch_no = self.get_display_batch_no(obj)
         order_batches = getattr(obj.production_order, "_prefetched_objects_cache", {}).get("batches")
         if order_batches is None:
             order_batches = obj.production_order.batches.all()
 
-        has_next_stage_batch = any(
-            sibling.pk != obj.pk
-            and sibling.stage == next_stage
-            and resolve_workflow_batch_no(sibling, sibling_batches=order_batches) == workflow_batch_no
+        related_stages = [
+            sibling.stage
             for sibling in order_batches
-        )
-        if has_next_stage_batch:
-            return self.STAGE_STATUS_LABELS.get(next_stage, next_stage)
+            if resolve_workflow_batch_no(sibling, sibling_batches=order_batches) == workflow_batch_no
+        ]
+        if not related_stages:
+            return obj.status
+
+        furthest_stage = max(related_stages, key=lambda stage: self.STAGE_STATUS_ORDER.get(stage, -1))
+        if self.STAGE_STATUS_ORDER.get(furthest_stage, -1) > self.STAGE_STATUS_ORDER.get(obj.stage, -1):
+            return self.STAGE_STATUS_LABELS.get(furthest_stage, furthest_stage)
 
         return obj.status
 
     def get_total_weight_grams(self, obj):
         entries = obj.weight_entries.all()
         total = sum(float(e.entered_weight_grams) for e in entries if e.entered_weight_grams is not None)
+        if total == 0:
+            output_capture = getattr(obj, "output_capture", None)
+            if output_capture is not None:
+                return round(float(output_capture.weight_kg), 3)
         return round(total, 3)
 
     def get_all_weights_valid(self, obj):
@@ -764,6 +772,7 @@ class ProductionBatchSerializer(serializers.ModelSerializer):
 
 class ProductionOutputCaptureSerializer(serializers.ModelSerializer):
     source_batch_no = serializers.CharField(source="source_batch.batch_no", read_only=True)
+    is_outwarded = serializers.SerializerMethodField()
     component_columns = serializers.SerializerMethodField()
     details = serializers.SerializerMethodField()
 
@@ -780,6 +789,7 @@ class ProductionOutputCaptureSerializer(serializers.ModelSerializer):
             "quantity_kg",
             "weight_kg",
             "binlot",
+            "is_outwarded",
             "session_key",
             "captured_at",
             "component_columns",
@@ -796,7 +806,21 @@ class ProductionOutputCaptureSerializer(serializers.ModelSerializer):
         positive_entries = [entry for entry in entries if float(entry.target_weight_grams or 0) > 0]
         return positive_entries or entries
 
+    def get_is_outwarded(self, obj):
+        return (
+            obj.source_batch.stage == ProductionBatch.Stage.BL
+            and obj.source_batch.status == ProductionBatch.BatchStatus.COMPLETED
+        )
+
     def get_component_columns(self, obj):
+        if obj.source_batch.stage != ProductionBatch.Stage.AD:
+            return [
+                {
+                    "id": obj.source_batch_id,
+                    "label": "Bin Weight" if obj.source_batch.stage == ProductionBatch.Stage.BL else "Captured Weight",
+                }
+            ]
+
         return [
             {
                 "id": entry.bom_component_id,
@@ -806,6 +830,17 @@ class ProductionOutputCaptureSerializer(serializers.ModelSerializer):
         ]
 
     def get_details(self, obj):
+        if obj.source_batch.stage != ProductionBatch.Stage.AD:
+            return [
+                {
+                    "component_id": obj.source_batch_id,
+                    "item_code": obj.source_batch.batch_no or obj.production_order.production_id,
+                    "item_name": "Bin Weight" if obj.source_batch.stage == ProductionBatch.Stage.BL else "Captured Weight",
+                    "weight_kg": f"{Decimal(obj.weight_kg or 0):.3f}",
+                    "captured_at": obj.captured_at,
+                }
+            ]
+
         return [
             {
                 "component_id": entry.bom_component_id,
