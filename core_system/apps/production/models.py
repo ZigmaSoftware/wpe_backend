@@ -811,9 +811,17 @@ class BinCreationMaster(ProductionCodeTrackedModel):
         "wpe_masters.DepartmentMaster",
         on_delete=models.PROTECT,
         related_name="production_bins",
+        null=True,
+        blank=True,
     )
-    capacity = models.DecimalField(max_digits=14, decimal_places=3, validators=[MinValueValidator(Decimal("0"))])
-    capacity_uom = models.CharField(max_length=16, choices=CapacityUom.choices)
+    capacity = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        validators=[MinValueValidator(Decimal("0"))],
+        null=True,
+        blank=True,
+    )
+    capacity_uom = models.CharField(max_length=16, choices=CapacityUom.choices, blank=True, default="")
     current_status = models.CharField(max_length=16, choices=BinStatus.choices, blank=True)
     current_material = models.CharField(max_length=200, blank=True)
 
