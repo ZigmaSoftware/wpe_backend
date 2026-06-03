@@ -243,6 +243,7 @@ class ProductionOrder(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.CharField(max_length=100, blank=True, null=True)
     updated_by = models.CharField(max_length=100, blank=True, null=True)
+    extra_form_data = models.JSONField(default=dict, blank=True)
 
     class Meta:
         ordering = ["-production_date", "-created_at"]

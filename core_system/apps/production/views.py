@@ -37,6 +37,7 @@ class ProductionOrderViewSet(viewsets.ModelViewSet):
 
     queryset = ProductionOrder.objects.select_related('summary').prefetch_related(
         'material_movements',
+        'material_plans',
         'transactions'
     )
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -1357,31 +1358,6 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
         self._seed_batch_weight_entries(next_batch, self.request.user)
         return next_batch
 
-    def _create_followup_ad_batch(self, source_batch: ProductionBatch, transitioned_at):
-        if source_batch.stage != ProductionBatch.Stage.AD:
-            return None
-
-        has_active_sibling = ProductionBatch.objects.filter(
-            production_order=source_batch.production_order,
-            stage=ProductionBatch.Stage.AD,
-            status__in=[ProductionBatch.BatchStatus.PENDING, ProductionBatch.BatchStatus.IN_PROGRESS],
-        ).exclude(pk=source_batch.pk).exists()
-        if has_active_sibling:
-            return None
-
-        next_batch = ProductionBatch.objects.create(
-            production_order=source_batch.production_order,
-            bom_variant=source_batch.bom_variant,
-            stage=ProductionBatch.Stage.AD,
-            machine=source_batch.machine,
-            status=ProductionBatch.BatchStatus.IN_PROGRESS,
-            started_at=transitioned_at,
-            operator=self.request.user,
-            notes=f"Follow-up AD batch created after completing {source_batch.batch_no}.",
-        )
-        self._seed_batch_weight_entries(next_batch, self.request.user)
-        return next_batch
-
     def _create_output_capture(self, batch: ProductionBatch):
         if batch.stage != ProductionBatch.Stage.AD:
             return None
@@ -1440,7 +1416,6 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
             next_stage = self.NEXT_STAGE_BY_STAGE.get(batch.stage)
             if next_stage:
                 self._create_stage_handoff_batch(batch, next_stage=next_stage, transitioned_at=transitioned_at)
-            self._create_followup_ad_batch(batch, transitioned_at=transitioned_at)
 
         return success_response(message="Batch confirmed and completed.", data=ProductionBatchSerializer(batch).data)
 

@@ -278,6 +278,13 @@ class ProductionOrderMaterialPlanTests(APITestCase):
                 "material_cost": "2500.00",
                 "total_cost": "2500.00",
                 "start_date_time": f"{date.today()}T06:00:00Z",
+                "extra_form_data": {
+                    "production_facility": "10",
+                    "work_center": "20",
+                    "shift_incharge": "30",
+                    "selected_bom_variant_id": str(self.bom.id),
+                    "bom_multiplier": "2",
+                },
                 "materials": [
                     {
                         "sequence": 1,
@@ -308,10 +315,19 @@ class ProductionOrderMaterialPlanTests(APITestCase):
         order = ProductionOrder.objects.get(production_id=f"PO-MAT-{self.unique_suffix.upper()}")
         material_plan = ProductionOrderMaterialPlan.objects.get(production_order=order)
         self.assertEqual(order.production_for, "HSN - 500")
+        self.assertEqual(order.extra_form_data["production_facility"], "10")
+        self.assertEqual(order.extra_form_data["work_center"], "20")
+        self.assertEqual(order.extra_form_data["selected_bom_variant_id"], str(self.bom.id))
         self.assertEqual(material_plan.bom_variant_id, self.bom.id)
         self.assertEqual(material_plan.bom_component_id, self.component.id)
         self.assertEqual(str(material_plan.required_quantity), "150.000")
         self.assertEqual(str(material_plan.rate), "16.500")
+
+        detail_response = self.client.get(f"/api/production/production/{order.id}/")
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        detail_data = detail_response.data["data"] if isinstance(detail_response.data, dict) and "data" in detail_response.data else detail_response.data
+        self.assertEqual(detail_data["extra_form_data"]["work_center"], "20")
+        self.assertEqual(detail_data["extra_form_data"]["selected_bom_variant_id"], str(self.bom.id))
 
         list_response = self.client.get("/api/production/production/")
 
@@ -385,7 +401,7 @@ class ProductionBatchStageTransitionTests(APITestCase):
             production_date=date.today(),
         )
 
-    def test_confirming_ad_batch_creates_bl_handoff_and_keeps_ad_order_active(self):
+    def test_confirming_ad_batch_creates_bl_handoff_without_followup_ad_batch(self):
         create_response = self.client.post(
             f"/api/production/orders/{self.order.id}/batches/",
             {
@@ -429,14 +445,13 @@ class ProductionBatchStageTransitionTests(APITestCase):
         self.assertEqual(next_batch.workflow_batch_no, confirmed_batch.batch_no)
         self.assertEqual(next_batch.started_at, confirmed_batch.completed_at)
 
-        followup_ad_batch = ProductionBatch.objects.get(
-            production_order=self.order,
-            stage=ProductionBatch.Stage.AD,
-            status=ProductionBatch.BatchStatus.IN_PROGRESS,
+        self.assertFalse(
+            ProductionBatch.objects.filter(
+                production_order=self.order,
+                stage=ProductionBatch.Stage.AD,
+                status__in=[ProductionBatch.BatchStatus.PENDING, ProductionBatch.BatchStatus.IN_PROGRESS],
+            ).exclude(pk=confirmed_batch.pk).exists()
         )
-        self.assertNotEqual(followup_ad_batch.id, confirmed_batch.id)
-        self.assertEqual(followup_ad_batch.weight_entries.count(), 1)
-        self.assertNotEqual(followup_ad_batch.workflow_batch_no, confirmed_batch.workflow_batch_no)
 
         output_capture = ProductionOutputCapture.objects.get(source_batch=confirmed_batch)
         self.assertEqual(output_capture.production_order_id, self.order.id)
@@ -452,8 +467,8 @@ class ProductionBatchStageTransitionTests(APITestCase):
         ad_stage_rows = ad_stage_response.data["data"]["results"]
         matched_ad_row = next(row for row in ad_stage_rows if row["order_id"] == self.order.id)
         self.assertEqual(matched_ad_row["production_type"], "WPE Additive Production")
-        self.assertEqual(matched_ad_row["batch_count"], 2)
-        self.assertEqual(matched_ad_row["workflow_status"], "AD")
+        self.assertEqual(matched_ad_row["batch_count"], 1)
+        self.assertEqual(matched_ad_row["workflow_status"], "BL")
 
         bl_stage_response = self.client.get("/api/production/stage-records/?stage=BL")
         self.assertEqual(bl_stage_response.status_code, status.HTTP_200_OK)
@@ -472,9 +487,8 @@ class ProductionBatchStageTransitionTests(APITestCase):
         self.assertEqual(ad_batch_response.status_code, status.HTTP_200_OK)
         ad_batches = ad_batch_response.data["data"]
         completed_ad_row = next(row for row in ad_batches if row["id"] == confirmed_batch.id)
-        followup_ad_row = next(row for row in ad_batches if row["id"] == followup_ad_batch.id)
         self.assertEqual(completed_ad_row["display_status"], "BL - Blending")
-        self.assertEqual(followup_ad_row["display_status"], "IN_PROGRESS")
+        self.assertEqual(len(ad_batches), 1)
 
         output_response = self.client.get(f"/api/production/orders/{self.order.id}/output-captures/")
         self.assertEqual(output_response.status_code, status.HTTP_200_OK)

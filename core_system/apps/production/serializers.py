@@ -187,6 +187,7 @@ class ProductionOrderDetailSerializer(serializers.ModelSerializer):
             "end_date_time",
             "created_by",
             "updated_by",
+            "extra_form_data",
             "created_at",
             "updated_at",
             "material_movements",
@@ -202,6 +203,7 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
     """Serializer for creating and updating Production Orders"""
     production_type = serializers.CharField()
     materials = serializers.ListField(child=serializers.DictField(), required=False, write_only=True)
+    extra_form_data = serializers.JSONField(required=False)
 
     class Meta:
         model = ProductionOrder
@@ -225,6 +227,7 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
             "total_cost",
             "start_date_time",
             "end_date_time",
+            "extra_form_data",
             "materials",
         ]
 
