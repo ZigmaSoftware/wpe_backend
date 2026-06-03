@@ -979,9 +979,9 @@ class ProductionStageRecordListAPIView(generics.GenericAPIView):
 
     def get(self, request, *args, **kwargs):
         stage = str(request.query_params.get("stage", "")).upper().strip()
-        if stage not in {"BL", "GL", "PR"}:
+        if stage not in {"AD", "BL", "GL", "PR"}:
             return success_response(
-                message="stage is required and must be one of: BL, GL, PR.",
+                message="stage is required and must be one of: AD, BL, GL, PR.",
                 data={},
                 status_code=400,
             )
@@ -1008,7 +1008,7 @@ class ProductionStageRecordListAPIView(generics.GenericAPIView):
         date_from = str(self.request.query_params.get("date_from", "")).strip()
         date_to = str(self.request.query_params.get("date_to", "")).strip()
 
-        if stage in {ProductionBatch.Stage.BL, ProductionBatch.Stage.GL}:
+        if stage in {ProductionBatch.Stage.AD, ProductionBatch.Stage.BL, ProductionBatch.Stage.GL}:
             queryset = (
                 ProductionBatch.objects.filter(stage=stage)
                 .select_related("production_order", "machine")
@@ -1057,7 +1057,7 @@ class ProductionStageRecordListAPIView(generics.GenericAPIView):
     def _build_records(self, stage: str, rows: list[ProductionBatch] | list[ProductionOrder]):
         if stage == "PR":
             return [self._build_order_record(order) for order in rows]
-        return [self._build_batch_record(batch) for batch in rows]
+        return [self._build_batch_record(batch) for batch in rows]  # AD, BL, GL all use batch records
 
     def _build_batch_record(self, batch: ProductionBatch):
         order = batch.production_order
