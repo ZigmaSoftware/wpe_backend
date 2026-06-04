@@ -1211,11 +1211,11 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
     def get_queryset(self):
         order_batch_prefetch = Prefetch(
             "production_order__batches",
-            queryset=ProductionBatch.objects.select_related("machine").order_by("-created_at"),
+            queryset=ProductionBatch.objects.select_related("machine", "output_capture").order_by("-created_at"),
         )
         return ProductionBatch.objects.filter(
             production_order_id=self.kwargs["order_pk"]
-        ).select_related("production_order", "machine", "bom_variant", "operator").prefetch_related(
+        ).select_related("production_order", "machine", "bom_variant", "operator", "output_capture").prefetch_related(
             order_batch_prefetch,
             "weight_entries__item",
             "weight_entries__bom_component__item",
@@ -1267,11 +1267,11 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
 
         batch.refresh_from_db()
         full_batch = ProductionBatch.objects.select_related(
-            "production_order", "machine", "bom_variant", "operator"
+            "production_order", "machine", "bom_variant", "operator", "output_capture"
         ).prefetch_related(
             Prefetch(
                 "production_order__batches",
-                queryset=ProductionBatch.objects.select_related("machine").order_by("-created_at"),
+                queryset=ProductionBatch.objects.select_related("machine", "output_capture").order_by("-created_at"),
             ),
             "weight_entries__item",
             "weight_entries__bom_component__item",
@@ -1404,25 +1404,70 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
         )
         return capture
 
+    @staticmethod
+    def _release_assigned_bin(capture: ProductionOutputCapture | None):
+        if capture is None:
+            return None
+
+        assigned_bin_code = str(capture.binlot or "").strip()
+        source_batch_code = str(getattr(capture.source_batch, "batch_no", "") or "").strip()
+        if not assigned_bin_code or assigned_bin_code == source_batch_code:
+            return None
+
+        assigned_bin = (
+            BinCreationMaster.objects.select_for_update()
+            .filter(code__iexact=assigned_bin_code)
+            .first()
+        )
+        if assigned_bin is None:
+            return None
+
+        assigned_bin.current_status = BinCreationMaster.BinStatus.FREE
+        assigned_bin.current_material = ""
+        assigned_bin.save(update_fields=["current_status", "current_material", "updated_at"])
+        return assigned_bin
+
     def post(self, request, order_pk, pk, *args, **kwargs):
         batch = get_object_or_404(
-            ProductionBatch.objects.prefetch_related("weight_entries"),
+            ProductionBatch.objects.select_related("output_capture").prefetch_related("weight_entries"),
             pk=pk, production_order_id=order_pk
         )
         if batch.status != ProductionBatch.BatchStatus.IN_PROGRESS:
             return success_response(message="Only IN_PROGRESS batches can be confirmed.", data={}, status_code=400)
 
-        entries = list(batch.weight_entries.all())
-        missing = [e for e in entries if e.entered_weight_grams is None]
-        invalid = [e for e in entries if e.is_valid is False]
+        if batch.stage == ProductionBatch.Stage.BL:
+            if getattr(batch, "output_capture", None) is None:
+                return success_response(
+                    message="Create the BL captured output list before confirming this batch.",
+                    data={},
+                    status_code=400,
+                )
+        else:
+            entries = list(batch.weight_entries.all())
+            missing = [e for e in entries if e.entered_weight_grams is None]
+            invalid = [e for e in entries if e.is_valid is False]
 
-        if missing:
-            return success_response(message=f"{len(missing)} component(s) have no weight entered yet.", data={"missing_count": len(missing)}, status_code=400)
-        if invalid:
-            return success_response(message=f"{len(invalid)} weight entry(ies) are out of valid range.", data={"invalid_count": len(invalid)}, status_code=400)
+            if missing:
+                return success_response(message=f"{len(missing)} component(s) have no weight entered yet.", data={"missing_count": len(missing)}, status_code=400)
+            if invalid:
+                return success_response(message=f"{len(invalid)} weight entry(ies) are out of valid range.", data={"invalid_count": len(invalid)}, status_code=400)
 
         with transaction.atomic():
             transitioned_at = timezone.now()
+            bl_capture = None
+            if batch.stage == ProductionBatch.Stage.BL:
+                bl_capture = (
+                    ProductionOutputCapture.objects.select_for_update()
+                    .filter(source_batch=batch)
+                    .first()
+                )
+                bl_capture = ProductionOutputCaptureListAPIView._ensure_bl_capture_bin_assignment(bl_capture, batch)
+                if bl_capture is None:
+                    return success_response(
+                        message="No free bin is available for assignment.",
+                        data={},
+                        status_code=400,
+                    )
             batch.status = ProductionBatch.BatchStatus.COMPLETED
             batch.completed_at = transitioned_at
             batch.save(update_fields=["status", "completed_at", "updated_at"])
@@ -1430,6 +1475,8 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
             next_stage = self.NEXT_STAGE_BY_STAGE.get(batch.stage)
             if next_stage:
                 self._create_stage_handoff_batch(batch, next_stage=next_stage, transitioned_at=transitioned_at)
+            if batch.stage == ProductionBatch.Stage.BL:
+                self._release_assigned_bin(bl_capture)
 
         return success_response(message="Batch confirmed and completed.", data=ProductionBatchSerializer(batch).data)
 
@@ -1437,11 +1484,11 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
 class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, order_pk, *args, **kwargs):
-        get_object_or_404(ProductionOrder, pk=order_pk)
-        captures = (
+    @staticmethod
+    def _get_capture_queryset(order_pk, *, source_batch_id=None):
+        queryset = (
             ProductionOutputCapture.objects.filter(production_order_id=order_pk)
-            .select_related("production_order", "source_batch")
+            .select_related("production_order", "source_batch", "source_batch__bom_variant")
             .prefetch_related(
                 Prefetch(
                     "source_batch__weight_entries",
@@ -1453,9 +1500,245 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
             )
             .order_by("-captured_at", "-id")
         )
+        if source_batch_id is not None:
+            queryset = queryset.filter(source_batch_id=source_batch_id)
+        return queryset
+
+    @staticmethod
+    def _build_manual_output_session_key(batch: ProductionBatch, weight_kg: Decimal, captured_at):
+        return f"{batch.stage}:{batch.id}:{weight_kg:.3f}:{captured_at.strftime('%Y%m%d%H%M%S')}"
+
+    @staticmethod
+    def _build_manual_output_scancode(batch: ProductionBatch, sequence: int, captured_at):
+        primary_token = "".join(ch for ch in (batch.batch_no or batch.production_order.production_id or "PRD").upper() if ch.isalnum()) or "PRD"
+        return f"BIN-{primary_token}/ITEM-OUT{sequence:03d}/REF-{captured_at.strftime('%Y%m%d%H%M%S')}"
+
+    @staticmethod
+    def _reserve_free_bin():
+        reserved_bin = (
+            BinCreationMaster.objects.select_for_update()
+            .filter(
+                is_active=True,
+                current_status=BinCreationMaster.BinStatus.FREE,
+            )
+            .order_by("created_at", "id")
+            .first()
+        )
+        if reserved_bin is None:
+            return None
+
+        reserved_bin.current_status = BinCreationMaster.BinStatus.OCCUPIED
+        reserved_bin.save(update_fields=["current_status", "updated_at"])
+        return reserved_bin
+
+    @staticmethod
+    def _reserve_free_bag():
+        reserved_bag = (
+            BagCreationMaster.objects.select_for_update()
+            .filter(
+                is_active=True,
+                current_status=BagCreationMaster.BagStatus.FREE,
+            )
+            .order_by("created_at", "id")
+            .first()
+        )
+        if reserved_bag is None:
+            return None
+
+        reserved_bag.current_status = BagCreationMaster.BagStatus.OCCUPIED
+        reserved_bag.save(update_fields=["current_status", "updated_at"])
+        return reserved_bag
+
+    @staticmethod
+    def _ensure_bl_capture_bin_assignment(capture: ProductionOutputCapture, batch: ProductionBatch):
+        if batch.stage != ProductionBatch.Stage.BL:
+            return capture
+
+        current_binlot = str(capture.binlot or "").strip()
+        matched_bin = None
+        if current_binlot:
+            matched_bin = (
+                BinCreationMaster.objects.select_for_update()
+                .filter(
+                    is_active=True,
+                    code__iexact=current_binlot,
+                )
+                .first()
+            )
+
+        if matched_bin is not None and matched_bin.current_status != BinCreationMaster.BinStatus.HOLD:
+            if matched_bin.current_status == BinCreationMaster.BinStatus.FREE:
+                matched_bin.current_status = BinCreationMaster.BinStatus.OCCUPIED
+                matched_bin.save(update_fields=["current_status", "updated_at"])
+            return capture
+
+        reserved_bin = ProductionOutputCaptureListAPIView._reserve_free_bin()
+        if reserved_bin is None:
+            return None
+
+        capture.binlot = str(reserved_bin.code or "")
+        capture.save(update_fields=["binlot", "updated_at"])
+        return capture
+
+    @staticmethod
+    def _ensure_gl_capture_bag_assignment(capture: ProductionOutputCapture, batch: ProductionBatch):
+        if batch.stage != ProductionBatch.Stage.GL:
+            return capture
+
+        current_baglot = str(capture.binlot or "").strip()
+        matched_bag = None
+        if current_baglot:
+            matched_bag = (
+                BagCreationMaster.objects.select_for_update()
+                .filter(
+                    is_active=True,
+                    code__iexact=current_baglot,
+                )
+                .first()
+            )
+
+        if matched_bag is not None and matched_bag.current_status != BagCreationMaster.BagStatus.USED:
+            if matched_bag.current_status == BagCreationMaster.BagStatus.FREE:
+                matched_bag.current_status = BagCreationMaster.BagStatus.OCCUPIED
+                matched_bag.save(update_fields=["current_status", "updated_at"])
+            return capture
+
+        reserved_bag = ProductionOutputCaptureListAPIView._reserve_free_bag()
+        if reserved_bag is None:
+            return None
+
+        capture.binlot = str(reserved_bag.code or "")
+        capture.save(update_fields=["binlot", "updated_at"])
+        return capture
+
+    @staticmethod
+    def _parse_source_batch_id(value):
+        if value in (None, ""):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return "invalid"
+        return parsed if parsed > 0 else "invalid"
+
+    def get(self, request, order_pk, *args, **kwargs):
+        get_object_or_404(ProductionOrder, pk=order_pk)
+        source_batch_id = self._parse_source_batch_id(request.query_params.get("source_batch"))
+        if source_batch_id == "invalid":
+            return success_response(message="source_batch must be a valid batch identifier.", data={}, status_code=400)
+
+        captures = self._get_capture_queryset(order_pk, source_batch_id=source_batch_id)
         return success_response(
             message="Output captures fetched.",
             data=list(ProductionOutputCaptureSerializer(captures, many=True).data),
+        )
+
+    def post(self, request, order_pk, *args, **kwargs):
+        order = get_object_or_404(ProductionOrder, pk=order_pk)
+        source_batch_id = self._parse_source_batch_id(request.data.get("source_batch"))
+        if source_batch_id is None:
+            return success_response(message="source_batch is required.", data={}, status_code=400)
+        if source_batch_id == "invalid":
+            return success_response(message="source_batch must be a valid batch identifier.", data={}, status_code=400)
+
+        batch = get_object_or_404(
+            ProductionBatch.objects.select_related("production_order", "bom_variant"),
+            pk=source_batch_id,
+            production_order_id=order_pk,
+        )
+        if batch.stage == ProductionBatch.Stage.AD:
+            return success_response(message="AD output captures are created from final capture only.", data={}, status_code=400)
+        if batch.status == ProductionBatch.BatchStatus.FAILED:
+            return success_response(message="Cannot capture output for a failed batch.", data={}, status_code=400)
+
+        raw_weight = request.data.get("weight_kg")
+        if raw_weight in (None, ""):
+            return success_response(message="weight_kg is required.", data={}, status_code=400)
+
+        try:
+            weight_kg = Decimal(str(raw_weight)).quantize(Decimal("0.001"))
+        except Exception:
+            return success_response(message="weight_kg must be a valid decimal value.", data={}, status_code=400)
+
+        if weight_kg <= 0:
+            return success_response(message="weight_kg must be greater than zero.", data={}, status_code=400)
+
+        captured_at = timezone.now()
+
+        with transaction.atomic():
+            existing_capture = (
+                ProductionOutputCapture.objects.select_for_update()
+                .filter(source_batch=batch)
+                .first()
+            )
+            if existing_capture is None:
+                if batch.status == ProductionBatch.BatchStatus.COMPLETED:
+                    return success_response(
+                        message="Cannot create a captured output list for a completed batch.",
+                        data={},
+                        status_code=400,
+                    )
+                assigned_binlot = str(batch.batch_no or "")
+                if batch.stage == ProductionBatch.Stage.BL:
+                    assigned_bin = self._reserve_free_bin()
+                    if assigned_bin is None:
+                        return success_response(
+                            message="No free bin is available for assignment.",
+                            data={},
+                            status_code=400,
+                        )
+                    assigned_binlot = str(assigned_bin.code or "")
+                elif batch.stage == ProductionBatch.Stage.GL:
+                    assigned_bag = self._reserve_free_bag()
+                    if assigned_bag is None:
+                        return success_response(
+                            message="No free bag is available for assignment.",
+                            data={},
+                            status_code=400,
+                        )
+                    assigned_binlot = str(assigned_bag.code or "")
+                existing_sequences = ProductionOutputCapture.objects.select_for_update().filter(
+                    production_order=order
+                ).values_list("sequence", flat=True)
+                sequence = max(existing_sequences, default=0) + 1
+                capture = ProductionOutputCapture.objects.create(
+                    production_order=order,
+                    source_batch=batch,
+                    sequence=sequence,
+                    scancode_id=self._build_manual_output_scancode(batch, sequence, captured_at),
+                    recipe_no=str(getattr(batch.bom_variant, "variant_code", "") or order.production_id or ""),
+                    quantity_kg=weight_kg,
+                    weight_kg=weight_kg,
+                    binlot=assigned_binlot,
+                    session_key=self._build_manual_output_session_key(batch, weight_kg, captured_at),
+                    captured_at=captured_at,
+                )
+                created = True
+            else:
+                capture = existing_capture
+                created = False
+                if batch.stage == ProductionBatch.Stage.BL:
+                    capture = self._ensure_bl_capture_bin_assignment(capture, batch)
+                    if capture is None:
+                        return success_response(
+                            message="No free bin is available for assignment.",
+                            data={},
+                            status_code=400,
+                        )
+                elif batch.stage == ProductionBatch.Stage.GL:
+                    capture = self._ensure_gl_capture_bag_assignment(capture, batch)
+                    if capture is None:
+                        return success_response(
+                            message="No free bag is available for assignment.",
+                            data={},
+                            status_code=400,
+                        )
+
+        capture = self._get_capture_queryset(order_pk, source_batch_id=source_batch_id).get(pk=capture.pk)
+        return success_response(
+            message="Output capture saved." if created else "Output capture already exists for this batch.",
+            data=ProductionOutputCaptureSerializer(capture).data,
+            status_code=201 if created else 200,
         )
 
 
