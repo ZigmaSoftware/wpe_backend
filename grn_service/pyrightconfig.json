@@ -1,3 +1,6 @@
 {
-  "extraPaths": ["../core_system"]
+  "extraPaths": [
+    "../core_system",
+    "/home/admin/wpe/wpe-backend/core_system"
+  ]
 }

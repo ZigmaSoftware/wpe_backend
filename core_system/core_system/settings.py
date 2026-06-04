@@ -76,6 +76,7 @@ INSTALLED_APPS = [
     "apps.production.apps.ProductionConfig",
     "apps.wpe_masters.apps.WpeMastersConfig",
     "apps.scale.apps.ScaleConfig",
+    "apps.inventory.apps.InventoryConfig",
     "grn_app.apps.PurchasesIwardsConfig",
 ]
 

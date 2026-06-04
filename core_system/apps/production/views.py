@@ -38,6 +38,7 @@ class ProductionOrderViewSet(viewsets.ModelViewSet):
 
     queryset = ProductionOrder.objects.select_related('summary').prefetch_related(
         'material_movements',
+        'material_plans',
         'transactions'
     )
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -222,6 +223,7 @@ from .models import (
     WEIGHT_MIN_GRAMS, WEIGHT_MAX_GRAMS,
     build_alpha_running_code,
     build_prefixed_running_number,
+    resolve_workflow_batch_no,
 )
 from .serializers import (
     BagCreationMasterSerializer,
@@ -976,6 +978,23 @@ class ProductionStageRecordListAPIView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = ProductionStageRecordSerializer
     pagination_class = StandardResultsSetPagination
+    AD_PRODUCTION_TYPE = "WPE Additive Production"
+    STAGE_PRODUCTION_TYPE_BY_STAGE = {
+        ProductionBatch.Stage.AD: "WPE Additive Production",
+        ProductionBatch.Stage.BL: "WPE Blend Production",
+        ProductionBatch.Stage.GL: "WPE Granulated Blend Production",
+    }
+    BATCH_STATUS_PRIORITY = {
+        ProductionBatch.BatchStatus.IN_PROGRESS: 0,
+        ProductionBatch.BatchStatus.PENDING: 1,
+        ProductionBatch.BatchStatus.COMPLETED: 2,
+        ProductionBatch.BatchStatus.FAILED: 3,
+    }
+    NEXT_WORKFLOW_STATUS_BY_STAGE = {
+        ProductionBatch.Stage.AD: ProductionBatch.Stage.BL,
+        ProductionBatch.Stage.BL: ProductionBatch.Stage.GL,
+        ProductionBatch.Stage.GL: "COMPLETED",
+    }
 
     def get(self, request, *args, **kwargs):
         stage = str(request.query_params.get("stage", "")).upper().strip()
@@ -1008,36 +1027,22 @@ class ProductionStageRecordListAPIView(generics.GenericAPIView):
         date_from = str(self.request.query_params.get("date_from", "")).strip()
         date_to = str(self.request.query_params.get("date_to", "")).strip()
 
-        if stage in {ProductionBatch.Stage.AD, ProductionBatch.Stage.BL, ProductionBatch.Stage.GL}:
-            queryset = (
-                ProductionBatch.objects.filter(stage=stage)
-                .select_related("production_order", "machine")
-                .order_by("-started_at", "-created_at")
-            )
-            if status:
-                queryset = queryset.filter(status=status)
-            if date_from:
-                queryset = queryset.filter(production_order__production_date__gte=date_from)
-            if date_to:
-                queryset = queryset.filter(production_order__production_date__lte=date_to)
-            if search:
-                queryset = queryset.filter(
-                    Q(batch_no__icontains=search)
-                    | Q(production_order__production_id__icontains=search)
-                    | Q(production_order__production_type__icontains=search)
-                    | Q(production_order__plan_id__icontains=search)
-                    | Q(machine__name__icontains=search)
-                    | Q(production_order__line_name__icontains=search)
-                )
-            return queryset
-
         batch_prefetch = Prefetch(
             "batches",
             queryset=ProductionBatch.objects.select_related("machine").order_by("-created_at"),
         )
         queryset = ProductionOrder.objects.prefetch_related(batch_prefetch).order_by("-production_date", "-created_at")
+        if stage == ProductionBatch.Stage.AD:
+            queryset = queryset.filter(
+                Q(production_type=self.AD_PRODUCTION_TYPE) | Q(batches__stage=ProductionBatch.Stage.AD)
+            ).distinct()
+        elif stage in {ProductionBatch.Stage.BL, ProductionBatch.Stage.GL}:
+            queryset = queryset.filter(batches__stage=stage).distinct()
         if status:
-            queryset = queryset.filter(status=status)
+            if stage in {ProductionBatch.Stage.BL, ProductionBatch.Stage.GL}:
+                queryset = queryset.filter(batches__stage=stage, batches__status=status).distinct()
+            else:
+                queryset = queryset.filter(status=status)
         if date_from:
             queryset = queryset.filter(production_date__gte=date_from)
         if date_to:
@@ -1050,49 +1055,36 @@ class ProductionStageRecordListAPIView(generics.GenericAPIView):
                 | Q(plan_id__icontains=search)
                 | Q(line_name__icontains=search)
                 | Q(line_number__icontains=search)
+                | Q(batches__machine__name__icontains=search)
+                | Q(batches__workflow_batch_no__icontains=search)
                 | Q(batches__batch_no__icontains=search)
             ).distinct()
         return queryset
 
-    def _build_records(self, stage: str, rows: list[ProductionBatch] | list[ProductionOrder]):
-        if stage == "PR":
-            return [self._build_order_record(order) for order in rows]
-        return [self._build_batch_record(batch) for batch in rows]  # AD, BL, GL all use batch records
+    def _build_records(self, stage: str, rows: list[ProductionOrder]):
+        return [self._build_order_record(order, stage=stage) for order in rows]
 
-    def _build_batch_record(self, batch: ProductionBatch):
-        order = batch.production_order
-        return {
-            "id": batch.id,
-            "order_id": order.id,
-            "production_id": order.production_id,
-            "stage": batch.stage,
-            "production_type": order.production_type,
-            "batch_no": batch.batch_no,
-            "production_date": order.production_date,
-            "shift": order.shift,
-            "line_no": self._format_batch_line(batch),
-            "start_date_time": batch.started_at,
-            "end_date_time": batch.completed_at,
-            "plan_id": self._format_plan_id(order.plan_id),
-            "status": batch.status,
-        }
-
-    def _build_order_record(self, order: ProductionOrder):
-        preferred_batch = self._get_preferred_batch(order)
+    def _build_order_record(self, order: ProductionOrder, stage: str = "PR"):
+        stage_batches = self._get_stage_batches(order, stage) if stage in {"AD", "BL", "GL"} else self._get_order_batches(order)
+        preferred_batch = self._get_preferred_stage_batch(stage_batches)
+        display_batch_no = self._resolve_batch_display_no(preferred_batch)
         return {
             "id": order.id,
             "order_id": order.id,
             "production_id": order.production_id,
-            "stage": "PR",
-            "production_type": order.production_type,
-            "batch_no": self._resolve_order_batch_no(order, preferred_batch),
+            "stage": stage,
+            "production_type": self._resolve_stage_production_type(order, stage),
+            "batch_no": display_batch_no,
+            "display_batch_no": display_batch_no,
+            "batch_count": len(stage_batches) if stage in {"AD", "BL", "GL"} else len(self._get_order_batches(order)),
             "production_date": order.production_date,
             "shift": order.shift,
             "line_no": self._format_order_line(order, preferred_batch),
-            "start_date_time": order.start_date_time,
-            "end_date_time": order.end_date_time,
+            "start_date_time": preferred_batch.started_at if preferred_batch and preferred_batch.started_at else order.start_date_time,
+            "end_date_time": self._resolve_stage_end_time(order, stage, stage_batches, preferred_batch),
             "plan_id": self._format_plan_id(order.plan_id),
-            "status": order.status,
+            "status": self._resolve_stage_status(order, stage, stage_batches, preferred_batch),
+            "workflow_status": self._get_stage_workflow_status(order, stage, stage_batches),
         }
 
     def _format_plan_id(self, value):
@@ -1128,25 +1120,87 @@ class ProductionStageRecordListAPIView(generics.GenericAPIView):
             return preferred_batch.machine.name
         return "-"
 
-    def _get_preferred_batch(self, order: ProductionOrder):
-        stage_priority = {
-            ProductionBatch.Stage.GL: 0,
-            ProductionBatch.Stage.BL: 1,
-            ProductionBatch.Stage.AD: 2,
-        }
-        batches = list(order.batches.all())
+    def _get_order_batches(self, order: ProductionOrder):
+        prefetched_batches = getattr(order, "_prefetched_objects_cache", {}).get("batches")
+        if prefetched_batches is not None:
+            return list(prefetched_batches)
+        return list(order.batches.all())
+
+    def _get_stage_batches(self, order: ProductionOrder, stage: str):
+        return [batch for batch in self._get_order_batches(order) if batch.stage == stage]
+
+    def _get_preferred_stage_batch(self, batches: list[ProductionBatch]):
         if not batches:
             return None
-        batches.sort(key=lambda batch: (stage_priority.get(batch.stage, 99), -(batch.id or 0)))
-        return batches[0]
+        return sorted(
+            batches,
+            key=lambda batch: (
+                self.BATCH_STATUS_PRIORITY.get(batch.status, 99),
+                -(batch.id or 0),
+            ),
+        )[0]
 
-    def _resolve_order_batch_no(self, order: ProductionOrder, preferred_batch: ProductionBatch | None = None):
-        batch_number = str(order.batch_number or "").strip()
-        if batch_number:
-            return batch_number
-        if preferred_batch and preferred_batch.batch_no:
-            return preferred_batch.batch_no
-        return None
+    def _get_stage_workflow_status(self, order: ProductionOrder, stage: str, stage_batches: list[ProductionBatch]):
+        if order.status in {"PLAN_COMPLETED", "CLOSED"}:
+            return "COMPLETED"
+
+        if stage == "PR":
+            all_batches = self._get_order_batches(order)
+            if not all_batches:
+                return "PL"
+            preferred_batch = self._get_preferred_stage_batch(all_batches)
+            if preferred_batch is None:
+                return "PL"
+            if preferred_batch.status == ProductionBatch.BatchStatus.COMPLETED:
+                return self.NEXT_WORKFLOW_STATUS_BY_STAGE.get(preferred_batch.stage, preferred_batch.stage)
+            return preferred_batch.stage
+
+        if stage == ProductionBatch.Stage.AD and not stage_batches:
+            return ProductionBatch.Stage.AD
+        if any(batch.status in {ProductionBatch.BatchStatus.IN_PROGRESS, ProductionBatch.BatchStatus.PENDING} for batch in stage_batches):
+            return stage
+        if stage_batches and all(batch.status == ProductionBatch.BatchStatus.COMPLETED for batch in stage_batches):
+            next_stage = self.NEXT_WORKFLOW_STATUS_BY_STAGE.get(stage, stage)
+            if next_stage == "COMPLETED":
+                return "COMPLETED"
+            if self._get_stage_batches(order, next_stage):
+                return next_stage
+        return stage
+
+    def _resolve_stage_end_time(
+        self,
+        order: ProductionOrder,
+        stage: str,
+        stage_batches: list[ProductionBatch],
+        preferred_batch: ProductionBatch | None = None,
+    ):
+        if stage == "PR":
+            return order.end_date_time or (preferred_batch.completed_at if preferred_batch else None)
+        if any(batch.status in {ProductionBatch.BatchStatus.IN_PROGRESS, ProductionBatch.BatchStatus.PENDING} for batch in stage_batches):
+            return None
+        completed_times = [batch.completed_at for batch in stage_batches if batch.completed_at is not None]
+        return max(completed_times) if completed_times else None
+
+    def _resolve_stage_status(
+        self,
+        order: ProductionOrder,
+        stage: str,
+        stage_batches: list[ProductionBatch],
+        preferred_batch: ProductionBatch | None = None,
+    ):
+        if stage in {ProductionBatch.Stage.AD, "PR"}:
+            return order.status
+        return preferred_batch.status if preferred_batch is not None else order.status
+
+    def _resolve_stage_production_type(self, order: ProductionOrder, stage: str):
+        if stage in self.STAGE_PRODUCTION_TYPE_BY_STAGE:
+            return self.STAGE_PRODUCTION_TYPE_BY_STAGE[stage]
+        return order.production_type
+
+    def _resolve_batch_display_no(self, preferred_batch: ProductionBatch | None = None):
+        if preferred_batch is None:
+            return None
+        return resolve_workflow_batch_no(preferred_batch)
 
 
 class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIView):
@@ -1155,14 +1209,19 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
     filterset_map = {"stage": "stage", "status": "status"}
 
     def get_queryset(self):
+        order_batch_prefetch = Prefetch(
+            "production_order__batches",
+            queryset=ProductionBatch.objects.select_related("machine").order_by("-created_at"),
+        )
         return ProductionBatch.objects.filter(
             production_order_id=self.kwargs["order_pk"]
-        ).select_related("machine", "bom_variant", "operator").prefetch_related(
+        ).select_related("production_order", "machine", "bom_variant", "operator").prefetch_related(
+            order_batch_prefetch,
             "weight_entries__item",
             "weight_entries__bom_component__item",
             "weight_entries__bom_component__product_subtype__category",
             "regrind_entries__item",
-        ).order_by("stage", "created_at")
+        ).order_by("stage", "-created_at")
 
     def list(self, request, *args, **kwargs):
         qs = self.filter_queryset(self.get_queryset())
@@ -1189,6 +1248,10 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
             status=ProductionBatch.BatchStatus.PENDING,
         )
 
+        workflow_batch_no = str(order.batch_number or "").strip()
+        if not workflow_batch_no and batch.batch_no:
+            ProductionOrder.objects.filter(pk=order.pk).update(batch_number=batch.batch_no)
+
         if bom_variant_id:
             bom = bom_variant_queryset().get(pk=bom_variant_id)
             for component in bom.components.filter(is_active=True):
@@ -1203,7 +1266,13 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
                 )
 
         batch.refresh_from_db()
-        full_batch = ProductionBatch.objects.prefetch_related(
+        full_batch = ProductionBatch.objects.select_related(
+            "production_order", "machine", "bom_variant", "operator"
+        ).prefetch_related(
+            Prefetch(
+                "production_order__batches",
+                queryset=ProductionBatch.objects.select_related("machine").order_by("-created_at"),
+            ),
             "weight_entries__item",
             "weight_entries__bom_component__item",
             "weight_entries__bom_component__product_subtype__category",
@@ -1233,11 +1302,6 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
         ProductionBatch.Stage.BL: ProductionBatch.Stage.GL,
     }
 
-    NEXT_PRODUCTION_TYPE_BY_STAGE = {
-        ProductionBatch.Stage.AD: "WPE Blend Production",
-        ProductionBatch.Stage.BL: "WPE Granulated Blend Production",
-    }
-
     @staticmethod
     def _sanitize_scancode_token(value: str) -> str:
         token = re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
@@ -1264,40 +1328,48 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
         primary_token = self._sanitize_scancode_token(batch.batch_no or batch.production_order.production_id or "PRD")
         return f"BIN-{primary_token}/ITEM-OUT{sequence:03d}/REF-{captured_at.strftime('%Y%m%d%H%M%S')}"
 
-    def _create_next_stage_batch(self, batch: ProductionBatch):
-        next_stage = self.NEXT_STAGE_BY_STAGE.get(batch.stage)
-        if not next_stage:
-            return None
+    def _seed_batch_weight_entries(self, batch: ProductionBatch, entered_by):
+        if not batch.bom_variant_id:
+            return
+
+        for component in batch.bom_variant.components.filter(is_active=True):
+            BatchWeightEntry.objects.get_or_create(
+                batch=batch,
+                bom_component=component,
+                defaults={
+                    "item": component.item,
+                    "target_weight_grams": component.target_weight_grams,
+                    "entered_by": entered_by,
+                }
+            )
+
+    def _create_stage_handoff_batch(
+        self,
+        source_batch: ProductionBatch,
+        next_stage: str,
+        transitioned_at,
+    ):
+        workflow_batch_no = resolve_workflow_batch_no(source_batch)
+        existing_batch = ProductionBatch.objects.filter(
+            production_order=source_batch.production_order,
+            stage=next_stage,
+            workflow_batch_no=workflow_batch_no,
+        ).order_by("-created_at").first()
+        if existing_batch is not None:
+            return existing_batch
 
         next_batch = ProductionBatch.objects.create(
-            production_order=batch.production_order,
-            bom_variant=batch.bom_variant,
+            production_order=source_batch.production_order,
+            bom_variant=source_batch.bom_variant,
             stage=next_stage,
-            machine=batch.machine,
-            status=ProductionBatch.BatchStatus.PENDING,
-            operator=batch.operator,
-            notes=f"Auto-created from {batch.batch_no} after {batch.stage} completion.",
+            machine=source_batch.machine,
+            workflow_batch_no=workflow_batch_no or None,
+            status=ProductionBatch.BatchStatus.IN_PROGRESS,
+            started_at=transitioned_at,
+            operator=self.request.user,
+            notes=f"Moved from {source_batch.stage} batch {source_batch.batch_no}.",
         )
-
-        if batch.bom_variant_id:
-            for component in batch.bom_variant.components.filter(is_active=True):
-                BatchWeightEntry.objects.get_or_create(
-                    batch=next_batch,
-                    bom_component=component,
-                    defaults={
-                        "item": component.item,
-                        "target_weight_grams": component.target_weight_grams,
-                        "entered_by": self.request.user,
-                    }
-                )
-
-        next_production_type = self.NEXT_PRODUCTION_TYPE_BY_STAGE.get(batch.stage)
-        if next_production_type:
-            updates = {"production_type": next_production_type}
-            if next_batch.batch_no:
-                updates["batch_number"] = next_batch.batch_no
-            ProductionOrder.objects.filter(pk=batch.production_order_id).update(**updates)
-
+        self._seed_batch_weight_entries(next_batch, self.request.user)
         return next_batch
 
     def _create_output_capture(self, batch: ProductionBatch):
@@ -1350,11 +1422,14 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
             return success_response(message=f"{len(invalid)} weight entry(ies) are out of valid range.", data={"invalid_count": len(invalid)}, status_code=400)
 
         with transaction.atomic():
+            transitioned_at = timezone.now()
             batch.status = ProductionBatch.BatchStatus.COMPLETED
-            batch.completed_at = timezone.now()
+            batch.completed_at = transitioned_at
             batch.save(update_fields=["status", "completed_at", "updated_at"])
             self._create_output_capture(batch)
-            self._create_next_stage_batch(batch)
+            next_stage = self.NEXT_STAGE_BY_STAGE.get(batch.stage)
+            if next_stage:
+                self._create_stage_handoff_batch(batch, next_stage=next_stage, transitioned_at=transitioned_at)
 
         return success_response(message="Batch confirmed and completed.", data=ProductionBatchSerializer(batch).data)
 

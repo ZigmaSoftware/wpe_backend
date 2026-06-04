@@ -20,6 +20,7 @@ from .models import (
     ProfileSizeMaster,
     ProductionMachine,
     WorkCentreCreationMaster,
+    resolve_workflow_batch_no,
 )
 
 
@@ -187,6 +188,7 @@ class ProductionOrderDetailSerializer(serializers.ModelSerializer):
             "extra_form_data",
             "created_by",
             "updated_by",
+            "extra_form_data",
             "created_at",
             "updated_at",
             "material_movements",
@@ -202,6 +204,7 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
     """Serializer for creating and updating Production Orders"""
     production_type = serializers.CharField()
     materials = serializers.ListField(child=serializers.DictField(), required=False, write_only=True)
+    extra_form_data = serializers.JSONField(required=False)
 
     class Meta:
         model = ProductionOrder
@@ -698,17 +701,55 @@ class ProductionBatchSerializer(serializers.ModelSerializer):
     bom_variant_code = serializers.CharField(source="bom_variant.variant_code", read_only=True, default=None)
     bom_variant_name = serializers.CharField(source="bom_variant.name", read_only=True, default=None)
     operator_username = serializers.CharField(source="operator.username", read_only=True, default=None)
+    display_batch_no = serializers.SerializerMethodField()
+    display_status = serializers.SerializerMethodField()
     total_weight_grams = serializers.SerializerMethodField()
     all_weights_valid = serializers.SerializerMethodField()
 
+    NEXT_STAGE_BY_STAGE = {
+        ProductionBatch.Stage.AD: ProductionBatch.Stage.BL,
+        ProductionBatch.Stage.BL: ProductionBatch.Stage.GL,
+    }
+    STAGE_STATUS_LABELS = {
+        ProductionBatch.Stage.BL: "BL - Blending",
+        ProductionBatch.Stage.GL: "GL - Granulation",
+    }
+
     class Meta:
         model = ProductionBatch
-        fields = ("id", "batch_no", "production_order", "bom_variant", "bom_variant_code", "bom_variant_name",
+        fields = ("id", "batch_no", "display_batch_no", "display_status", "production_order", "bom_variant", "bom_variant_code", "bom_variant_name",
                   "stage", "machine", "machine_name", "status",
                   "started_at", "completed_at", "operator", "operator_username",
                   "notes", "total_weight_grams", "all_weights_valid",
                   "weight_entries", "regrind_entries", "created_at", "updated_at")
         read_only_fields = ("id", "batch_no", "created_at", "updated_at")
+
+    def get_display_batch_no(self, obj):
+        return resolve_workflow_batch_no(obj)
+
+    def get_display_status(self, obj):
+        if obj.status != ProductionBatch.BatchStatus.COMPLETED:
+            return obj.status
+
+        next_stage = self.NEXT_STAGE_BY_STAGE.get(obj.stage)
+        if not next_stage:
+            return obj.status
+
+        workflow_batch_no = self.get_display_batch_no(obj)
+        order_batches = getattr(obj.production_order, "_prefetched_objects_cache", {}).get("batches")
+        if order_batches is None:
+            order_batches = obj.production_order.batches.all()
+
+        has_next_stage_batch = any(
+            sibling.pk != obj.pk
+            and sibling.stage == next_stage
+            and resolve_workflow_batch_no(sibling, sibling_batches=order_batches) == workflow_batch_no
+            for sibling in order_batches
+        )
+        if has_next_stage_batch:
+            return self.STAGE_STATUS_LABELS.get(next_stage, next_stage)
+
+        return obj.status
 
     def get_total_weight_grams(self, obj):
         entries = obj.weight_entries.all()
@@ -785,6 +826,8 @@ class ProductionStageRecordSerializer(serializers.Serializer):
     stage = serializers.CharField()
     production_type = serializers.CharField()
     batch_no = serializers.CharField(allow_blank=True, allow_null=True)
+    display_batch_no = serializers.CharField(allow_blank=True, allow_null=True)
+    batch_count = serializers.IntegerField()
     production_date = serializers.DateField()
     shift = serializers.CharField(allow_blank=True, allow_null=True)
     line_no = serializers.CharField()
@@ -792,3 +835,4 @@ class ProductionStageRecordSerializer(serializers.Serializer):
     end_date_time = serializers.DateTimeField(allow_null=True)
     plan_id = serializers.CharField(allow_blank=True, allow_null=True)
     status = serializers.CharField()
+    workflow_status = serializers.CharField()
