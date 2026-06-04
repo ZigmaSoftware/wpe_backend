@@ -1264,16 +1264,30 @@ class ProductionBatch(models.Model):
         ordering = ["stage", "-created_at"]
 
     def save(self, *args, **kwargs):
-        super().save(*args, **kwargs)
-        updates = {}
-        if not self.batch_no:
-            self.batch_no = f"BATCH-{self.pk:08d}"
-            updates["batch_no"] = self.batch_no
-        if not self.workflow_batch_no:
-            self.workflow_batch_no = self.batch_no
-            updates["workflow_batch_no"] = self.workflow_batch_no
-        if updates:
-            ProductionBatch.objects.filter(pk=self.pk).update(**updates)
+        with transaction.atomic():
+            if (
+                not str(self.batch_no or "").strip()
+                and self.stage == self.Stage.AD
+                and not str(self.workflow_batch_no or "").strip()
+            ):
+                generated_workflow_batch_no = build_workflow_batch_no_for_order(
+                    self.production_order,
+                    exclude_batch_id=self.pk,
+                )
+                self.batch_no = generated_workflow_batch_no
+                self.workflow_batch_no = generated_workflow_batch_no
+
+            super().save(*args, **kwargs)
+
+            updates = {}
+            if not str(self.batch_no or "").strip():
+                self.batch_no = f"BATCH-{self.pk:08d}"
+                updates["batch_no"] = self.batch_no
+            if not str(self.workflow_batch_no or "").strip():
+                self.workflow_batch_no = self.batch_no
+                updates["workflow_batch_no"] = self.workflow_batch_no
+            if updates:
+                ProductionBatch.objects.filter(pk=self.pk).update(**updates)
 
     def __str__(self):
         return self.batch_no or f"Batch-{self.pk}"
@@ -1290,6 +1304,48 @@ def _extract_workflow_batch_no_from_notes(notes: str) -> str:
 def _batch_anchor_timestamp(batch: ProductionBatch) -> float:
     anchor = getattr(batch, "completed_at", None) or getattr(batch, "started_at", None) or getattr(batch, "created_at", None)
     return anchor.timestamp() if anchor else 0.0
+
+
+def _normalize_workflow_batch_prefix_token(value: str, *, fallback: str) -> str:
+    token = "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+    if not token:
+        token = "".join(ch for ch in str(fallback or "").upper() if ch.isalnum()) or "PRD"
+    return token[:20]
+
+
+def build_workflow_batch_no_for_order(order: ProductionOrder, *, exclude_batch_id: int | None = None) -> str:
+    prefix_token = _normalize_workflow_batch_prefix_token(
+        order.production_id,
+        fallback=f"PRD{order.pk or ''}",
+    )
+    sequence_pattern = re.compile(rf"^BATCH{re.escape(prefix_token)}-(\d{{4}})$", re.IGNORECASE)
+    sibling_queryset = (
+        ProductionBatch.objects.select_for_update()
+        .filter(production_order=order)
+        .order_by("-created_at", "-id")
+    )
+    if exclude_batch_id is not None:
+        sibling_queryset = sibling_queryset.exclude(pk=exclude_batch_id)
+    sibling_batches = list(sibling_queryset)
+
+    distinct_workflow_batch_nos: set[str] = set()
+    highest_sequence = 0
+    for sibling in sibling_batches:
+        workflow_batch_no = (
+            resolve_workflow_batch_no(sibling, sibling_batches=sibling_batches)
+            or str(getattr(sibling, "batch_no", "") or "").strip()
+        )
+        if not workflow_batch_no:
+            continue
+
+        normalized_workflow_batch_no = workflow_batch_no.upper()
+        distinct_workflow_batch_nos.add(normalized_workflow_batch_no)
+        match = sequence_pattern.match(normalized_workflow_batch_no)
+        if match:
+            highest_sequence = max(highest_sequence, int(match.group(1)))
+
+    next_sequence = max(highest_sequence, len(distinct_workflow_batch_nos)) + 1 if distinct_workflow_batch_nos else 1
+    return f"BATCH{prefix_token}-{next_sequence:04d}"
 
 
 def _resolve_related_batches(batch: ProductionBatch, sibling_batches=None) -> list[ProductionBatch]:
@@ -1409,15 +1465,19 @@ class BatchWeightEntry(models.Model):
         global_min = Decimal(WEIGHT_MIN_GRAMS)
         global_max = Decimal(WEIGHT_MAX_GRAMS)
         validation_unit = "g"
+        recipe_validation_unit = component_unit
 
-        # Some legacy recipes still store gram-scale values even when the unit label is "kgs".
-        # Only convert the global thresholds when the recipe bounds themselves are clearly kg-scale.
-        if component_unit == "kg":
-            kg_scaled_global_max = convert_gram_limit_to_component_unit(WEIGHT_MAX_GRAMS, component_unit)
-            if recipe_max <= kg_scaled_global_max:
-                global_min = convert_gram_limit_to_component_unit(WEIGHT_MIN_GRAMS, component_unit)
-                global_max = kg_scaled_global_max
-                validation_unit = component_unit
+        # Some recipes store kg-scale values while the persisted unit label is still "g".
+        # Infer kg-scale validation whenever the recipe bounds fit inside the kg-converted
+        # global envelope, so values like 4.400 are compared against 0.195-9.205kg instead
+        # of the raw 195-9205 gram limits.
+        kg_scaled_global_min = convert_gram_limit_to_component_unit(WEIGHT_MIN_GRAMS, "kg")
+        kg_scaled_global_max = convert_gram_limit_to_component_unit(WEIGHT_MAX_GRAMS, "kg")
+        if recipe_max <= kg_scaled_global_max:
+            global_min = kg_scaled_global_min
+            global_max = kg_scaled_global_max
+            validation_unit = "kg"
+            recipe_validation_unit = "kg"
         errors = []
         if entered_weight < global_min:
             errors.append(f"Below global min {format_weight_value(global_min)}{validation_unit}.")
@@ -1425,11 +1485,11 @@ class BatchWeightEntry(models.Model):
             errors.append(f"Exceeds global max {format_weight_value(global_max)}{validation_unit}.")
         if entered_weight < recipe_min:
             errors.append(
-                f"Below recipe min {format_weight_value(self.bom_component.min_weight_grams)}{component_unit}."
+                f"Below recipe min {format_weight_value(self.bom_component.min_weight_grams)}{recipe_validation_unit}."
             )
         if entered_weight > recipe_max:
             errors.append(
-                f"Exceeds recipe max {format_weight_value(self.bom_component.max_weight_grams)}{component_unit}."
+                f"Exceeds recipe max {format_weight_value(self.bom_component.max_weight_grams)}{recipe_validation_unit}."
             )
         self.is_valid = len(errors) == 0
         self.validation_notes = " ".join(errors)

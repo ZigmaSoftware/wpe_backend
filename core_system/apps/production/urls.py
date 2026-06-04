@@ -28,6 +28,7 @@ from .views import (
     BOMVariantVerifyPasswordAPIView,
     BOMVariantRecipeAPIView,
     ProductionBatchListCreateAPIView,
+    ProductionBatchDestroyAPIView,
     ProductionStageRecordListAPIView,
     ProductionBatchStartAPIView,
     ProductionBatchConfirmAPIView,
@@ -81,6 +82,8 @@ urlpatterns = [
     # Batches
     path("orders/<int:order_pk>/batches/", ProductionBatchListCreateAPIView.as_view(), name="order-batches"),
     path("orders/<int:order_pk>/batches", ProductionBatchListCreateAPIView.as_view(), name="order-batches-ns"),
+    path("orders/<int:order_pk>/batches/<int:pk>/", ProductionBatchDestroyAPIView.as_view(), name="batch-delete"),
+    path("orders/<int:order_pk>/batches/<int:pk>", ProductionBatchDestroyAPIView.as_view(), name="batch-delete-ns"),
     path("orders/<int:order_pk>/batches/<int:pk>/start/", ProductionBatchStartAPIView.as_view(), name="batch-start"),
     path("orders/<int:order_pk>/batches/<int:pk>/confirm/", ProductionBatchConfirmAPIView.as_view(), name="batch-confirm"),
     path("orders/<int:order_pk>/output-captures/", ProductionOutputCaptureListAPIView.as_view(), name="output-captures"),
