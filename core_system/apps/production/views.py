@@ -999,7 +999,7 @@ class ProductionStageRecordListAPIView(generics.GenericAPIView):
     NEXT_WORKFLOW_STATUS_BY_STAGE = {
         ProductionBatch.Stage.AD: ProductionBatch.Stage.BL,
         ProductionBatch.Stage.BL: ProductionBatch.Stage.GL,
-        ProductionBatch.Stage.GL: "COMPLETED",
+        ProductionBatch.Stage.GL: "PR",
     }
 
     def get(self, request, *args, **kwargs):
@@ -1044,9 +1044,17 @@ class ProductionStageRecordListAPIView(generics.GenericAPIView):
             ).distinct()
         elif stage in {ProductionBatch.Stage.BL, ProductionBatch.Stage.GL}:
             queryset = queryset.filter(batches__stage=stage).distinct()
+        elif stage == "PR":
+            queryset = queryset.filter(
+                batches__stage=ProductionBatch.Stage.GL,
+                batches__status=ProductionBatch.BatchStatus.COMPLETED,
+            ).distinct()
         if status:
             if stage in {ProductionBatch.Stage.BL, ProductionBatch.Stage.GL}:
                 queryset = queryset.filter(batches__stage=stage, batches__status=status).distinct()
+            elif stage == "PR":
+                if status != "IN_PROGRESS":
+                    queryset = queryset.none()
             else:
                 queryset = queryset.filter(status=status)
         if date_from:
@@ -1147,19 +1155,11 @@ class ProductionStageRecordListAPIView(generics.GenericAPIView):
         )[0]
 
     def _get_stage_workflow_status(self, order: ProductionOrder, stage: str, stage_batches: list[ProductionBatch]):
-        if order.status in {"PLAN_COMPLETED", "CLOSED"}:
+        if stage != "PR" and order.status in {"PLAN_COMPLETED", "CLOSED"}:
             return "COMPLETED"
 
         if stage == "PR":
-            all_batches = self._get_order_batches(order)
-            if not all_batches:
-                return "PL"
-            preferred_batch = self._get_preferred_stage_batch(all_batches)
-            if preferred_batch is None:
-                return "PL"
-            if preferred_batch.status == ProductionBatch.BatchStatus.COMPLETED:
-                return self.NEXT_WORKFLOW_STATUS_BY_STAGE.get(preferred_batch.stage, preferred_batch.stage)
-            return preferred_batch.stage
+            return "PR"
 
         if stage == ProductionBatch.Stage.AD and not stage_batches:
             return ProductionBatch.Stage.AD
@@ -1167,6 +1167,8 @@ class ProductionStageRecordListAPIView(generics.GenericAPIView):
             return stage
         if stage_batches and all(batch.status == ProductionBatch.BatchStatus.COMPLETED for batch in stage_batches):
             next_stage = self.NEXT_WORKFLOW_STATUS_BY_STAGE.get(stage, stage)
+            if next_stage == "PR":
+                return "PR"
             if next_stage == "COMPLETED":
                 return "COMPLETED"
             if self._get_stage_batches(order, next_stage):
@@ -1194,7 +1196,9 @@ class ProductionStageRecordListAPIView(generics.GenericAPIView):
         stage_batches: list[ProductionBatch],
         preferred_batch: ProductionBatch | None = None,
     ):
-        if stage in {ProductionBatch.Stage.AD, "PR"}:
+        if stage == "PR":
+            return "IN_PROGRESS"
+        if stage == ProductionBatch.Stage.AD:
             return order.status
         return preferred_batch.status if preferred_batch is not None else order.status
 
@@ -1214,6 +1218,11 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
     serializer_class = ProductionBatchSerializer
     filterset_map = {"stage": "stage", "status": "status"}
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["requested_stage"] = self.request.query_params.get("stage")
+        return context
+
     def get_queryset(self):
         order_batch_prefetch = Prefetch(
             "production_order__batches",
@@ -1231,10 +1240,10 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
 
     def list(self, request, *args, **kwargs):
         qs = self.filter_queryset(self.get_queryset())
-        return success_response(message="Batches fetched.", data=list(ProductionBatchSerializer(qs, many=True).data))
+        serializer = self.get_serializer(qs, many=True)
+        return success_response(message="Batches fetched.", data=list(serializer.data))
 
     def post(self, request, *args, **kwargs):
-        order = get_object_or_404(ProductionOrder, pk=self.kwargs["order_pk"])
         stage = request.data.get("stage")
         valid_stages = [s[0] for s in ProductionBatch.Stage.choices]
         if stage not in valid_stages:
@@ -1244,32 +1253,38 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
         machine_id = request.data.get("machine") or None
         notes = request.data.get("notes", "")
 
-        batch = ProductionBatch.objects.create(
-            production_order=order,
-            stage=stage,
-            bom_variant_id=bom_variant_id,
-            machine_id=machine_id,
-            notes=notes,
-            operator=request.user,
-            status=ProductionBatch.BatchStatus.PENDING,
-        )
+        with transaction.atomic():
+            order = get_object_or_404(
+                ProductionOrder.objects.select_for_update(),
+                pk=self.kwargs["order_pk"],
+            )
 
-        workflow_batch_no = str(order.batch_number or "").strip()
-        if not workflow_batch_no and batch.batch_no:
-            ProductionOrder.objects.filter(pk=order.pk).update(batch_number=batch.batch_no)
+            batch = ProductionBatch.objects.create(
+                production_order=order,
+                stage=stage,
+                bom_variant_id=bom_variant_id,
+                machine_id=machine_id,
+                notes=notes,
+                operator=request.user,
+                status=ProductionBatch.BatchStatus.PENDING,
+            )
 
-        if bom_variant_id:
-            bom = bom_variant_queryset().get(pk=bom_variant_id)
-            for component in bom.components.filter(is_active=True):
-                BatchWeightEntry.objects.get_or_create(
-                    batch=batch,
-                    bom_component=component,
-                    defaults={
-                        "item": component.item,
-                        "target_weight_grams": component.target_weight_grams,
-                        "entered_by": request.user,
-                    }
-                )
+            workflow_batch_no = str(order.batch_number or "").strip()
+            if not workflow_batch_no and batch.batch_no:
+                ProductionOrder.objects.filter(pk=order.pk).update(batch_number=batch.batch_no)
+
+            if bom_variant_id:
+                bom = bom_variant_queryset().get(pk=bom_variant_id)
+                for component in bom.components.filter(is_active=True):
+                    BatchWeightEntry.objects.get_or_create(
+                        batch=batch,
+                        bom_component=component,
+                        defaults={
+                            "item": component.item,
+                            "target_weight_grams": component.target_weight_grams,
+                            "entered_by": request.user,
+                        }
+                    )
 
         batch.refresh_from_db()
         full_batch = ProductionBatch.objects.select_related(
@@ -1285,6 +1300,66 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
             "regrind_entries__item"
         ).get(pk=batch.pk)
         return success_response(message="Batch created.", data=ProductionBatchSerializer(full_batch).data, status_code=201)
+
+
+class ProductionBatchDestroyAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _get_batch_capture(batch: ProductionBatch):
+        try:
+            return batch.output_capture
+        except ProductionOutputCapture.DoesNotExist:
+            return None
+
+    def delete(self, request, order_pk, pk, *args, **kwargs):
+        order = get_object_or_404(ProductionOrder, pk=order_pk)
+        target_batch = get_object_or_404(
+            ProductionBatch.objects.select_related("production_order"),
+            pk=pk,
+            production_order_id=order_pk,
+        )
+
+        with transaction.atomic():
+            order_batches = list(
+                order.batches.select_related("machine", "output_capture").order_by("-created_at", "-id")
+            )
+            workflow_batch_no = resolve_workflow_batch_no(target_batch, sibling_batches=order_batches) or str(
+                target_batch.batch_no or ""
+            )
+            related_batches = [
+                batch
+                for batch in order_batches
+                if resolve_workflow_batch_no(batch, sibling_batches=order_batches) == workflow_batch_no
+            ]
+            related_batch_ids = [batch.id for batch in related_batches]
+
+            for batch in related_batches:
+                capture = self._get_batch_capture(batch)
+                if batch.stage == ProductionBatch.Stage.BL:
+                    ProductionBatchConfirmAPIView._release_assigned_bin(capture)
+                elif batch.stage == ProductionBatch.Stage.GL:
+                    ProductionBatchConfirmAPIView._release_assigned_bag(capture)
+
+            ProductionBatch.objects.filter(production_order_id=order_pk, id__in=related_batch_ids).delete()
+
+            remaining_batches = list(
+                order.batches.select_related("machine").exclude(id__in=related_batch_ids).order_by("-created_at", "-id")
+            )
+            next_batch_number = (
+                resolve_workflow_batch_no(remaining_batches[0], sibling_batches=remaining_batches)
+                if remaining_batches
+                else ""
+            )
+            ProductionOrder.objects.filter(pk=order.pk).update(batch_number=next_batch_number or None)
+
+        return success_response(
+            message="Batch deleted.",
+            data={
+                "workflow_batch_no": workflow_batch_no,
+                "deleted_batch_ids": related_batch_ids,
+            },
+        )
 
 
 class ProductionBatchStartAPIView(generics.GenericAPIView):
@@ -1331,8 +1406,11 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
         )
 
     def _build_output_scancode(self, batch: ProductionBatch, sequence: int, captured_at):
-        primary_token = self._sanitize_scancode_token(batch.batch_no or batch.production_order.production_id or "PRD")
-        return f"BIN-{primary_token}/ITEM-OUT{sequence:03d}/REF-{captured_at.strftime('%Y%m%d%H%M%S')}"
+        return ProductionOutputCaptureListAPIView._build_stage_output_scancode(
+            batch,
+            sequence,
+            captured_at,
+        )
 
     def _seed_batch_weight_entries(self, batch: ProductionBatch, entered_by):
         if not batch.bom_variant_id:
@@ -1384,7 +1462,7 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
 
         existing_capture = getattr(batch, "output_capture", None)
         if existing_capture is not None:
-            return existing_capture
+            return ProductionOutputCaptureListAPIView._ensure_capture_scancode_format(existing_capture)
 
         entries = self._get_required_weight_entries(batch)
         captured_at = batch.completed_at or timezone.now()
@@ -1433,6 +1511,28 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
         assigned_bin.save(update_fields=["current_status", "current_material", "updated_at"])
         return assigned_bin
 
+    @staticmethod
+    def _release_assigned_bag(capture: ProductionOutputCapture | None):
+        if capture is None:
+            return None
+
+        assigned_bag_code = str(capture.binlot or "").strip()
+        source_batch_code = str(getattr(capture.source_batch, "batch_no", "") or "").strip()
+        if not assigned_bag_code or assigned_bag_code == source_batch_code:
+            return None
+
+        assigned_bag = (
+            BagCreationMaster.objects.select_for_update()
+            .filter(code__iexact=assigned_bag_code)
+            .first()
+        )
+        if assigned_bag is None:
+            return None
+
+        assigned_bag.current_status = BagCreationMaster.BagStatus.FREE
+        assigned_bag.save(update_fields=["current_status", "updated_at"])
+        return assigned_bag
+
     def post(self, request, order_pk, pk, *args, **kwargs):
         batch = get_object_or_404(
             ProductionBatch.objects.select_related("output_capture").prefetch_related("weight_entries"),
@@ -1441,10 +1541,14 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
         if batch.status != ProductionBatch.BatchStatus.IN_PROGRESS:
             return success_response(message="Only IN_PROGRESS batches can be confirmed.", data={}, status_code=400)
 
-        if batch.stage == ProductionBatch.Stage.BL:
+        if batch.stage in {ProductionBatch.Stage.BL, ProductionBatch.Stage.GL}:
             if getattr(batch, "output_capture", None) is None:
                 return success_response(
-                    message="Create the BL captured output list before confirming this batch.",
+                    message=(
+                        "Create the BL captured output list before confirming this batch."
+                        if batch.stage == ProductionBatch.Stage.BL
+                        else "Create the GL captured output list before confirming this batch."
+                    ),
                     data={},
                     status_code=400,
                 )
@@ -1461,6 +1565,7 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
         with transaction.atomic():
             transitioned_at = timezone.now()
             bl_capture = None
+            gl_capture = None
             if batch.stage == ProductionBatch.Stage.BL:
                 bl_capture = (
                     ProductionOutputCapture.objects.select_for_update()
@@ -1474,6 +1579,19 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
                         data={},
                         status_code=400,
                     )
+            elif batch.stage == ProductionBatch.Stage.GL:
+                gl_capture = (
+                    ProductionOutputCapture.objects.select_for_update()
+                    .filter(source_batch=batch)
+                    .first()
+                )
+                gl_capture = ProductionOutputCaptureListAPIView._ensure_gl_capture_bag_assignment(gl_capture, batch)
+                if gl_capture is None:
+                    return success_response(
+                        message="No free bag is available for assignment.",
+                        data={},
+                        status_code=400,
+                    )
             batch.status = ProductionBatch.BatchStatus.COMPLETED
             batch.completed_at = transitioned_at
             batch.save(update_fields=["status", "completed_at", "updated_at"])
@@ -1483,6 +1601,8 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
                 self._create_stage_handoff_batch(batch, next_stage=next_stage, transitioned_at=transitioned_at)
             if batch.stage == ProductionBatch.Stage.BL:
                 self._release_assigned_bin(bl_capture)
+            elif batch.stage == ProductionBatch.Stage.GL:
+                self._release_assigned_bag(gl_capture)
 
         return success_response(message="Batch confirmed and completed.", data=ProductionBatchSerializer(batch).data)
 
@@ -1515,9 +1635,41 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
         return f"{batch.stage}:{batch.id}:{weight_kg:.3f}:{captured_at.strftime('%Y%m%d%H%M%S')}"
 
     @staticmethod
-    def _build_manual_output_scancode(batch: ProductionBatch, sequence: int, captured_at):
-        primary_token = "".join(ch for ch in (batch.batch_no or batch.production_order.production_id or "PRD").upper() if ch.isalnum()) or "PRD"
-        return f"BIN-{primary_token}/ITEM-OUT{sequence:03d}/REF-{captured_at.strftime('%Y%m%d%H%M%S')}"
+    def _sanitize_scancode_token(value: str) -> str:
+        token = re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+        return token or "NA"
+
+    @staticmethod
+    def _resolve_workflow_batch_suffix(batch: ProductionBatch) -> str:
+        workflow_batch_no = resolve_workflow_batch_no(batch) or str(batch.batch_no or "")
+        match = re.search(r"(\d+)(?!.*\d)", workflow_batch_no)
+        if match:
+            return match.group(1)[-2:].zfill(2)
+        return "00"
+
+    @classmethod
+    def _build_stage_output_scancode(cls, batch: ProductionBatch, _sequence: int, captured_at):
+        production_token = cls._sanitize_scancode_token(batch.production_order.production_id or "PRD")
+        stage_token = cls._sanitize_scancode_token(batch.stage or "ST")
+        localized_captured_at = timezone.localtime(captured_at) if timezone.is_aware(captured_at) else captured_at
+        batch_suffix = cls._resolve_workflow_batch_suffix(batch)
+        return f"{production_token}{stage_token}{localized_captured_at.strftime('%d%m%Y%H%M')}{batch_suffix}"
+
+    @classmethod
+    def _ensure_capture_scancode_format(cls, capture: ProductionOutputCapture):
+        source_batch = getattr(capture, "source_batch", None)
+        if source_batch is None:
+            return capture
+
+        expected_scancode = cls._build_stage_output_scancode(
+            source_batch,
+            capture.sequence,
+            capture.captured_at,
+        )
+        if capture.scancode_id != expected_scancode:
+            capture.scancode_id = expected_scancode
+            capture.save(update_fields=["scancode_id", "updated_at"])
+        return capture
 
     @staticmethod
     def _reserve_free_bin():
@@ -1633,7 +1785,9 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
         if source_batch_id == "invalid":
             return success_response(message="source_batch must be a valid batch identifier.", data={}, status_code=400)
 
-        captures = self._get_capture_queryset(order_pk, source_batch_id=source_batch_id)
+        captures = list(self._get_capture_queryset(order_pk, source_batch_id=source_batch_id))
+        for capture in captures:
+            self._ensure_capture_scancode_format(capture)
         return success_response(
             message="Output captures fetched.",
             data=list(ProductionOutputCaptureSerializer(captures, many=True).data),
@@ -1711,7 +1865,7 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
                     production_order=order,
                     source_batch=batch,
                     sequence=sequence,
-                    scancode_id=self._build_manual_output_scancode(batch, sequence, captured_at),
+                    scancode_id=self._build_stage_output_scancode(batch, sequence, captured_at),
                     recipe_no=str(getattr(batch.bom_variant, "variant_code", "") or order.production_id or ""),
                     quantity_kg=weight_kg,
                     weight_kg=weight_kg,
@@ -1739,6 +1893,7 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
                             data={},
                             status_code=400,
                         )
+                capture = self._ensure_capture_scancode_format(capture)
 
         capture = self._get_capture_queryset(order_pk, source_batch_id=source_batch_id).get(pk=capture.pk)
         return success_response(
