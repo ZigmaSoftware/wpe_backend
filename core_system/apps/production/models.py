@@ -827,7 +827,7 @@ class BinCreationMaster(ProductionCodeTrackedModel):
         blank=True,
     )
     capacity_uom = models.CharField(max_length=16, choices=CapacityUom.choices, blank=True, default="")
-    current_status = models.CharField(max_length=16, choices=BinStatus.choices, blank=True)
+    current_status = models.CharField(max_length=16, choices=BinStatus.choices, default=BinStatus.FREE, blank=True)
     current_material = models.CharField(max_length=200, blank=True)
 
     class Meta(ProductionCodeTrackedModel.Meta):
@@ -1410,14 +1410,19 @@ class BatchWeightEntry(models.Model):
         global_max = Decimal(WEIGHT_MAX_GRAMS)
         validation_unit = "g"
 
-        # Some legacy recipes still store gram-scale values even when the unit label is "kgs".
-        # Only convert the global thresholds when the recipe bounds themselves are clearly kg-scale.
-        if component_unit == "kg":
-            kg_scaled_global_max = convert_gram_limit_to_component_unit(WEIGHT_MAX_GRAMS, component_unit)
-            if recipe_max <= kg_scaled_global_max:
-                global_min = convert_gram_limit_to_component_unit(WEIGHT_MIN_GRAMS, component_unit)
-                global_max = kg_scaled_global_max
-                validation_unit = component_unit
+        # Detect KG-scale recipes by the magnitude of recipe_max alone, regardless of
+        # the unit label on the component.  The scale's physical ceiling is WEIGHT_MAX_GRAMS;
+        # any recipe whose max fits within that ceiling expressed in KG is unambiguously
+        # KG-scale.  This handles both correctly-labelled KG components and components
+        # whose unit field was left at the default "g" even though the operator entered
+        # KG-scale values (the common misconfiguration that caused "Below global min 195g"
+        # errors when the entered weight was, e.g., 4.500 KG).
+        kg_scaled_global_max = convert_gram_limit_to_component_unit(WEIGHT_MAX_GRAMS, "kg")
+        if recipe_max <= kg_scaled_global_max:
+            global_min = convert_gram_limit_to_component_unit(WEIGHT_MIN_GRAMS, "kg")
+            global_max = kg_scaled_global_max
+            validation_unit = "kg"
+            component_unit = "kg"
         errors = []
         if entered_weight < global_min:
             errors.append(f"Below global min {format_weight_value(global_min)}{validation_unit}.")

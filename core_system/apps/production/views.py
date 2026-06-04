@@ -295,7 +295,13 @@ class ProductionBaseMasterViewSet(QueryParamFilterMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["patch"], url_path="toggle")
     def toggle_status(self, request, pk=None):
-        instance = self.get_object()
+        try:
+            instance = self.get_object()
+        except Exception:
+            return Response(
+                {"detail": "Record not found. It may have been deleted — please refresh the list."},
+                status=drf_status.HTTP_404_NOT_FOUND,
+            )
         instance.is_active = not instance.is_active
         instance.save(update_fields=["is_active", "updated_at"])
         return Response(self.get_serializer(instance).data)
