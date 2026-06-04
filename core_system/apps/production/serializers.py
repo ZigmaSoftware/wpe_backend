@@ -458,7 +458,7 @@ class BinCreationMasterSerializer(ProductionCodeMasterSerializer):
 
 
 class BagCreationMasterSerializer(ProductionCodeMasterSerializer):
-    department_name = serializers.CharField(source="department.name", read_only=True)
+    department_name = serializers.CharField(source="department.name", read_only=True, allow_null=True)
 
     class Meta(ProductionCodeMasterSerializer.Meta):
         model = BagCreationMaster

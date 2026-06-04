@@ -847,14 +847,22 @@ class BagCreationMaster(ProductionCodeTrackedModel):
     code_prefix = "BAG"
     code_width = 3
 
-    standard_weight = models.DecimalField(max_digits=14, decimal_places=3, validators=[MinValueValidator(Decimal("0"))])
+    standard_weight = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        validators=[MinValueValidator(Decimal("0"))],
+        null=True,
+        blank=True,
+    )
     uom = models.CharField(max_length=16, choices=Uom.choices, default=Uom.KG)
     department = models.ForeignKey(
         "wpe_masters.DepartmentMaster",
         on_delete=models.PROTECT,
         related_name="production_bags",
+        null=True,
+        blank=True,
     )
-    current_status = models.CharField(max_length=16, choices=BagStatus.choices)
+    current_status = models.CharField(max_length=16, choices=BagStatus.choices, blank=True, default=BagStatus.FREE)
 
     class Meta(ProductionCodeTrackedModel.Meta):
         verbose_name = "Bag Creation"
