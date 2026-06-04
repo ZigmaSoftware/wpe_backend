@@ -8,7 +8,7 @@ from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.items.models import Item
-from apps.production.models import BatchWeightEntry, BinCreationMaster, BOMVariant, BOMVariantComponent, ProductionBatch, ProductionOutputCapture, ProductionOrder, ProductionOrderMaterialPlan
+from apps.production.models import BagCreationMaster, BatchWeightEntry, BinCreationMaster, BOMVariant, BOMVariantComponent, ProductionBatch, ProductionOutputCapture, ProductionOrder, ProductionOrderMaterialPlan
 from apps.wpe_masters.models import ProductTypeCategory, ProductTypeSubtype, ProductionTypeMaster
 
 
@@ -412,6 +412,18 @@ class ProductionBatchStageTransitionTests(APITestCase):
             current_status=BinCreationMaster.BinStatus.FREE,
             is_active=True,
         )
+        self.primary_free_bag = BagCreationMaster.objects.create(
+            code=f"BAG-{self.unique_suffix.upper()}-A",
+            name=f"Primary Free Bag {self.unique_suffix}",
+            current_status=BagCreationMaster.BagStatus.FREE,
+            is_active=True,
+        )
+        self.secondary_free_bag = BagCreationMaster.objects.create(
+            code=f"BAG-{self.unique_suffix.upper()}-B",
+            name=f"Secondary Free Bag {self.unique_suffix}",
+            current_status=BagCreationMaster.BagStatus.FREE,
+            is_active=True,
+        )
 
     def test_confirming_ad_batch_creates_bl_handoff_without_followup_ad_batch(self):
         create_response = self.client.post(
@@ -659,6 +671,84 @@ class ProductionBatchStageTransitionTests(APITestCase):
         )
         stored_capture.refresh_from_db()
         self.assertEqual(str(stored_capture.weight_kg), "180.500")
+
+    def test_gl_output_capture_assigns_free_bag_and_marks_it_occupied(self):
+        create_response = self.client.post(
+            f"/api/production/orders/{self.order.id}/batches/",
+            {
+                "stage": "AD",
+                "bom_variant": self.bom.id,
+            },
+            format="json",
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        ad_batch_id = create_response.data["data"]["id"]
+        weight_entry_id = create_response.data["data"]["weight_entries"][0]["id"]
+
+        self.client.post(
+            f"/api/production/orders/{self.order.id}/batches/{ad_batch_id}/start/",
+            format="json",
+        )
+        self.client.post(
+            f"/api/production/orders/{self.order.id}/batches/{ad_batch_id}/weights/{weight_entry_id}/",
+            {"entered_weight_grams": "250.000"},
+            format="json",
+        )
+        self.client.post(
+            f"/api/production/orders/{self.order.id}/batches/{ad_batch_id}/confirm/",
+            format="json",
+        )
+
+        bl_batch = ProductionBatch.objects.get(production_order=self.order, stage=ProductionBatch.Stage.BL)
+        self.client.post(
+            f"/api/production/orders/{self.order.id}/output-captures/",
+            {
+                "source_batch": bl_batch.id,
+                "weight_kg": "180.500",
+            },
+            format="json",
+        )
+        self.client.post(
+            f"/api/production/orders/{self.order.id}/batches/{bl_batch.id}/confirm/",
+            format="json",
+        )
+
+        gl_batch = ProductionBatch.objects.get(production_order=self.order, stage=ProductionBatch.Stage.GL)
+
+        capture_response = self.client.post(
+            f"/api/production/orders/{self.order.id}/output-captures/",
+            {
+                "source_batch": gl_batch.id,
+                "weight_kg": "25.000",
+            },
+            format="json",
+        )
+        self.assertEqual(capture_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(capture_response.data["data"]["source_batch"], gl_batch.id)
+        self.assertEqual(capture_response.data["data"]["weight_kg"], "25.000")
+        self.assertEqual(capture_response.data["data"]["binlot"], self.primary_free_bag.code)
+        self.assertEqual(capture_response.data["data"]["component_columns"][0]["label"], "Captured Weight")
+
+        stored_capture = ProductionOutputCapture.objects.get(source_batch=gl_batch)
+        self.assertEqual(stored_capture.production_order_id, self.order.id)
+        self.assertEqual(str(stored_capture.weight_kg), "25.000")
+        self.assertEqual(stored_capture.binlot, self.primary_free_bag.code)
+
+        self.primary_free_bag.refresh_from_db()
+        self.secondary_free_bag.refresh_from_db()
+        self.assertEqual(self.primary_free_bag.current_status, BagCreationMaster.BagStatus.OCCUPIED)
+        self.assertEqual(self.secondary_free_bag.current_status, BagCreationMaster.BagStatus.FREE)
+
+        filtered_output_response = self.client.get(
+            f"/api/production/orders/{self.order.id}/output-captures/",
+            {"source_batch": gl_batch.id},
+        )
+        self.assertEqual(filtered_output_response.status_code, status.HTTP_200_OK)
+        filtered_rows = filtered_output_response.data["data"]
+        self.assertEqual(len(filtered_rows), 1)
+        self.assertEqual(filtered_rows[0]["source_batch"], gl_batch.id)
+        self.assertEqual(filtered_rows[0]["binlot"], self.primary_free_bag.code)
+        self.assertEqual(filtered_rows[0]["details"][0]["item_name"], "Captured Weight")
 
     def test_ad_weight_validation_respects_component_unit_thresholds(self):
         self.component.target_weight_grams = "4.500"

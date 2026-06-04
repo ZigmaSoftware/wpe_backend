@@ -1518,6 +1518,24 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
         return reserved_bin
 
     @staticmethod
+    def _reserve_free_bag():
+        reserved_bag = (
+            BagCreationMaster.objects.select_for_update()
+            .filter(
+                is_active=True,
+                current_status=BagCreationMaster.BagStatus.FREE,
+            )
+            .order_by("created_at", "id")
+            .first()
+        )
+        if reserved_bag is None:
+            return None
+
+        reserved_bag.current_status = BagCreationMaster.BagStatus.OCCUPIED
+        reserved_bag.save(update_fields=["current_status", "updated_at"])
+        return reserved_bag
+
+    @staticmethod
     def _ensure_bl_capture_bin_assignment(capture: ProductionOutputCapture, batch: ProductionBatch):
         if batch.stage != ProductionBatch.Stage.BL:
             return capture
@@ -1545,6 +1563,37 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
             return None
 
         capture.binlot = str(reserved_bin.code or "")
+        capture.save(update_fields=["binlot", "updated_at"])
+        return capture
+
+    @staticmethod
+    def _ensure_gl_capture_bag_assignment(capture: ProductionOutputCapture, batch: ProductionBatch):
+        if batch.stage != ProductionBatch.Stage.GL:
+            return capture
+
+        current_baglot = str(capture.binlot or "").strip()
+        matched_bag = None
+        if current_baglot:
+            matched_bag = (
+                BagCreationMaster.objects.select_for_update()
+                .filter(
+                    is_active=True,
+                    code__iexact=current_baglot,
+                )
+                .first()
+            )
+
+        if matched_bag is not None and matched_bag.current_status != BagCreationMaster.BagStatus.USED:
+            if matched_bag.current_status == BagCreationMaster.BagStatus.FREE:
+                matched_bag.current_status = BagCreationMaster.BagStatus.OCCUPIED
+                matched_bag.save(update_fields=["current_status", "updated_at"])
+            return capture
+
+        reserved_bag = ProductionOutputCaptureListAPIView._reserve_free_bag()
+        if reserved_bag is None:
+            return None
+
+        capture.binlot = str(reserved_bag.code or "")
         capture.save(update_fields=["binlot", "updated_at"])
         return capture
 
@@ -1625,6 +1674,15 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
                             status_code=400,
                         )
                     assigned_binlot = str(assigned_bin.code or "")
+                elif batch.stage == ProductionBatch.Stage.GL:
+                    assigned_bag = self._reserve_free_bag()
+                    if assigned_bag is None:
+                        return success_response(
+                            message="No free bag is available for assignment.",
+                            data={},
+                            status_code=400,
+                        )
+                    assigned_binlot = str(assigned_bag.code or "")
                 existing_sequences = ProductionOutputCapture.objects.select_for_update().filter(
                     production_order=order
                 ).values_list("sequence", flat=True)
@@ -1650,6 +1708,14 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
                     if capture is None:
                         return success_response(
                             message="No free bin is available for assignment.",
+                            data={},
+                            status_code=400,
+                        )
+                elif batch.stage == ProductionBatch.Stage.GL:
+                    capture = self._ensure_gl_capture_bag_assignment(capture, batch)
+                    if capture is None:
+                        return success_response(
+                            message="No free bag is available for assignment.",
                             data={},
                             status_code=400,
                         )
