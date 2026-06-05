@@ -1386,13 +1386,8 @@ class RecipeMasterApiTests(APITestCase):
             "/api/production/recipes/",
             {
                 "name": f"Recipe {self.unique_suffix}",
-                "description": "Recipe notes",
-                "recipe_version": "v1",
+                "recipe_version": "",
                 "batch_size": "5.000",
-                "batch_uom": "KG",
-                "status": "DRAFT",
-                "approved_by": None,
-                "approved_at": None,
                 "is_active": True,
             },
             format="json",
@@ -1401,6 +1396,7 @@ class RecipeMasterApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         recipe_id = response.data["id"]
         self.assertTrue(response.data["code"].startswith("REC"))
+        self.assertEqual(response.data["recipe_version"], "v1")
 
         lookup_response = self.client.get("/api/production/recipes/lookup/")
 
