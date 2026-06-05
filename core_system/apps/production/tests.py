@@ -1,5 +1,6 @@
 from datetime import date
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
 from django.utils import timezone
@@ -13,6 +14,11 @@ from apps.wpe_masters.models import ProductTypeCategory, ProductTypeSubtype, Pro
 
 
 UserModel = get_user_model()
+SCANCODE_TIME_ZONE = ZoneInfo("Asia/Kolkata")
+
+
+def format_scancode_time(value):
+    return timezone.localtime(value, SCANCODE_TIME_ZONE).strftime("%d%m%Y%H%M")
 
 
 class BOMVariantSubtypeMappingTests(APITestCase):
@@ -118,7 +124,7 @@ class BOMVariantSubtypeMappingTests(APITestCase):
                     {
                         "product_subtype": self.resin.id,
                         "target_weight_grams": "150.000",
-                        "min_weight_grams": "195.000",
+                        "min_weight_grams": "100.000",
                         "max_weight_grams": "9205.000",
                         "unit": "g",
                     },
@@ -138,6 +144,56 @@ class BOMVariantSubtypeMappingTests(APITestCase):
         self.assertIsNone(saved_components[0]["item"])
         self.assertEqual(saved_components[0]["product_subtype"], self.adhesive.id)
 
+    def test_recipe_item_weight_edit_preserves_component_used_by_batch_weights(self):
+        component = BOMVariantComponent.objects.create(
+            bom_variant=self.bom,
+            product_subtype=self.adhesive,
+            target_weight_grams="250.000",
+            min_weight_grams="195.000",
+            max_weight_grams="9205.000",
+            unit="g",
+        )
+        order = ProductionOrder.objects.create(
+            production_id=f"PO-EDIT-{self.unique_suffix.upper()}",
+            production_type="BLENDING_PRODUCTION",
+            production_date=date.today(),
+        )
+        batch = ProductionBatch.objects.create(
+            batch_no=f"BATCH-EDIT-{self.unique_suffix.upper()}",
+            production_order=order,
+            bom_variant=self.bom,
+            stage=ProductionBatch.Stage.AD,
+        )
+        BatchWeightEntry.objects.create(
+            batch=batch,
+            bom_component=component,
+            target_weight_grams="250.000",
+        )
+
+        response = self.client.put(
+            f"/api/production/recipes/{self.bom.id}/items/",
+            {
+                "components": [
+                    {
+                        "id": component.id,
+                        "product_subtype": self.adhesive.id,
+                        "target_weight_grams": "275.000",
+                        "min_weight_grams": "200.000",
+                        "max_weight_grams": "9000.000",
+                        "unit": "g",
+                    },
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        component.refresh_from_db()
+        self.assertEqual(str(component.target_weight_grams), "275.000")
+        self.assertEqual(str(component.min_weight_grams), "200.000")
+        self.assertEqual(BOMVariantComponent.objects.filter(bom_variant=self.bom).count(), 1)
+        self.assertEqual(response.data["components"][0]["id"], component.id)
+
     def test_bulk_save_rejects_duplicate_subtypes(self):
         response = self.client.put(
             self.components_url,
@@ -150,7 +206,7 @@ class BOMVariantSubtypeMappingTests(APITestCase):
                     },
                     {
                         "product_subtype": self.adhesive.id,
-                        "target_weight_grams": "150.000",
+                        "target_weight_grams": "250.000",
                         "unit": "g",
                     },
                 ]
@@ -175,6 +231,7 @@ class BOMVariantSubtypeMappingTests(APITestCase):
                     {
                         "product_subtype": self.resin.id,
                         "target_weight_grams": "150.000",
+                        "min_weight_grams": "100.000",
                         "unit": "g",
                     },
                 ]
@@ -619,7 +676,7 @@ class ProductionBatchStageTransitionTests(APITestCase):
         self.assertEqual(output_capture.production_order_id, self.order.id)
         self.assertEqual(output_capture.binlot, confirmed_batch.batch_no)
         self.assertEqual(str(output_capture.weight_kg), "250.000")
-        expected_ad_scancode = f"01AD{timezone.localtime(output_capture.captured_at).strftime('%d%m%Y%H%M')}01"
+        expected_ad_scancode = f"01AD{format_scancode_time(output_capture.captured_at)}01"
         self.assertEqual(output_capture.scancode_id, expected_ad_scancode)
 
         self.order.refresh_from_db()
@@ -696,7 +753,7 @@ class ProductionBatchStageTransitionTests(APITestCase):
 
         ad_batch = ProductionBatch.objects.get(pk=ad_batch_id)
         ad_capture = ProductionOutputCapture.objects.get(source_batch=ad_batch)
-        expected_ad_scancode = f"01AD{timezone.localtime(ad_capture.captured_at).strftime('%d%m%Y%H%M')}01"
+        expected_ad_scancode = f"01AD{format_scancode_time(ad_capture.captured_at)}01"
         self.assertEqual(ad_capture.scancode_id, expected_ad_scancode)
 
         bl_batch = ProductionBatch.objects.get(production_order=self.order, stage=ProductionBatch.Stage.BL)
@@ -719,7 +776,7 @@ class ProductionBatchStageTransitionTests(APITestCase):
         self.assertEqual(stored_capture.production_order_id, self.order.id)
         self.assertEqual(str(stored_capture.weight_kg), "180.500")
         self.assertEqual(stored_capture.binlot, self.primary_free_bin.code)
-        expected_scancode = f"01BL{timezone.localtime(stored_capture.captured_at).strftime('%d%m%Y%H%M')}01"
+        expected_scancode = f"01BL{format_scancode_time(stored_capture.captured_at)}01"
         self.assertEqual(stored_capture.scancode_id, expected_scancode)
         self.assertEqual(capture_response.data["data"]["scancode_id"], expected_scancode)
 
@@ -965,7 +1022,7 @@ class ProductionBatchStageTransitionTests(APITestCase):
         self.assertEqual(stored_capture.production_order_id, self.order.id)
         self.assertEqual(str(stored_capture.weight_kg), "25.000")
         self.assertEqual(stored_capture.binlot, self.primary_free_bag.code)
-        expected_scancode = f"01GL{timezone.localtime(stored_capture.captured_at).strftime('%d%m%Y%H%M')}01"
+        expected_scancode = f"01GL{format_scancode_time(stored_capture.captured_at)}01"
         self.assertEqual(stored_capture.scancode_id, expected_scancode)
         self.assertEqual(capture_response.data["data"]["scancode_id"], expected_scancode)
 
