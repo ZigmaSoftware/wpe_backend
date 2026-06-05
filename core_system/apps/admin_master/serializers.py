@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from django.contrib.auth import get_user_model
-from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
 from apps.login_home.models import Department
@@ -27,10 +25,6 @@ from .validators import (
     validate_mobile_number,
     validate_scope_relationship,
 )
-
-
-UserModel = get_user_model()
-
 
 class MainScreenSerializer(serializers.ModelSerializer):
     screen_name = serializers.CharField(source="name")
@@ -154,6 +148,116 @@ class UserTypeSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class StaffSerializer(serializers.ModelSerializer):
+    photo_url = serializers.SerializerMethodField()
+    staff_code = serializers.CharField(max_length=50, required=True)
+    name = serializers.CharField(max_length=150, required=True)
+    age = serializers.IntegerField(min_value=1, required=True)
+    department_name = serializers.CharField(source="department_master.name", read_only=True)
+    role_name = serializers.CharField(source="role_master.name", read_only=True)
+    department = serializers.PrimaryKeyRelatedField(
+        source="department_master",
+        queryset=DepartmentMaster.objects.filter(is_active=True),
+        required=True,
+    )
+    role = serializers.PrimaryKeyRelatedField(
+        source="role_master",
+        queryset=RoleMaster.objects.filter(is_active=True),
+        required=True,
+    )
+    mobile = serializers.CharField(required=True)
+    email = serializers.EmailField(required=True)
+    emergency_contact_no = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    address = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    joining_date = serializers.DateField(required=False, allow_null=True)
+    gender = serializers.ChoiceField(
+        choices=Staff.Gender.choices,
+        required=False,
+        allow_null=True,
+        allow_blank=True,
+    )
+
+    class Meta:
+        model = Staff
+        fields = (
+            "id",
+            "unique_id",
+            "staff_code",
+            "name",
+            "age",
+            "department",
+            "department_name",
+            "role",
+            "role_name",
+            "mobile",
+            "email",
+            "joining_date",
+            "gender",
+            "address",
+            "emergency_contact_no",
+            "photo",
+            "photo_url",
+            "is_active",
+            "remarks",
+        )
+        read_only_fields = ("id", "unique_id", "photo_url")
+
+    def get_photo_url(self, obj):
+        if not obj.photo:
+            return None
+        request = self.context.get("request")
+        if request:
+            return request.build_absolute_uri(obj.photo.url)
+        return obj.photo.url
+
+    def validate_staff_code(self, value):
+        normalized = (value or "").strip()
+        if not normalized:
+            raise serializers.ValidationError("Employee ID is required.")
+        return normalized
+
+    def validate_name(self, value):
+        normalized = (value or "").strip()
+        if not normalized:
+            raise serializers.ValidationError("Name is required.")
+        return normalized
+
+    def validate_mobile(self, value):
+        normalized = validate_mobile_number(value)
+        if not normalized:
+            raise serializers.ValidationError("Phone no is required.")
+        return normalized
+
+    def validate_emergency_contact_no(self, value):
+        return validate_mobile_number(value)
+
+    def validate(self, attrs):
+        department_master = attrs.get("department_master") or getattr(self.instance, "department_master", None)
+        role_master = attrs.get("role_master") or getattr(self.instance, "role_master", None)
+
+        if not department_master:
+            raise serializers.ValidationError({"department": "Department is required."})
+        if not role_master:
+            raise serializers.ValidationError({"role": "Role is required."})
+
+        role_department_id = getattr(getattr(role_master, "designation", None), "department_id", None)
+        if role_department_id and role_department_id != department_master.id:
+            raise serializers.ValidationError({"role": "Selected role does not belong to the selected department."})
+
+        if attrs.get("joining_date") == "":
+            attrs["joining_date"] = None
+        if attrs.get("gender") == "":
+            attrs["gender"] = None
+        if attrs.get("emergency_contact_no") == "":
+            attrs["emergency_contact_no"] = None
+        if attrs.get("photo") == "":
+            attrs["photo"] = None
+        attrs["department"] = _resolve_legacy_department(department_master)
+        attrs["designation"] = role_master.name
+        return attrs
+
+
 def _resolve_legacy_department(department_master: DepartmentMaster | None) -> Department | None:
     if not department_master or not department_master.name:
         return None
@@ -170,6 +274,8 @@ class UserCreationReadSerializer(serializers.ModelSerializer):
     username = serializers.CharField(source="user.username", read_only=True)
     staff_id = serializers.CharField(source="staff.staff_code", read_only=True)
     full_name = serializers.CharField(source="staff.name", read_only=True)
+    user_type = serializers.IntegerField(source="user_type_id", read_only=True)
+    user_type_name = serializers.CharField(source="user_type.name", read_only=True)
     mobile_no = serializers.CharField(source="staff.mobile", read_only=True)
     email = serializers.SerializerMethodField()
     company_name = serializers.CharField(source="company.name", read_only=True)
@@ -189,6 +295,8 @@ class UserCreationReadSerializer(serializers.ModelSerializer):
             "staff",
             "staff_id",
             "full_name",
+            "user_type",
+            "user_type_name",
             "mobile_no",
             "email",
             "department",
@@ -230,8 +338,7 @@ class UserCreationWriteSerializer(serializers.Serializer):
     username = serializers.CharField(max_length=150)
     password = serializers.CharField(write_only=True, required=False, allow_blank=False)
     confirm_password = serializers.CharField(write_only=True, required=False, allow_blank=False)
-    department = serializers.PrimaryKeyRelatedField(queryset=DepartmentMaster.objects.filter(is_active=True))
-    role = serializers.PrimaryKeyRelatedField(queryset=RoleMaster.objects.filter(is_active=True))
+    user_type = serializers.PrimaryKeyRelatedField(queryset=UserType.objects.select_related("department", "role").filter(is_active=True))
     mobile_no = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     email = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
     company = serializers.PrimaryKeyRelatedField(
@@ -248,8 +355,7 @@ class UserCreationWriteSerializer(serializers.Serializer):
         return validate_mobile_number(value)
 
     def validate(self, attrs):
-        department = attrs.get("department")
-        role = attrs.get("role")
+        resolved_user_type = attrs.get("user_type")
         password = attrs.get("password")
         confirm_password = attrs.pop("confirm_password", None)
 
@@ -265,28 +371,17 @@ class UserCreationWriteSerializer(serializers.Serializer):
         if confirm_password and not password:
             raise serializers.ValidationError({"password": "Password is required when confirm password is supplied."})
 
-        resolved_user_type = (
-            UserType.objects.select_related("department", "role")
-            .filter(
-                department=department,
-                role=role,
-                is_active=True,
-            )
-            .first()
-        )
         if not resolved_user_type:
-            raise serializers.ValidationError(
-                {"role": "No active user type is configured for the selected department and role."}
-            )
+            raise serializers.ValidationError({"user_type": "User type is required."})
 
-        if password:
-            user = UserModel(
-                username=attrs.get("username", getattr(getattr(self.instance, "user", None), "username", "")),
-                email=attrs.get("email") or "",
-            )
-            validate_password(password, user=user)
+        department = getattr(resolved_user_type, "department", None)
+        role = getattr(resolved_user_type, "role", None)
 
-        attrs["user_type"] = resolved_user_type
+        if not department:
+            raise serializers.ValidationError({"user_type": "The selected user type is missing a department mapping."})
+        if not role:
+            raise serializers.ValidationError({"user_type": "The selected user type is missing a role mapping."})
+
         attrs["department"] = _resolve_legacy_department(department)
         attrs["role"] = _resolve_legacy_role(role)
         return attrs
@@ -296,6 +391,23 @@ class UserCreationWriteSerializer(serializers.Serializer):
 
     def update(self, instance, validated_data):
         return upsert_user_creation(instance=instance, **validated_data)
+
+
+class UserTypePermissionSummarySerializer(serializers.ModelSerializer):
+    user_type = serializers.IntegerField(source="id", read_only=True)
+    user_type_name = serializers.CharField(source="name", read_only=True)
+    is_active = serializers.SerializerMethodField()
+
+    class Meta:
+        model = UserType
+        fields = ("id", "user_type", "user_type_name", "is_active")
+        read_only_fields = fields
+
+    def get_is_active(self, obj):
+        active_permission_count = getattr(obj, "active_permission_count", None)
+        if active_permission_count is not None:
+            return active_permission_count > 0
+        return obj.permissions.filter(status=True).exists()
 
 
 class UserTypePermissionSerializer(serializers.ModelSerializer):

@@ -262,6 +262,8 @@ class RoleMasterViewSet(CodeTrackedMasterViewSet):
     filterset_map = {
         "designation": "designation_id",
         "designation_id": "designation_id",
+        "department": "designation__department_id",
+        "department_id": "designation__department_id",
         "is_active": "is_active",
     }
     ordering_fields = ["designation__name", "name", "code", "created_at", "is_active"]
