@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from django.db import transaction
-from django.db.models import ProtectedError, Q
+from django.db.models import Count, ProtectedError, Q
 from rest_framework import filters, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -16,13 +16,16 @@ from .serializers import (
     MainScreenSerializer,
     PermissionAssignmentSerializer,
     ScreenSectionSerializer,
+    StaffSerializer,
     UserCreationReadSerializer,
     UserCreationWriteSerializer,
     UserScreenSerializer,
     UserTypePermissionSerializer,
+    UserTypePermissionSummarySerializer,
     UserTypeSerializer,
 )
 from .services import resolve_subject_permissions
+from .services import delete_user_creation
 
 
 def _coerce_filter_value(value: str):
@@ -274,10 +277,39 @@ class UserTypeViewSet(StandardizedModelViewSet):
                     "id": user_type.id,
                     "name": user_type.name,
                     "code": user_type.code,
+                    "department_id": user_type.department_id,
+                    "department_name": getattr(user_type.department, "name", None),
+                    "role_id": user_type.role_id,
+                    "role_name": getattr(user_type.role, "name", None),
                 }
                 for user_type in queryset
             ]
         )
+
+
+class StaffViewSet(StandardizedModelViewSet):
+    queryset = Staff.objects.select_related("department_master", "role_master").all().order_by("staff_code", "name", "id")
+    serializer_class = StaffSerializer
+    response_serializer_class = StaffSerializer
+    resource_name = "Staff"
+    search_fields = (
+        "staff_code",
+        "name",
+        "department_master__name",
+        "role_master__name",
+        "mobile",
+        "email",
+        "emergency_contact_no",
+    )
+    ordering_fields = ("staff_code", "name", "department_master__name", "role_master__name", "id")
+    filterset_map = {
+        "is_active": "is_active",
+        "gender": "gender",
+        "department": "department_master_id",
+        "department_id": "department_master_id",
+        "role": "role_master_id",
+        "role_id": "role_master_id",
+    }
 
 
 class UserCreationViewSet(StandardizedModelViewSet):
@@ -327,11 +359,26 @@ class UserCreationViewSet(StandardizedModelViewSet):
     @action(detail=False, methods=["get"], url_path="lookup-options")
     def lookup_options(self, request):
         queryset = (
-            Staff.objects.filter(is_active=True)
+            Staff.objects.select_related("department_master", "role_master")
+            .filter(is_active=True)
             .order_by("staff_code", "name", "id")
-            .values("id", "staff_code", "name", "mobile", "email")
         )
-        return Response(list(queryset))
+        return Response(
+            [
+                {
+                    "id": staff.id,
+                    "staff_code": staff.staff_code,
+                    "name": staff.name,
+                    "mobile": staff.mobile,
+                    "email": staff.email,
+                    "department_id": staff.department_master_id,
+                    "department_name": getattr(staff.department_master, "name", None),
+                    "role_id": staff.role_master_id,
+                    "role_name": getattr(staff.role_master, "name", None),
+                }
+                for staff in queryset
+            ]
+        )
 
     @action(detail=False, methods=["get"], url_path="department-options")
     def department_options(self, request):
@@ -413,10 +460,7 @@ class UserCreationViewSet(StandardizedModelViewSet):
 
     @transaction.atomic
     def perform_destroy(self, instance):
-        linked_user = instance.user
-        instance.delete()
-        if linked_user:
-            linked_user.delete()
+        delete_user_creation(instance)
 
 
 class UserTypePermissionViewSet(StandardizedModelViewSet):
@@ -437,6 +481,7 @@ class UserTypePermissionViewSet(StandardizedModelViewSet):
     resource_name = "User screen permission"
     permission_screen_code = "user-screen-permission-master"
     permission_screen_codes = ("user-screen-permission-master", "user-permission-master")
+    allow_self_permission_lookup = True
     status_field = "status"
     search_fields = (
         "user_type__name",
@@ -466,10 +511,66 @@ class UserTypePermissionViewSet(StandardizedModelViewSet):
         "is_active": "status",
     }
 
+    def _summary_queryset(self):
+        return (
+            UserType.objects.filter(permissions__isnull=False)
+            .annotate(
+                active_permission_count=Count("permissions", filter=Q(permissions__status=True), distinct=True),
+                permission_count=Count("permissions", distinct=True),
+            )
+            .order_by("name", "id")
+        )
+
+    def _get_user_type_permissions(self, user_type_id):
+        permissions = UserTypePermission.objects.filter(user_type_id=user_type_id)
+        if not permissions.exists():
+            raise ValidationError({"user_type": "User type permissions not found."})
+        return permissions
+
     def get_serializer_class(self):
         if self.action == "assign":
             return PermissionAssignmentSerializer
         return UserTypePermissionSerializer
+
+    @action(detail=False, methods=["get"], url_path="summary")
+    def summary(self, request):
+        base_queryset = self._summary_queryset()
+        filtered_queryset = base_queryset
+
+        search_value = request.query_params.get("search") or request.query_params.get("search[value]")
+        if search_value:
+            filtered_queryset = filtered_queryset.filter(name__icontains=search_value.strip())
+
+        status_value = request.query_params.get("is_active")
+        if status_value not in (None, ""):
+            desired_status = _coerce_filter_value(status_value)
+            if desired_status is True:
+                filtered_queryset = filtered_queryset.filter(active_permission_count__gt=0)
+            elif desired_status is False:
+                filtered_queryset = filtered_queryset.filter(active_permission_count=0)
+
+        total_count = base_queryset.count()
+        filtered_count = filtered_queryset.count()
+
+        page = self.paginate_queryset(filtered_queryset)
+        if page is not None:
+            serializer = UserTypePermissionSummarySerializer(
+                page,
+                many=True,
+                context=self.get_serializer_context(),
+            )
+            response = self.get_paginated_response(serializer.data)
+            if getattr(self.paginator, "datatables_mode", False):
+                response.data["recordsTotal"] = total_count
+                response.data["recordsFiltered"] = filtered_count
+            return response
+
+        serializer = UserTypePermissionSummarySerializer(
+            filtered_queryset,
+            many=True,
+            context=self.get_serializer_context(),
+        )
+        return Response(serializer.data)
 
     @action(detail=False, methods=["post"], url_path="assign")
     def assign(self, request):
@@ -488,6 +589,24 @@ class UserTypePermissionViewSet(StandardizedModelViewSet):
             },
             status=status.HTTP_201_CREATED,
         )
+
+    @action(detail=False, methods=["patch"], url_path=r"summary/(?P<user_type_id>[^/.]+)/toggle-status")
+    def toggle_summary_status(self, request, user_type_id=None):
+        permissions = self._get_user_type_permissions(user_type_id)
+        new_status = not permissions.filter(status=True).exists()
+        permissions.update(status=new_status)
+        return Response(
+            {
+                "message": "User type permission status updated.",
+                "status": new_status,
+            }
+        )
+
+    @action(detail=False, methods=["delete"], url_path=r"summary/(?P<user_type_id>[^/.]+)")
+    def destroy_summary(self, request, user_type_id=None):
+        permissions = self._get_user_type_permissions(user_type_id)
+        permissions.delete()
+        return Response({"message": "User type permissions deleted successfully."})
 
     @action(detail=False, methods=["get"], url_path="resolved")
     def resolved(self, request):
