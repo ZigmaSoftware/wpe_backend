@@ -387,7 +387,7 @@ class Command(BaseCommand):
             "Inventory": {
                 "order": 3,
                 "sections": {
-                    "Store": ["Item Master", "Store Stock", "Store Request"],
+                    "Store": ["Item Master", "Store Stock", "Request Approval's"],
                     "Blending": ["Blending Stock"],
                     "GRN/QCR": ["GRN", "QCR"],
                 },

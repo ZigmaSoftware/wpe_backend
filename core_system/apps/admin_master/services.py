@@ -5,8 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from django.db.models import Q
+from django.db.models.deletion import ProtectedError
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
@@ -104,6 +106,33 @@ def _get_or_prepare_auth_user(
         return existing_user
 
     return UserModel(username=username)
+
+
+@transaction.atomic
+def delete_user_creation(instance: UserCreation) -> None:
+    linked_user = instance.user
+    instance.delete()
+
+    if not linked_user:
+        return
+
+    if UserCreation.objects.filter(user=linked_user).exists():
+        return
+
+    try:
+        wpe_profile = linked_user.wpe_profile
+    except ObjectDoesNotExist:
+        wpe_profile = None
+
+    if wpe_profile is not None:
+        return
+
+    try:
+        linked_user.delete()
+    except ProtectedError:
+        # Preserve historical references owned by the auth user while still
+        # allowing the admin profile row to be removed.
+        return
 
 
 @transaction.atomic

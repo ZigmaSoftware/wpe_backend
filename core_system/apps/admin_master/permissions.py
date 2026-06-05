@@ -32,10 +32,24 @@ class AdminMasterRBACPermission(BasePermission):
         "DELETE": "delete",
     }
 
+    def _is_self_permission_lookup(self, request, view) -> bool:
+        if not getattr(view, "allow_self_permission_lookup", False):
+            return False
+
+        if getattr(view, "action", None) not in {"resolved", "menu"}:
+            return False
+
+        user_type_id = request.query_params.get("user_type")
+        user_id = request.query_params.get("user_id")
+        return not user_type_id and not user_id
+
     def has_permission(self, request, view) -> bool:
         user = getattr(request, "user", None)
         if not user or not user.is_authenticated:
             return False
+
+        if self._is_self_permission_lookup(request, view):
+            return True
 
         screen_codes = tuple(
             code

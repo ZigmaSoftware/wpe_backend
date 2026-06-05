@@ -22,6 +22,10 @@ def default_action_permissions() -> dict[str, bool]:
     return {action: False for action in PERMISSION_ACTIONS}
 
 
+def staff_photo_upload_path(instance: models.Model, filename: str) -> str:
+    return f"admin-master/staff/{instance.unique_id}/{filename}"
+
+
 def build_unique_code(
     model_cls: type[models.Model],
     source_value: str,
@@ -143,10 +147,35 @@ class UserType(UniqueIDMixin):
 
 
 class Staff(UniqueIDMixin):
-    staff_code = models.CharField(max_length=4, unique=True, blank=True, null=True, db_index=True)
+    class Gender(models.TextChoices):
+        MALE = "male", "Male"
+        FEMALE = "female", "Female"
+        OTHER = "other", "Other"
+
+    staff_code = models.CharField(max_length=50, unique=True, blank=True, null=True, db_index=True)
     name = models.CharField(max_length=150, db_index=True)
+    age = models.PositiveSmallIntegerField(blank=True, null=True)
     mobile = models.CharField(max_length=15, blank=True, null=True, db_index=True)
     email = models.EmailField(blank=True, null=True, db_index=True)
+    joining_date = models.DateField(blank=True, null=True)
+    gender = models.CharField(max_length=10, choices=Gender.choices, blank=True, null=True)
+    address = models.TextField(blank=True, null=True)
+    emergency_contact_no = models.CharField(max_length=15, blank=True, null=True)
+    photo = models.ImageField(upload_to=staff_photo_upload_path, blank=True, null=True)
+    department_master = models.ForeignKey(
+        "wpe_masters.DepartmentMaster",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="staff_members",
+    )
+    role_master = models.ForeignKey(
+        "wpe_masters.RoleMaster",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="staff_members",
+    )
     department = models.ForeignKey(
         "login_home.Department",
         on_delete=models.SET_NULL,
@@ -155,6 +184,7 @@ class Staff(UniqueIDMixin):
         related_name="staff_members",
     )
     designation = models.CharField(max_length=150, blank=True, null=True)
+    remarks = models.TextField(blank=True, null=True)
     is_active = models.BooleanField(default=True, db_index=True)
 
     class Meta(UniqueIDMixin.Meta):
@@ -170,14 +200,13 @@ class Staff(UniqueIDMixin):
 
     @classmethod
     def next_staff_code(cls) -> str:
-        last_staff = (
+        numeric_codes = (
             cls.objects.select_for_update()
             .exclude(staff_code__isnull=True)
             .exclude(staff_code="")
-            .order_by("-staff_code", "-id")
-            .first()
+            .values_list("staff_code", flat=True)
         )
-        last_number = int(last_staff.staff_code) if last_staff and last_staff.staff_code.isdigit() else 0
+        last_number = max((int(code) for code in numeric_codes if str(code).isdigit()), default=0)
         return f"{last_number + 1:04d}"
 
     def save(self, *args, **kwargs):
