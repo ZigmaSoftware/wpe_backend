@@ -827,7 +827,7 @@ class BinCreationMaster(ProductionCodeTrackedModel):
         blank=True,
     )
     capacity_uom = models.CharField(max_length=16, choices=CapacityUom.choices, blank=True, default="")
-    current_status = models.CharField(max_length=16, choices=BinStatus.choices, blank=True)
+    current_status = models.CharField(max_length=16, choices=BinStatus.choices, default=BinStatus.FREE, blank=True)
     current_material = models.CharField(max_length=200, blank=True)
 
     class Meta(ProductionCodeTrackedModel.Meta):
