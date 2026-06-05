@@ -609,6 +609,12 @@ class RecipeMasterSerializer(serializers.ModelSerializer):
         )
         read_only_fields = ("id", "code", "approved_by_name", "component_count", "created_at", "updated_at")
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        attrs["revision"] = str(attrs.get("revision") or "").strip() or "v1"
+        attrs["notes"] = str(attrs.get("notes") or "").strip()
+        return attrs
+
     def get_approved_by_name(self, obj):
         return getattr(obj.approved_by, "username", None)
 
