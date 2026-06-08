@@ -8,6 +8,7 @@ from apps.store.services import (
     create_store_request,
     get_blending_warehouse,
     get_store_warehouse,
+    normalize_text,
     update_store_request,
 )
 
@@ -25,6 +26,28 @@ def additive_item_query() -> Q:
     # Legacy helper kept for backward compatibility. Requestable stock now
     # includes all available store stock items.
     return Q()
+
+
+def resolve_blending_request_department(user, fallback: str = BLENDING_DEPARTMENT) -> str:
+    profile = getattr(user, "admin_profile", None)
+    user_type = getattr(profile, "user_type", None)
+    user_type_department = getattr(user_type, "department", None)
+    department_name = normalize_text(getattr(user_type_department, "name", None))
+    if department_name:
+        return department_name
+
+    legacy_department = getattr(profile, "department", None)
+    department_name = normalize_text(getattr(legacy_department, "name", None))
+    if department_name:
+        return department_name
+
+    staff = getattr(profile, "staff", None)
+    staff_department = getattr(staff, "department_master", None)
+    department_name = normalize_text(getattr(staff_department, "name", None))
+    if department_name:
+        return department_name
+
+    return normalize_text(fallback) or BLENDING_DEPARTMENT
 
 
 def create_blending_store_request(
@@ -100,6 +123,6 @@ def requestable_additive_stock_queryset():
     store_warehouse = get_store_warehouse()
     return (
         StoreStock.objects.select_related("item", "warehouse")
-        .filter(warehouse=store_warehouse, available_qty__gt=0)
+        .filter(warehouse=store_warehouse)
         .order_by("item__item_name", "id")
     )

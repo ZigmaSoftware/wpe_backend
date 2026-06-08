@@ -105,7 +105,7 @@ class StoreRequestApprovalListAPIView(WrappedListAPIView):
         "requesting_warehouse": "requesting_warehouse_id",
         "issuing_warehouse": "issuing_warehouse_id",
         "request_type": "request_type",
-        "department": "department",
+        "department": "department__iexact",
     }
     list_message = "Store request queue fetched successfully."
 

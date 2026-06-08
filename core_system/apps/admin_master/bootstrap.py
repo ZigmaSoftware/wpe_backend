@@ -427,11 +427,11 @@ def ensure_dev_master_data() -> None:
             "folder_name": "/wpe-masters/units",
         },
         {
-            "screen_name": "Item Creation Master",
+            "screen_name": "Item Variant Master",
             "code": "item-creation-master",
             "section": inventory_store_section,
             "order_no": 4,
-            "folder_name": "/wpe-masters/item-creations",
+            "folder_name": "/wpe-masters/item-variants",
         },
         {
             "screen_name": "Store Master",
