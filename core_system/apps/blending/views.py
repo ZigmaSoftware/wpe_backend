@@ -28,6 +28,7 @@ from .services import (
     create_blending_store_request,
     get_blending_warehouse,
     requestable_additive_stock_queryset,
+    resolve_blending_request_department,
     update_blending_store_request,
 )
 
@@ -116,7 +117,10 @@ class RequestBlendingStockAPIView(generics.GenericAPIView):
             quantity=serializer.validated_data["quantity"],
             user=request.user,
             request_type=StockRequest.RequestType.ADDITIVE,
-            department=serializer.validated_data.get("department") or BLENDING_DEPARTMENT,
+            department=resolve_blending_request_department(
+                request.user,
+                fallback=serializer.validated_data.get("department") or BLENDING_DEPARTMENT,
+            ),
             request_date=serializer.validated_data.get("request_date"),
             require_date=serializer.validated_data.get("require_date"),
             require_time=serializer.validated_data.get("require_time"),
@@ -144,7 +148,7 @@ class BlendingStoreRequestListCreateAPIView(WrappedBlendingListAPIView, generics
         "status": "status",
         "requested_by": "requested_by_id",
         "request_type": "request_type",
-        "department": "department",
+        "department": "department__iexact",
     }
     list_message = "Blending store requests fetched successfully."
 
@@ -198,7 +202,10 @@ class BlendingStoreRequestListCreateAPIView(WrappedBlendingListAPIView, generics
             ],
             remarks=serializer.validated_data.get("remarks"),
             request_type=serializer.validated_data.get("request_type", StockRequest.RequestType.GENERAL),
-            department=serializer.validated_data.get("department", BLENDING_DEPARTMENT),
+            department=resolve_blending_request_department(
+                request.user,
+                fallback=serializer.validated_data.get("department", BLENDING_DEPARTMENT),
+            ),
             request_date=serializer.validated_data.get("request_date"),
             require_date=serializer.validated_data.get("require_date"),
             require_time=serializer.validated_data.get("require_time"),
@@ -258,7 +265,10 @@ class BlendingStoreRequestDetailAPIView(generics.RetrieveUpdateAPIView):
             ],
             remarks=serializer.validated_data.get("remarks"),
             request_type=serializer.validated_data.get("request_type", StockRequest.RequestType.GENERAL),
-            department=serializer.validated_data.get("department", BLENDING_DEPARTMENT),
+            department=resolve_blending_request_department(
+                request.user,
+                fallback=serializer.validated_data.get("department", BLENDING_DEPARTMENT),
+            ),
             request_date=serializer.validated_data.get("request_date"),
             require_date=serializer.validated_data.get("require_date"),
             require_time=serializer.validated_data.get("require_time"),

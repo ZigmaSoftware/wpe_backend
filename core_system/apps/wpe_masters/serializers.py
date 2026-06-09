@@ -206,6 +206,7 @@ class ProductTypeNameValidationMixin:
 
 class ProductTypeSubtypeNestedSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source="category.name", read_only=True)
+    variant_count = serializers.IntegerField(read_only=True, default=0)
 
     class Meta:
         model = ProductTypeSubtype
@@ -217,6 +218,7 @@ class ProductTypeSubtypeNestedSerializer(serializers.ModelSerializer):
             "name",
             "code",
             "description",
+            "variant_count",
             "sort_order",
             "is_active",
             "created_at",
@@ -270,6 +272,7 @@ class ProductTypeCategoryTreeSerializer(ProductTypeCategorySerializer):
 
 class ProductTypeSubtypeSerializer(ProductTypeNameValidationMixin, serializers.ModelSerializer):
     category_name = serializers.CharField(source="category.name", read_only=True)
+    variant_count = serializers.IntegerField(read_only=True, default=0)
 
     class Meta:
         model = ProductTypeSubtype
@@ -281,12 +284,13 @@ class ProductTypeSubtypeSerializer(ProductTypeNameValidationMixin, serializers.M
             "name",
             "code",
             "description",
+            "variant_count",
             "sort_order",
             "is_active",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("unique_id", "code", "category_name", "created_at", "updated_at")
+        read_only_fields = ("unique_id", "code", "category_name", "variant_count", "created_at", "updated_at")
         validators = []
 
     def validate(self, attrs):
@@ -326,6 +330,7 @@ class ItemMasterSerializer(serializers.ModelSerializer):
             "sub_category_name",
             "category",
             "category_name",
+            "description",
             "item_type",
             "uom",
             "uom_code",
@@ -360,11 +365,25 @@ class ItemMasterSerializer(serializers.ModelSerializer):
     def validate_hsn_code(self, value: str) -> str:
         return (value or "").strip()
 
+    def validate_description(self, value: str) -> str:
+        return (value or "").strip()
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
         minimum_stock = attrs.get("minimum_stock", getattr(self.instance, "minimum_stock", None))
         maximum_stock = attrs.get("maximum_stock", getattr(self.instance, "maximum_stock", None))
         reorder_level = attrs.get("reorder_level", getattr(self.instance, "reorder_level", None))
+        sub_category = attrs.get("sub_category", getattr(self.instance, "sub_category", None))
+        item_name = attrs.get("item_name", getattr(self.instance, "item_name", ""))
+        if sub_category is None:
+            raise serializers.ValidationError({"sub_category": "Item sub category is required."})
+        duplicate_queryset = ItemMaster.objects.filter(sub_category=sub_category, item_name=item_name)
+        if self.instance and self.instance.pk:
+            duplicate_queryset = duplicate_queryset.exclude(pk=self.instance.pk)
+        if duplicate_queryset.exists():
+            raise serializers.ValidationError(
+                {"item_name": "An item variant with this name already exists in the selected item sub category."}
+            )
         if minimum_stock is not None and maximum_stock is not None and minimum_stock > maximum_stock:
             raise serializers.ValidationError({"minimum_stock": "Minimum stock cannot exceed maximum stock."})
         if reorder_level is not None and maximum_stock is not None and reorder_level > maximum_stock:

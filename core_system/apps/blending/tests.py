@@ -10,14 +10,18 @@ from apps.admin_master.models import Staff, UserCreation, UserType
 from apps.items.models import Item
 from apps.store.models import StockRequest, StoreTransaction
 from apps.store.services import apply_inward_stock, apply_outward_stock, get_blending_warehouse, get_store_warehouse
+from apps.wpe_masters.models import DepartmentMaster
 
 
 @override_settings(INTERNAL_API_KEY="test-internal-key")
 class BlendingStoreRequestTests(APITestCase):
-    def create_role_user(self, *, username: str, role_name: str):
+    def create_role_user(self, *, username: str, role_name: str, department_name: str | None = None):
         user = get_user_model().objects.create_user(username=username, password="test-pass-123")
         staff = Staff.objects.create(name=f"{username} Staff")
-        user_type = UserType.objects.create(name=role_name)
+        department = None
+        if department_name:
+            department = DepartmentMaster.objects.create(name=department_name)
+        user_type = UserType.objects.create(name=role_name, department=department)
         UserCreation.objects.create(user=user, staff=staff, user_type=user_type)
         return user
 
@@ -28,7 +32,11 @@ class BlendingStoreRequestTests(APITestCase):
         return client
 
     def setUp(self):
-        self.blending_user = self.create_role_user(username="blending-user", role_name="Blending User")
+        self.blending_user = self.create_role_user(
+            username="blending-user",
+            role_name="Blending User",
+            department_name="Compounding",
+        )
         self.store_user = self.create_role_user(username="store-user", role_name="Store User")
         self.client = self.make_auth_client(self.blending_user)
         self.store_user_client = self.make_auth_client(self.store_user)
@@ -64,6 +72,7 @@ class BlendingStoreRequestTests(APITestCase):
         self.assertEqual(response.data["data"]["status"], StockRequest.Status.PENDING)
         self.assertEqual(response.data["data"]["request_type"], StockRequest.RequestType.ADDITIVE)
         self.assertEqual(response.data["data"]["item"], item.id)
+        self.assertEqual(response.data["data"]["department"], "Compounding")
         self.assertEqual(str(response.data["data"]["request_date"]), "2026-05-20")
         self.assertEqual(str(response.data["data"]["require_date"]), "2026-05-21")
         self.assertEqual(str(response.data["data"]["require_time"]), "14:30:00")
@@ -90,6 +99,7 @@ class BlendingStoreRequestTests(APITestCase):
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["request"]["request_type"], "ADDITIVE")
+        self.assertEqual(response.data["request"]["department"], "Compounding")
 
     def test_request_stock_get_returns_requestable_store_stock_for_dropdown(self):
         additive_item = Item.objects.create(
@@ -332,6 +342,60 @@ class BlendingStoreRequestTests(APITestCase):
             {row["warehouse_code"] for row in response.data["data"]["results"]},
             {self.store_warehouse.code},
         )
+
+    def test_requestable_additive_stock_list_includes_zero_balance_items_as_read_only_rows(self):
+        available_item = Item.objects.create(
+            category="Additive",
+            group="blend",
+            sub_group="processing additive",
+            item_name="Available Item",
+            unit="kg",
+        )
+        zero_balance_item = Item.objects.create(
+            category="Raw Material",
+            group="polymer",
+            sub_group="lldpe",
+            item_name="Zero Balance Item",
+            unit="kg",
+        )
+        apply_inward_stock(
+            item=available_item,
+            warehouse=self.store_warehouse,
+            quantity="4.000",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_INWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="STORE-ALL-1",
+            created_by=self.store_user,
+        )
+        apply_inward_stock(
+            item=zero_balance_item,
+            warehouse=self.store_warehouse,
+            quantity="2.000",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_INWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="STORE-ALL-2",
+            created_by=self.store_user,
+        )
+        apply_outward_stock(
+            item=zero_balance_item,
+            warehouse=self.store_warehouse,
+            quantity="2.000",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_OUTWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="STORE-ALL-3",
+            created_by=self.store_user,
+        )
+
+        response = self.client.get("/api/blending/requestable-additive-stock/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["count"], 2)
+        quantity_by_item = {
+            row["item"]: row["quantity"]
+            for row in response.data["data"]["results"]
+        }
+        self.assertEqual(quantity_by_item[available_item.id], "4.000")
+        self.assertEqual(quantity_by_item[zero_balance_item.id], "0.000")
 
     def test_blending_stock_list_supports_requestable_additive_scope(self):
         additive_item = Item.objects.create(

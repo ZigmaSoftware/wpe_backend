@@ -270,6 +270,24 @@ class RoleMasterViewSet(CodeTrackedMasterViewSet):
     ordering = ["designation__name", "name"]
     next_code_prefix = "ROLE"
 
+    @action(detail=False, methods=["get"])
+    def lookup(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True)
+        return Response(
+            [
+                {
+                    "id": role.id,
+                    "name": role.name,
+                    "code": role.code,
+                    "designation_id": role.designation_id,
+                    "designation_name": getattr(role.designation, "name", None),
+                    "department_id": getattr(getattr(role.designation, "department", None), "id", None),
+                    "department_name": getattr(getattr(role.designation, "department", None), "name", None),
+                }
+                for role in queryset
+            ]
+        )
+
 
 class UnitMasterViewSet(BaseMasterViewSet):
     queryset = UnitMaster.objects.all()
@@ -389,6 +407,12 @@ class ProductTypeCategoryViewSet(ProductTypeManagedViewSet):
     serializer_class = ProductTypeCategorySerializer
     search_fields = ["name", "code", "description"]
 
+    @property
+    def permission_screen_codes(self):
+        if getattr(self, "action", None) in {"list", "retrieve", "lookup", "tree"}:
+            return ("wpe-product-type-master", "wpe-product-subtype-master", "item-creation-master")
+        return ("wpe-product-type-master",)
+
     def get_queryset(self):
         return ProductTypeCategory.objects.annotate(
             subtype_count=Count("subtypes", distinct=True)
@@ -406,7 +430,9 @@ class ProductTypeCategoryViewSet(ProductTypeManagedViewSet):
 
     @action(detail=False, methods=["get"], url_path="tree")
     def tree(self, request):
-        subtype_queryset = ProductTypeSubtype.objects.order_by("sort_order", "name", "id")
+        subtype_queryset = ProductTypeSubtype.objects.annotate(
+            variant_count=Count("items", distinct=True)
+        ).order_by("sort_order", "name", "id")
         if request.query_params.get("subtypes_is_active") not in (None, ""):
             subtype_queryset = subtype_queryset.filter(
                 is_active=_coerce_filter_value(request.query_params["subtypes_is_active"])
@@ -438,8 +464,16 @@ class ProductTypeSubtypeViewSet(ProductTypeManagedViewSet):
         "is_active": "is_active",
     }
 
+    @property
+    def permission_screen_codes(self):
+        if getattr(self, "action", None) in {"list", "retrieve", "lookup"}:
+            return ("wpe-product-type-master", "wpe-product-subtype-master", "item-creation-master")
+        return ("wpe-product-subtype-master",)
+
     def get_queryset(self):
-        return ProductTypeSubtype.objects.select_related("category").all()
+        return ProductTypeSubtype.objects.select_related("category").annotate(
+            variant_count=Count("items", distinct=True)
+        ).all()
 
     @action(detail=False, methods=["get"])
     def lookup(self, request):
