@@ -60,102 +60,93 @@ def ensure_dev_master_data() -> None:
     ensure_dev_full_access_user()
 
     dashboard_screen, _ = MainScreen.objects.get_or_create(
-        name="Dashboard",
-        defaults={"code": "dashboard", "order_no": 1, "status": True},
+        code="dashboard",
+        defaults={"name": "Dashboard", "order_no": 1, "status": True},
     )
 
     workspace_screen, _ = MainScreen.objects.get_or_create(
-        name="WPE Workspace",
-        defaults={"code": "workspace", "order_no": 2, "status": True},
+        code="workspace",
+        defaults={"name": "WPE Workspace", "order_no": 2, "status": True},
     )
 
     masters_screen, _ = MainScreen.objects.get_or_create(
-        name="Masters",
-        defaults={"code": "masters", "order_no": 3, "status": True},
+        code="masters",
+        defaults={"name": "Masters", "order_no": 3, "status": True},
     )
 
     dashboard_section, _ = ScreenSection.objects.get_or_create(
-        name="Overview",
-        main_screen=dashboard_screen,
-        defaults={"code": "dashboard-overview", "order_no": 1, "is_active": True},
+        code="dashboard-overview",
+        defaults={"name": "Overview", "main_screen": dashboard_screen, "order_no": 1, "is_active": True},
     )
 
     inventory_workspace_section, _ = ScreenSection.objects.get_or_create(
-        name="Inventory Workspace",
-        main_screen=workspace_screen,
-        defaults={"code": "inventory-workspace", "order_no": 1, "is_active": True},
+        code="inventory-workspace",
+        defaults={"name": "Inventory Workspace", "main_screen": workspace_screen, "order_no": 1, "is_active": True},
     )
 
     blending_workspace_section, _ = ScreenSection.objects.get_or_create(
-        name="Blending Workspace",
-        main_screen=workspace_screen,
-        defaults={"code": "blending-workspace", "order_no": 2, "is_active": True},
+        code="blending-workspace",
+        defaults={"name": "Blending Workspace", "main_screen": workspace_screen, "order_no": 2, "is_active": True},
     )
 
     production_workspace_section, _ = ScreenSection.objects.get_or_create(
-        name="Production Workspace",
-        main_screen=workspace_screen,
-        defaults={"code": "production-workspace", "order_no": 3, "is_active": True},
+        code="production-workspace",
+        defaults={"name": "Production Workspace", "main_screen": workspace_screen, "order_no": 3, "is_active": True},
     )
 
     store_workspace_section, _ = ScreenSection.objects.get_or_create(
-        name="Store Workspace",
-        main_screen=workspace_screen,
-        defaults={"code": "store-workspace", "order_no": 4, "is_active": True},
+        code="store-workspace",
+        defaults={"name": "Store Workspace", "main_screen": workspace_screen, "order_no": 4, "is_active": True},
     )
 
     grn_workspace_section, _ = ScreenSection.objects.get_or_create(
-        name="GRN Workspace",
-        main_screen=workspace_screen,
-        defaults={"code": "grn-workspace", "order_no": 5, "is_active": True},
+        code="grn-workspace",
+        defaults={"name": "GRN Workspace", "main_screen": workspace_screen, "order_no": 5, "is_active": True},
     )
 
     contacts_workspace_section, _ = ScreenSection.objects.get_or_create(
-        name="Contacts Workspace",
-        main_screen=workspace_screen,
-        defaults={"code": "contacts-workspace", "order_no": 6, "is_active": True},
+        code="contacts-workspace",
+        defaults={"name": "Contacts Workspace", "main_screen": workspace_screen, "order_no": 6, "is_active": True},
     )
 
     regrind_workspace_section, _ = ScreenSection.objects.get_or_create(
-        name="Regrind Workspace",
-        main_screen=workspace_screen,
-        defaults={"code": "regrind-workspace", "order_no": 7, "is_active": True},
+        code="regrind-workspace",
+        defaults={"name": "Regrind Workspace", "main_screen": workspace_screen, "order_no": 7, "is_active": True},
+    )
+
+    requests_workspace_section, _ = ScreenSection.objects.get_or_create(
+        code="requests-workspace",
+        defaults={"name": "Requests", "main_screen": workspace_screen, "order_no": 8, "is_active": True},
     )
 
     admin_section, _ = ScreenSection.objects.get_or_create(
-        name="Admin Master",
-        main_screen=masters_screen,
-        defaults={"code": "admin-master", "order_no": 1, "is_active": True},
+        code="admin-master",
+        defaults={"name": "Admin Masters", "main_screen": masters_screen, "order_no": 1, "is_active": True},
     )
 
     common_section, _ = ScreenSection.objects.get_or_create(
-        name="Common Master",
-        main_screen=masters_screen,
-        defaults={"code": "common-master", "order_no": 2, "is_active": True},
+        code="common-master",
+        defaults={"name": "Common Masters", "main_screen": masters_screen, "order_no": 2, "is_active": True},
     )
 
     inventory_store_section, _ = ScreenSection.objects.get_or_create(
-        name="Inventory & Store Masters",
-        main_screen=masters_screen,
-        defaults={"code": "inventory-store-master", "order_no": 3, "is_active": True},
+        code="inventory-store-master",
+        defaults={"name": "Inventory & Store Masters", "main_screen": masters_screen, "order_no": 3, "is_active": True},
     )
 
     production_masters_section, _ = ScreenSection.objects.get_or_create(
-        name="Production Masters",
-        main_screen=masters_screen,
-        defaults={"code": "production-master", "order_no": 4, "is_active": True},
+        code="production-master",
+        defaults={"name": "Production Masters", "main_screen": masters_screen, "order_no": 4, "is_active": True},
     )
 
     recipe_bom_section, _ = ScreenSection.objects.get_or_create(
-        name="Recipe / BOM Masters",
-        main_screen=masters_screen,
-        defaults={"code": "recipe-bom-master", "order_no": 5, "is_active": True},
+        code="recipe-bom-master",
+        defaults={"name": "Recipe / BOM Masters", "main_screen": masters_screen, "order_no": 5, "is_active": True},
     )
 
     device_label_section, _ = ScreenSection.objects.get_or_create(
-        name="Device & Label Masters",
-        main_screen=masters_screen,
-        defaults={"code": "device-label-master", "order_no": 6, "is_active": True},
+        code="device-label-master",
+        defaults={"name": "Device & Label Masters", "main_screen": masters_screen, "order_no": 6, "is_active": True},
     )
 
     dev_screens = (
@@ -189,17 +180,17 @@ def ensure_dev_master_data() -> None:
             "folder_name": "/app/blending/stock",
         },
         {
-            "screen_name": "Blending Store Request",
-            "code": "blending-store-request-workspace",
-            "section": blending_workspace_section,
-            "order_no": 2,
-            "folder_name": "/app/blending/store-request",
+            "screen_name": "Store Request",
+            "code": "requests-store-request-workspace",
+            "section": requests_workspace_section,
+            "order_no": 1,
+            "folder_name": "/app/requests/store-request",
         },
         {
             "screen_name": "Blending Transactions",
             "code": "blending-transactions-workspace",
             "section": blending_workspace_section,
-            "order_no": 3,
+            "order_no": 2,
             "folder_name": "/app/blending/transactions",
         },
         {
