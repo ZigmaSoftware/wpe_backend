@@ -317,8 +317,8 @@ class ProductTypeCategory(ProductTypeGovernedMaster):
 
     class Meta:
         db_table = "wpe_product_type_category"
-        verbose_name = "Product Type Category"
-        verbose_name_plural = "Product Type Categories"
+        verbose_name = "Item Category"
+        verbose_name_plural = "Item Categories"
         ordering = ["sort_order", "name", "id"]
         constraints = [
             models.UniqueConstraint(
@@ -349,8 +349,8 @@ class ProductTypeSubtype(ProductTypeGovernedMaster):
 
     class Meta:
         db_table = "wpe_product_type_subtype"
-        verbose_name = "Product Type Subtype"
-        verbose_name_plural = "Product Type Subtypes"
+        verbose_name = "Item Sub Category"
+        verbose_name_plural = "Item Sub Categories"
         ordering = ["category__sort_order", "category__name", "sort_order", "name", "id"]
         constraints = [
             models.UniqueConstraint(
@@ -386,12 +386,13 @@ class ItemMaster(models.Model):
 
     unique_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     item_code = models.CharField(max_length=40, unique=True, db_index=True, blank=True, null=True, editable=False)
-    item_name = models.CharField(max_length=200, unique=True, db_index=True)
+    item_name = models.CharField(max_length=200, db_index=True)
     sub_category = models.ForeignKey(
         ProductTypeSubtype,
         on_delete=models.PROTECT,
         related_name="items",
     )
+    description = models.TextField(blank=True, default="")
     item_type = models.CharField(max_length=12, choices=ItemType.choices, default=ItemType.RM, db_index=True)
     uom = models.ForeignKey(
         UnitMaster,
@@ -410,8 +411,14 @@ class ItemMaster(models.Model):
     class Meta:
         db_table = "wpe_item_master"
         ordering = ["item_name", "id"]
-        verbose_name = "Item Master"
-        verbose_name_plural = "Item Masters"
+        verbose_name = "Item Variant"
+        verbose_name_plural = "Item Variants"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["sub_category", "item_name"],
+                name="wpe_item_subcategory_name_uniq",
+            ),
+        ]
         indexes = [
             models.Index(fields=["sub_category", "is_active"], name="wpe_item_subcat_active_idx"),
             models.Index(fields=["item_type", "is_active"], name="wpe_item_type_active_idx"),
@@ -422,9 +429,20 @@ class ItemMaster(models.Model):
 
     def clean(self):
         self.item_name = (self.item_name or "").strip()
+        self.description = (self.description or "").strip()
         self.hsn_code = (self.hsn_code or "").strip()
         if not self.item_name:
             raise ValidationError({"item_name": "Item name is required."})
+        duplicate_queryset = type(self).objects.filter(
+            sub_category=self.sub_category,
+            item_name=self.item_name,
+        )
+        if self.pk:
+            duplicate_queryset = duplicate_queryset.exclude(pk=self.pk)
+        if duplicate_queryset.exists():
+            raise ValidationError(
+                {"item_name": "An item variant with this name already exists in the selected item sub category."}
+            )
         for field_name in ("gst_percentage", "minimum_stock", "maximum_stock", "reorder_level"):
             current_value = getattr(self, field_name)
             try:
