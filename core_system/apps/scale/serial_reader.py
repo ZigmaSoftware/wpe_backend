@@ -2,6 +2,8 @@
 Background serial reader for the Point Digi Scale indicator.
 
 Serial port is configured via environment variables (read through Django settings):
+  SCALE_ENABLED=false     Disable the serial reader entirely and return a
+                          disconnected API payload without probing ports.
   SERIAL_PORT=AUTO        Scan all available serial ports; prefers the CH340
                           USB-to-Serial converter (VID 1A86 / PID 7523) but
                           falls back to the first available port on the system.
@@ -14,15 +16,19 @@ import re
 import sys
 import threading
 import logging
-from datetime import datetime, timezone
+import time
 
 import serial
 import serial.tools.list_ports
+from django.utils import timezone as django_timezone
 
 logger = logging.getLogger(__name__)
 
 CH340_VID = 0x1A86
 CH340_PID = 0x7523
+FAILED_PORT_COOLDOWN_SECONDS = 15
+NO_PORT_WARNING_INTERVAL_SECONDS = 300
+SCALE_DISABLED_ERROR = "Scale integration is disabled by configuration."
 
 _PLATFORM_FALLBACKS = {
     "linux":  "/dev/ttyUSB0",
@@ -43,11 +49,43 @@ _latest_weight = {
 }
 _reader_thread = None
 _stop_event    = threading.Event()
+_failed_ports_until: dict[str, float] = {}
+_last_no_port_warning_at = 0.0
+
+
+def build_scale_state(
+    *,
+    raw_data: str = "",
+    weight: str = "0.000",
+    unit: str = "kg",
+    status: str = "disconnected",
+    error: str | None = None,
+    detected_port: str | None = None,
+) -> dict:
+    return {
+        "raw_data": raw_data,
+        "weight": weight,
+        "unit": unit,
+        "status": status,
+        "timestamp": django_timezone.localtime().isoformat(),
+        "error": error,
+        "detected_port": detected_port,
+        "platform": sys.platform,
+    }
 
 
 def get_latest_weight() -> dict:
     with _lock:
         return dict(_latest_weight)
+
+
+def get_disabled_weight() -> dict:
+    return build_scale_state(error=SCALE_DISABLED_ERROR)
+
+
+def set_scale_disabled() -> None:
+    with _lock:
+        _latest_weight.update(get_disabled_weight())
 
 
 def find_ch340_port() -> str | None:
@@ -82,41 +120,122 @@ def get_platform_default_port() -> str:
     return _PLATFORM_FALLBACKS.get(sys.platform, "/dev/ttyUSB0")
 
 
+def _port_metadata(port) -> str:
+    return " ".join(
+        str(value or "").strip().lower()
+        for value in (
+            getattr(port, "device", ""),
+            getattr(port, "description", ""),
+            getattr(port, "manufacturer", ""),
+            getattr(port, "product", ""),
+            getattr(port, "interface", ""),
+            getattr(port, "hwid", ""),
+        )
+        if str(value or "").strip()
+    )
+
+
+def is_candidate_scale_port(port) -> bool:
+    if port.vid == CH340_VID and port.pid == CH340_PID:
+        return True
+
+    device = str(getattr(port, "device", "") or "").strip()
+    metadata = _port_metadata(port)
+
+    if sys.platform.startswith("linux"):
+        return device.startswith("/dev/ttyUSB") or device.startswith("/dev/ttyACM") or "/dev/serial/" in device
+
+    if sys.platform == "darwin":
+        return (
+            device.startswith("/dev/tty.usb")
+            or device.startswith("/dev/cu.usb")
+            or "wch" in metadata
+            or "usbserial" in metadata
+        )
+
+    if sys.platform == "win32":
+        return device.upper().startswith("COM")
+
+    return any(keyword in metadata for keyword in ("usb", "serial", "uart", "ch340", "ftdi", "cp210", "pl2303"))
+
+
+def _prune_failed_ports() -> None:
+    now = time.monotonic()
+    expired_ports = [port for port, retry_after in _failed_ports_until.items() if retry_after <= now]
+    for port in expired_ports:
+        _failed_ports_until.pop(port, None)
+
+
+def _is_port_in_cooldown(port: str | None) -> bool:
+    if not port:
+        return False
+    _prune_failed_ports()
+    retry_after = _failed_ports_until.get(port)
+    return retry_after is not None and retry_after > time.monotonic()
+
+
+def _mark_port_failed(port: str | None) -> None:
+    if not port:
+        return
+    _failed_ports_until[port] = time.monotonic() + FAILED_PORT_COOLDOWN_SECONDS
+
+
+def _warn_no_ports_once(message: str, *args) -> None:
+    global _last_no_port_warning_at
+
+    now = time.monotonic()
+    if now - _last_no_port_warning_at < NO_PORT_WARNING_INTERVAL_SECONDS:
+        return
+
+    logger.warning(message, *args)
+    _last_no_port_warning_at = now
+
+
 def find_auto_port() -> str | None:
     """
     Detect an available serial port for AUTO mode.
 
     Priority:
     1. CH340 USB-to-Serial converter identified by VID/PID (most reliable).
-    2. First available serial port found on the system (generic fallback).
+    2. First USB/ACM-style serial port that looks like a real external adapter.
 
     Returns the port device string (e.g. 'COM4', '/dev/ttyUSB0') or None.
     """
-    # 1. Prefer CH340 by VID/PID
-    port = find_ch340_port()
-    if port:
-        return port
-
-    # 2. Fall back to any available serial port
     available = list(serial.tools.list_ports.comports())
     if not available:
-        logger.warning(
+        _warn_no_ports_once(
             "AUTO: No serial ports found on %s. "
-            "Connect the USB-to-Serial device and restart, or set SERIAL_PORT explicitly in .env.",
+            "Connect the USB-to-Serial device and wait, or set SERIAL_PORT explicitly in .env.",
             sys.platform,
         )
         return None
 
-    chosen = available[0].device
+    preferred_ports = [port for port in available if port.vid == CH340_VID and port.pid == CH340_PID]
+    for port in preferred_ports:
+        if _is_port_in_cooldown(port.device):
+            continue
+        logger.info("AUTO: Using CH340 port %s (%s).", port.device, port.description or "no description")
+        return port.device
+
+    candidates = [port for port in available if is_candidate_scale_port(port) and not _is_port_in_cooldown(port.device)]
+    if not candidates:
+        _warn_no_ports_once(
+            "AUTO: No suitable external serial ports available on %s. Visible ports: %s",
+            sys.platform,
+            [port.device for port in available] or ["none"],
+        )
+        return None
+
+    chosen = candidates[0].device
     logger.info(
-        "AUTO: CH340 not found. Using first available port: %s (%s).",
+        "AUTO: CH340 not found. Using candidate port: %s (%s).",
         chosen,
-        available[0].description or "no description",
+        candidates[0].description or "no description",
     )
-    if len(available) > 1:
+    if len(candidates) > 1:
         logger.debug(
-            "AUTO: Other available ports (not selected): %s",
-            [p.device for p in available[1:]],
+            "AUTO: Other candidate ports (not selected): %s",
+            [p.device for p in candidates[1:]],
         )
     return chosen
 
@@ -208,6 +327,14 @@ def _read_loop(port: str, baud_rate: int) -> None:
                         continue
                 else:
                     active_port = port
+                    if _is_port_in_cooldown(active_port):
+                        _update_state(
+                            status="disconnected",
+                            error=f"Serial port {active_port} is temporarily unavailable. Retrying shortly.",
+                            detected_port=active_port,
+                        )
+                        _stop_event.wait(timeout=retry_delay)
+                        continue
 
                 logger.info("Opening %s at %d baud…", active_port, baud_rate)
                 ser = serial.Serial(
@@ -250,12 +377,18 @@ def _read_loop(port: str, baud_rate: int) -> None:
                 logger.warning("Port %s is already in use: %s", active_port, exc)
             elif "could not open port" in exc_lower or "not found" in exc_lower or "no such" in exc_lower:
                 logger.warning("Invalid or unavailable port %s: %s", active_port, exc)
-            elif "device disconnected" in exc_lower or "ioerror" in exc_lower or "errno 5" in exc_lower:
+            elif (
+                "device disconnected" in exc_lower
+                or "ioerror" in exc_lower
+                or "errno 5" in exc_lower
+                or "input/output error" in exc_lower
+            ):
                 logger.warning("Device disconnected from %s: %s", active_port, exc)
             else:
                 logger.warning("Serial error on %s: %s", active_port, exc)
             if ser and ser.is_open:
                 ser.close()
+            _mark_port_failed(active_port)
             ser = None
             if port == "AUTO":
                 active_port = None
@@ -280,4 +413,4 @@ def _read_loop(port: str, baud_rate: int) -> None:
 def _update_state(**kwargs) -> None:
     with _lock:
         _latest_weight.update(kwargs)
-        _latest_weight["timestamp"] = datetime.now(timezone.utc).isoformat()
+        _latest_weight["timestamp"] = django_timezone.localtime().isoformat()

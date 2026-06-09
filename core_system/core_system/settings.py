@@ -135,7 +135,7 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 LANGUAGE_CODE = "en-us"
-TIME_ZONE = os.getenv("DJANGO_TIME_ZONE", "UTC")
+TIME_ZONE = os.getenv("DJANGO_TIME_ZONE", "Asia/Kolkata")
 PRODUCTION_SCANCODE_TIME_ZONE = os.getenv("PRODUCTION_SCANCODE_TIME_ZONE", "Asia/Kolkata")
 USE_I18N = True
 USE_TZ = True
@@ -193,6 +193,8 @@ GRN_SERVICE_BASE_URL = os.getenv("GRN_SERVICE_BASE_URL", "").strip()
 GRN_SERVICE_API_KEY = os.getenv("GRN_SERVICE_API_KEY", "").strip()
 
 # Point Digi Scale serial connection
+# Set SCALE_ENABLED=false to disable serial port probing and always return a disconnected payload.
 # Set SERIAL_PORT=AUTO to auto-detect CH340 by VID/PID, or use explicit port e.g. /dev/ttyUSB0
+SCALE_ENABLED    = env_bool("SCALE_ENABLED", True)
 SERIAL_PORT      = os.getenv("SERIAL_PORT", "AUTO")
 SERIAL_BAUD_RATE = int(os.getenv("SERIAL_BAUD_RATE", "9600"))

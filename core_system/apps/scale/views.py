@@ -1,10 +1,11 @@
 import sys
-from datetime import datetime, timezone
 
 from django.http import JsonResponse
 from django.views import View
+from django.utils import timezone
+from django.conf import settings
 
-from .serial_reader import get_latest_weight, list_available_ports
+from .serial_reader import get_disabled_weight, get_latest_weight, list_available_ports
 
 
 class LatestWeightView(View):
@@ -13,9 +14,12 @@ class LatestWeightView(View):
     http_method_names = ["get"]
 
     def get(self, request, *args, **kwargs):
+        if not getattr(settings, "SCALE_ENABLED", True):
+            return JsonResponse(get_disabled_weight())
+
         data = get_latest_weight()
         if not data.get("timestamp"):
-            data["timestamp"] = datetime.now(timezone.utc).isoformat()
+            data["timestamp"] = timezone.localtime().isoformat()
         return JsonResponse(data)
 
 
@@ -26,6 +30,7 @@ class ListPortsView(View):
 
     def get(self, request, *args, **kwargs):
         return JsonResponse({
+            "scale_enabled": getattr(settings, "SCALE_ENABLED", True),
             "platform": sys.platform,
             "ports": list_available_ports(),
         })
