@@ -1,10 +1,13 @@
 """
 Background serial reader for the Point Digi Scale indicator.
 
-Supports auto-detection of the QinHeng CH340 USB-to-Serial converter
-(VID 1A86 / PID 7523) used by the Point Digi scale.  Set SERIAL_PORT='AUTO'
-(the default) to let the reader find the device itself, or set a fixed port
-name such as '/dev/ttyUSB0' or 'COM3' to bypass detection.
+Serial port is configured via environment variables (read through Django settings):
+  SERIAL_PORT=AUTO        Scan all available serial ports; prefers the CH340
+                          USB-to-Serial converter (VID 1A86 / PID 7523) but
+                          falls back to the first available port on the system.
+  SERIAL_PORT=COM4        Use the specified port directly (Windows).
+  SERIAL_PORT=/dev/ttyUSB0  Use the specified port directly (Linux/macOS).
+  SERIAL_BAUD_RATE=9600   Baud rate (default 9600).
 """
 
 import re
@@ -79,6 +82,45 @@ def get_platform_default_port() -> str:
     return _PLATFORM_FALLBACKS.get(sys.platform, "/dev/ttyUSB0")
 
 
+def find_auto_port() -> str | None:
+    """
+    Detect an available serial port for AUTO mode.
+
+    Priority:
+    1. CH340 USB-to-Serial converter identified by VID/PID (most reliable).
+    2. First available serial port found on the system (generic fallback).
+
+    Returns the port device string (e.g. 'COM4', '/dev/ttyUSB0') or None.
+    """
+    # 1. Prefer CH340 by VID/PID
+    port = find_ch340_port()
+    if port:
+        return port
+
+    # 2. Fall back to any available serial port
+    available = list(serial.tools.list_ports.comports())
+    if not available:
+        logger.warning(
+            "AUTO: No serial ports found on %s. "
+            "Connect the USB-to-Serial device and restart, or set SERIAL_PORT explicitly in .env.",
+            sys.platform,
+        )
+        return None
+
+    chosen = available[0].device
+    logger.info(
+        "AUTO: CH340 not found. Using first available port: %s (%s).",
+        chosen,
+        available[0].description or "no description",
+    )
+    if len(available) > 1:
+        logger.debug(
+            "AUTO: Other available ports (not selected): %s",
+            [p.device for p in available[1:]],
+        )
+    return chosen
+
+
 def start_serial_reader(port: str = "AUTO", baud_rate: int = 9600) -> None:
     global _reader_thread, _stop_event
 
@@ -151,13 +193,14 @@ def _read_loop(port: str, baud_rate: int) -> None:
         try:
             if ser is None or not ser.is_open:
                 if port == "AUTO":
-                    active_port = find_ch340_port()
+                    active_port = find_auto_port()
                     if active_port is None:
                         _update_state(
                             status="disconnected",
                             error=(
-                                f"CH340 device (VID=1A86, PID=7523) not found on {sys.platform}. "
-                                "Connect the USB cable and wait…"
+                                f"No serial port found on {sys.platform}. "
+                                "Connect the USB-to-Serial device and wait, "
+                                "or set SERIAL_PORT=<port> in .env to specify a port explicitly."
                             ),
                             detected_port=None,
                         )
@@ -202,7 +245,15 @@ def _read_loop(port: str, baud_rate: int) -> None:
                 _update_state(raw_data=raw_line, detected_port=active_port)
 
         except serial.SerialException as exc:
-            logger.warning("Serial error on %s: %s", active_port, exc)
+            exc_lower = str(exc).lower()
+            if "in use" in exc_lower or "access denied" in exc_lower or "permissionerror" in exc_lower:
+                logger.warning("Port %s is already in use: %s", active_port, exc)
+            elif "could not open port" in exc_lower or "not found" in exc_lower or "no such" in exc_lower:
+                logger.warning("Invalid or unavailable port %s: %s", active_port, exc)
+            elif "device disconnected" in exc_lower or "ioerror" in exc_lower or "errno 5" in exc_lower:
+                logger.warning("Device disconnected from %s: %s", active_port, exc)
+            else:
+                logger.warning("Serial error on %s: %s", active_port, exc)
             if ser and ser.is_open:
                 ser.close()
             ser = None
@@ -212,7 +263,7 @@ def _read_loop(port: str, baud_rate: int) -> None:
             _stop_event.wait(timeout=retry_delay)
 
         except Exception as exc:
-            logger.exception("Unexpected error in serial reader: %s", exc)
+            logger.exception("Unable to read data from %s: %s", active_port, exc)
             if ser and ser.is_open:
                 ser.close()
             ser = None

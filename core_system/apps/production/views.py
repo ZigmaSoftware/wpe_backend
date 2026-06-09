@@ -191,6 +191,8 @@ class ProductionSummaryViewSet(viewsets.ModelViewSet):
 
 import re
 from decimal import Decimal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Count, Prefetch, ProtectedError, Q
 from django.shortcuts import get_object_or_404
@@ -557,6 +559,106 @@ def validate_bom_component_payload(component_data, fallback_sequence):
     return payload, None
 
 
+def get_production_scancode_timezone():
+    timezone_name = getattr(settings, "PRODUCTION_SCANCODE_TIME_ZONE", "Asia/Kolkata") or "Asia/Kolkata"
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("Asia/Kolkata")
+
+
+def _bom_component_source_key_from_payload(payload):
+    if payload["product_subtype"] is not None:
+        return ("product_subtype", payload["product_subtype"].pk)
+    return ("item", payload["item"].pk)
+
+
+def _bom_component_source_key(component):
+    if component.product_subtype_id is not None:
+        return ("product_subtype", component.product_subtype_id)
+    return ("item", component.item_id)
+
+
+def validate_bom_component_payloads(components):
+    seen_keys = set()
+    component_specs = []
+    for index, comp_data in enumerate(components, start=1):
+        payload, error = validate_bom_component_payload(comp_data, index)
+        if error:
+            return None, f"Component {index}: {error}"
+
+        duplicate_key = _bom_component_source_key_from_payload(payload)
+        if duplicate_key in seen_keys:
+            return None, f"Component {index}: duplicate component selection is not allowed."
+        seen_keys.add(duplicate_key)
+
+        requested_id = comp_data.get("id")
+        if requested_id in (None, "", 0, "0"):
+            requested_id = None
+        else:
+            try:
+                requested_id = int(requested_id)
+            except (TypeError, ValueError):
+                return None, f"Component {index}: id must be numeric."
+
+        component_specs.append(
+            {
+                "payload": payload,
+                "source_key": duplicate_key,
+                "requested_id": requested_id,
+                "index": index,
+            }
+        )
+
+    return component_specs, None
+
+
+def sync_bom_variant_components(bom_variant, component_specs):
+    existing_components = list(bom_variant.components.select_for_update())
+    existing_by_id = {component.pk: component for component in existing_components}
+    existing_by_key = {_bom_component_source_key(component): component for component in existing_components}
+    retained_component_ids = set()
+    component_fields = [
+        "item",
+        "product_subtype",
+        "target_weight_grams",
+        "min_weight_grams",
+        "max_weight_grams",
+        "sequence",
+        "is_regrind",
+        "unit",
+        "is_active",
+    ]
+
+    for spec in component_specs:
+        payload = spec["payload"]
+        component = None
+        requested_id = spec["requested_id"]
+        if requested_id is not None:
+            component = existing_by_id.get(requested_id)
+            if component is None:
+                return f"Component {spec['index']}: id does not belong to this recipe."
+        if component is None:
+            component = existing_by_key.get(spec["source_key"])
+
+        if component is None:
+            component = BOMVariantComponent.objects.create(bom_variant=bom_variant, **payload)
+        else:
+            for field_name in component_fields:
+                setattr(component, field_name, payload[field_name])
+            component.save(update_fields=component_fields)
+
+        retained_component_ids.add(component.pk)
+
+    unused_components = bom_variant.components.exclude(pk__in=retained_component_ids)
+    try:
+        unused_components.delete()
+    except ProtectedError:
+        return "Cannot remove recipe item because it is already used in batch weight entries. Mark it inactive instead."
+
+    return None
+
+
 class RecipeMasterViewSet(ProductionBaseMasterViewSet):
     queryset = bom_variant_queryset().annotate(component_count=Count("components", distinct=True))
     serializer_class = RecipeMasterSerializer
@@ -621,30 +723,15 @@ class RecipeMasterViewSet(ProductionBaseMasterViewSet):
         if not isinstance(components, list):
             return Response({"detail": "components must be a list."}, status=drf_status.HTTP_400_BAD_REQUEST)
 
-        seen_keys = set()
-        new_components = []
-        for index, comp_data in enumerate(components, start=1):
-            payload, error = validate_bom_component_payload(comp_data, index)
-            if error:
-                return Response({"detail": f"Component {index}: {error}"}, status=drf_status.HTTP_400_BAD_REQUEST)
-
-            duplicate_key = (
-                ("product_subtype", payload["product_subtype"].pk)
-                if payload["product_subtype"] is not None
-                else ("item", payload["item"].pk)
-            )
-            if duplicate_key in seen_keys:
-                return Response(
-                    {"detail": f"Component {index}: duplicate component selection is not allowed."},
-                    status=drf_status.HTTP_400_BAD_REQUEST,
-                )
-            seen_keys.add(duplicate_key)
-            new_components.append(BOMVariantComponent(bom_variant=recipe, **payload))
+        component_specs, error = validate_bom_component_payloads(components)
+        if error:
+            return Response({"detail": error}, status=drf_status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
-            recipe.components.all().delete()
-            if new_components:
-                BOMVariantComponent.objects.bulk_create(new_components)
+            error = sync_bom_variant_components(recipe, component_specs)
+            if error:
+                transaction.set_rollback(True)
+                return Response({"detail": error}, status=drf_status.HTTP_400_BAD_REQUEST)
 
         refreshed = bom_variant_queryset().annotate(component_count=Count("components", distinct=True)).get(pk=recipe.pk)
         return Response(RecipeMasterDetailSerializer(refreshed).data)
@@ -910,35 +997,23 @@ class BOMVariantComponentAPIView(generics.GenericAPIView):
         if not isinstance(components, list):
             return success_response(message="components must be a list.", data={}, status_code=400)
 
-        seen_keys = set()
-        new_components = []
-        for index, comp_data in enumerate(components, start=1):
-            payload, error = validate_bom_component_payload(comp_data, index)
-            if error:
-                return success_response(
-                    message=f"Component {index}: {error}",
-                    data={},
-                    status_code=400,
-                )
-
-            duplicate_key = (
-                ("product_subtype", payload["product_subtype"].pk)
-                if payload["product_subtype"] is not None
-                else ("item", payload["item"].pk)
+        component_specs, error = validate_bom_component_payloads(components)
+        if error:
+            return success_response(
+                message=error,
+                data={},
+                status_code=400,
             )
-            if duplicate_key in seen_keys:
-                return success_response(
-                    message=f"Component {index}: duplicate component selection is not allowed.",
-                    data={},
-                    status_code=400,
-                )
-            seen_keys.add(duplicate_key)
-            new_components.append(BOMVariantComponent(bom_variant=bom, **payload))
 
         with transaction.atomic():
-            bom.components.all().delete()
-            if new_components:
-                BOMVariantComponent.objects.bulk_create(new_components)
+            error = sync_bom_variant_components(bom, component_specs)
+            if error:
+                transaction.set_rollback(True)
+                return success_response(
+                    message=error,
+                    data={},
+                    status_code=400,
+                )
 
         refreshed = bom_variant_queryset().get(pk=bom.pk)
         return success_response(
@@ -1651,7 +1726,10 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
     def _build_stage_output_scancode(cls, batch: ProductionBatch, _sequence: int, captured_at):
         production_token = cls._sanitize_scancode_token(batch.production_order.production_id or "PRD")
         stage_token = cls._sanitize_scancode_token(batch.stage or "ST")
-        localized_captured_at = timezone.localtime(captured_at) if timezone.is_aware(captured_at) else captured_at
+        scancode_timezone = get_production_scancode_timezone()
+        localized_captured_at = (
+            timezone.localtime(captured_at, scancode_timezone) if timezone.is_aware(captured_at) else captured_at
+        )
         batch_suffix = cls._resolve_workflow_batch_suffix(batch)
         return f"{production_token}{stage_token}{localized_captured_at.strftime('%d%m%Y%H%M')}{batch_suffix}"
 
