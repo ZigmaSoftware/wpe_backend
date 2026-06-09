@@ -18,7 +18,7 @@ from .models import (
     UserType,
     UserTypePermission,
 )
-from .serializers import StaffSerializer, UserCreationWriteSerializer
+from .serializers import StaffSerializer, UserCreationReadSerializer, UserCreationWriteSerializer
 from .services import delete_user_creation, resolve_subject_permissions
 from apps.common_master.models import Company
 from apps.login_home.models import Department
@@ -118,6 +118,38 @@ class FullAccessPermissionResolutionTests(TestCase):
 
 
 class StaffSerializerTests(TestCase):
+    def test_rejects_duplicate_employee_id_and_phone_number(self):
+        Staff.objects.create(
+            staff_code="EMP-001",
+            name="Existing Staff",
+            mobile="9876543210",
+        )
+
+        serializer = StaffSerializer(
+            data={
+                "staff_code": " emp-001 ",
+                "name": "Duplicate Staff",
+                "age": 30,
+                "mobile": "9876543210",
+                "email": "duplicate@example.com",
+            }
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertEqual(str(serializer.errors["staff_code"][0]), "Employee ID already exists.")
+        self.assertEqual(str(serializer.errors["mobile"][0]), "Phone no already exists.")
+
+    def test_duplicate_checks_allow_current_staff_values_on_edit(self):
+        staff = Staff.objects.create(
+            staff_code="EMP-001",
+            name="Existing Staff",
+            mobile="9876543210",
+        )
+        serializer = StaffSerializer(instance=staff)
+
+        self.assertEqual(serializer.validate_staff_code(" EMP-001 "), "EMP-001")
+        self.assertEqual(serializer.validate_mobile("9876543210"), "9876543210")
+
     def test_creates_staff_with_extended_fields(self):
         serializer = StaffSerializer(
             data={
@@ -280,6 +312,8 @@ class UserCreationWriteSerializerTests(TestCase):
 
         self.assertEqual(profile.user.username, "imran")
         self.assertTrue(profile.user.check_password("imran123"))
+        self.assertEqual(profile.password, "imran123")
+        self.assertEqual(UserCreationReadSerializer(profile).data["password"], "imran123")
         self.assertEqual(profile.user_type_id, user_type.id)
         self.assertEqual(profile.company_id, company.id)
         self.assertEqual(profile.department_id, legacy_department.id)

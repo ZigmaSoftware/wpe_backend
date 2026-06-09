@@ -201,6 +201,8 @@ def upsert_user_creation(
     profile.account_status = account_status
     profile.force_password_change = force_password_change
     profile.is_team_head = is_team_head
+    if password:
+        profile.password = password
 
     if account_status != UserCreation.AccountStatus.LOCKED:
         profile.failed_login_attempts = 0
