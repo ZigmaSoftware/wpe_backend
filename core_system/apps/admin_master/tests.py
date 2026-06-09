@@ -6,6 +6,7 @@ from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
+from rest_framework.test import APIRequestFactory, force_authenticate
 
 from .bootstrap import ensure_dev_full_access_user
 from .models import (
@@ -20,9 +21,10 @@ from .models import (
 )
 from .serializers import StaffSerializer, UserCreationWriteSerializer
 from .services import delete_user_creation, resolve_subject_permissions
+from .views import StaffViewSet
 from apps.common_master.models import Company
 from apps.login_home.models import Department
-from apps.wpe_masters.models import DepartmentMaster, RoleMaster, WPEUserCreation
+from apps.wpe_masters.models import DepartmentMaster, DesignationMaster, RoleMaster, WPEUserCreation
 
 
 User = get_user_model()
@@ -119,12 +121,17 @@ class FullAccessPermissionResolutionTests(TestCase):
 
 class StaffSerializerTests(TestCase):
     def test_creates_staff_with_extended_fields(self):
+        department_master = DepartmentMaster.objects.create(name="Administration")
+        designation_master = DesignationMaster.objects.create(
+            name="Supervisor",
+            department=department_master,
+        )
         serializer = StaffSerializer(
             data={
                 "staff_code": "EMP-001",
                 "name": "Ravi Kumar",
                 "age": 29,
-                "designation": "Supervisor",
+                "designation": designation_master.id,
                 "mobile": "9876543210",
                 "email": "ravi@example.com",
                 "joining_date": "2026-06-01",
@@ -142,6 +149,8 @@ class StaffSerializerTests(TestCase):
         self.assertEqual(staff.staff_code, "EMP-001")
         self.assertEqual(staff.name, "Ravi Kumar")
         self.assertEqual(staff.age, 29)
+        self.assertEqual(staff.department_master_id, department_master.id)
+        self.assertEqual(staff.designation_master_id, designation_master.id)
         self.assertEqual(staff.designation, "Supervisor")
         self.assertEqual(staff.mobile, "9876543210")
         self.assertEqual(staff.email, "ravi@example.com")
@@ -158,7 +167,7 @@ class StaffSerializerTests(TestCase):
                 "staff_code": "",
                 "name": "Ravi Kumar",
                 "age": 29,
-                "designation": "",
+                "designation": 0,
                 "mobile": "",
                 "email": "",
                 "is_active": True,
@@ -198,6 +207,53 @@ class UserCreationDeletionTests(TestCase):
 
         self.assertFalse(UserCreation.objects.filter(pk=profile.pk).exists())
         self.assertFalse(User.objects.filter(pk=user.pk).exists())
+
+
+class StaffViewSetActionTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="staff-admin", password="secret123", is_active=True)
+        self.factory = APIRequestFactory(HTTP_HOST="127.0.0.1:8000")
+
+    def test_toggle_status_updates_staff_linked_user_creation_and_auth_user(self):
+        staff = Staff.objects.create(name="Status User", is_active=True)
+        auth_user = User.objects.create_user(username="status-user", password="secret123", is_active=True)
+        profile = UserCreation.objects.create(
+            user=auth_user,
+            staff=staff,
+            account_status=UserCreation.AccountStatus.ACTIVE,
+        )
+
+        request = self.factory.patch(f"/api/users/staff/{staff.id}/toggle-status/", {})
+        force_authenticate(request, user=self.user)
+        response = StaffViewSet.as_view({"patch": "toggle_status"})(request, pk=staff.id)
+
+        staff.refresh_from_db()
+        profile.refresh_from_db()
+        auth_user.refresh_from_db()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(staff.is_active)
+        self.assertEqual(profile.account_status, UserCreation.AccountStatus.INACTIVE)
+        self.assertFalse(profile.is_active)
+        self.assertFalse(auth_user.is_active)
+
+    def test_destroy_removes_linked_user_creation_before_deleting_staff(self):
+        staff = Staff.objects.create(name="Delete Staff")
+        auth_user = User.objects.create_user(username="delete-staff-user", password="secret123", is_active=True)
+        profile = UserCreation.objects.create(
+            user=auth_user,
+            staff=staff,
+            account_status=UserCreation.AccountStatus.ACTIVE,
+        )
+
+        request = self.factory.delete(f"/api/users/staff/{staff.id}/")
+        force_authenticate(request, user=self.user)
+        response = StaffViewSet.as_view({"delete": "destroy"})(request, pk=staff.id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(UserCreation.objects.filter(pk=profile.pk).exists())
+        self.assertFalse(Staff.objects.filter(pk=staff.pk).exists())
+        self.assertFalse(User.objects.filter(pk=auth_user.pk).exists())
 
 
 class UserCreationWriteSerializerTests(TestCase):

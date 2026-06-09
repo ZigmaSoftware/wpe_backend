@@ -149,6 +149,30 @@ class ProductTypesApiTests(APITestCase):
         self.assertEqual(record["variant_count"], 2)
 
 
+class DesignationLookupApiTests(APITestCase):
+    def setUp(self):
+        self.user = UserModel.objects.create_user(
+            username="designation-lookup-user",
+            email="designation-lookup@example.com",
+            password="password123",
+        )
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh.access_token}")
+
+    def test_lookup_includes_department_context(self):
+        department = DepartmentMaster.objects.create(name="Administration")
+        designation = DesignationMaster.objects.create(name="Supervisor", department=department)
+
+        response = self.client.get("/api/wpe-masters/designations/lookup/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        matched = next((row for row in response.data if row["id"] == designation.id), None)
+        self.assertIsNotNone(matched)
+        self.assertEqual(matched["name"], "Supervisor")
+        self.assertEqual(matched["department_id"], department.id)
+        self.assertEqual(matched["department_name"], "Administration")
+
+
 class RoleLookupApiTests(APITestCase):
     def setUp(self):
         self.user = UserModel.objects.create_user(

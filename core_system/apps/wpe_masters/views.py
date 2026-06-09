@@ -254,6 +254,22 @@ class DesignationMasterViewSet(CodeTrackedMasterViewSet):
     ordering = ["department__name", "name"]
     next_code_prefix = "DES"
 
+    @action(detail=False, methods=["get"])
+    def lookup(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True)
+        return Response(
+            [
+                {
+                    "id": designation.id,
+                    "name": designation.name,
+                    "code": designation.code,
+                    "department_id": designation.department_id,
+                    "department_name": getattr(designation.department, "name", None),
+                }
+                for designation in queryset
+            ]
+        )
+
 
 class RoleMasterViewSet(CodeTrackedMasterViewSet):
     queryset = RoleMaster.objects.select_related("designation", "designation__department").all()

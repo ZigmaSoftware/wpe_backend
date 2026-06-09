@@ -169,6 +169,13 @@ class Staff(UniqueIDMixin):
         blank=True,
         related_name="staff_members",
     )
+    designation_master = models.ForeignKey(
+        "wpe_masters.DesignationMaster",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="staff_members",
+    )
     role_master = models.ForeignKey(
         "wpe_masters.RoleMaster",
         on_delete=models.SET_NULL,
