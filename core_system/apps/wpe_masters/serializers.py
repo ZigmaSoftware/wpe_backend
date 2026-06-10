@@ -27,8 +27,6 @@ from .models import (
     WarehouseMaster,
     WeighmentScaleMaster,
     WPEUserCreation,
-    WPERolePermission,
-    WPEUserScreenPermission,
 )
 from apps.production.models import ProductionMachine
 
@@ -673,34 +671,3 @@ class WPEUserCreationWriteSerializer(serializers.ModelSerializer):
                     getattr(instance, field).set(items)
 
         return instance
-
-
-PERMISSION_FIELDS = (
-    "view_all", "view_self", "can_add", "can_edit",
-    "can_duplicate", "can_delete",
-    "generate_invoice_access", "invoice_access", "access",
-)
-
-
-class WPERolePermissionSerializer(serializers.ModelSerializer):
-    role_name = serializers.CharField(source="role.name", read_only=True)
-    main_screen_name = serializers.CharField(source="main_screen.name", read_only=True)
-
-    class Meta:
-        model = WPERolePermission
-        fields = (
-            "id", "role", "role_name", "main_screen", "main_screen_name",
-        ) + PERMISSION_FIELDS + ("created_at", "updated_at")
-        read_only_fields = ("created_at", "updated_at")
-
-
-class WPEUserScreenPermissionSerializer(serializers.ModelSerializer):
-    screen_name = serializers.CharField(source="user_screen.screen_name", read_only=True)
-    screen_section_name = serializers.CharField(source="user_screen.screen_section.name", read_only=True)
-
-    class Meta:
-        model = WPEUserScreenPermission
-        fields = (
-            "id", "user_screen", "screen_name", "screen_section_name",
-        ) + PERMISSION_FIELDS + ("created_at", "updated_at")
-        read_only_fields = ("created_at", "updated_at")

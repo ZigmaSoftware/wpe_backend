@@ -193,6 +193,18 @@ class GRNAPIViewTests(APITestCase):
         self.assertEqual(response.data["status"], "success")
         self.assertEqual(response.data["count"], 2)
 
+    def test_grn_detail_get_returns_saved_data(self):
+        response = self.client.get(self.detail_url(self.first_grn.id))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "success")
+        self.assertEqual(response.data["data"]["id"], self.first_grn.id)
+        self.assertEqual(response.data["data"]["grn_no"], self.first_grn.grn_no)
+        self.assertEqual(
+            response.data["data"]["document_details"]["po_no"],
+            self.first_grn.po_no,
+        )
+
     def test_grn_viewset_get_returns_saved_data(self):
         response = self.client.get(self.view_url)
 

@@ -1128,6 +1128,45 @@ class GRNCreateAPIView(GRNAPIViewMixin, APIView):
 class GRNDetailAPIView(APIView):
     parser_classes = [JSONParser, FormParser, MultiPartParser]
 
+    def get(self, request, pk: int):
+        try:
+            grn = GRN.objects.filter(pk=pk).first()
+            if grn is None:
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "GRN not found",
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            return Response(
+                {
+                    "status": "success",
+                    "message": "GRN detail fetched successfully",
+                    "data": GRNReadSerializer(grn).data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except (ProgrammingError, OperationalError) as exc:
+            if is_missing_schema_error(exc):
+                return schema_sync_response()
+            return Response(
+                {
+                    "status": "error",
+                    "message": str(exc),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        except Exception as exc:
+            return Response(
+                {
+                    "status": "error",
+                    "message": str(exc),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
     def patch(self, request, pk: int):
         try:
             grn = GRN.objects.filter(pk=pk).first()

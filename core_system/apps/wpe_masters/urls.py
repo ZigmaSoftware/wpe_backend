@@ -18,13 +18,11 @@ from .views import (
     ProductionTypeMasterViewSet,
     PurchaseTypeMasterViewSet,
     QRLabelTemplateMasterViewSet,
-    RolePermissionMatrixView,
     RoleMasterViewSet,
     SaleTypeMasterViewSet,
     SerialPortConfigurationMasterViewSet,
     StoreMasterViewSet,
     UnitMasterViewSet,
-    UserScreenPermMatrixView,
     WarehouseMasterViewSet,
     WeighmentScaleMasterViewSet,
     WPEUserCreationViewSet,
@@ -53,8 +51,6 @@ router.register(r"roles", RoleMasterViewSet, basename="wpe-role")
 router.register(r"departments", DepartmentMasterViewSet, basename="wpe-department")
 router.register(r"designations", DesignationMasterViewSet, basename="wpe-designation")
 router.register(r"users", WPEUserCreationViewSet, basename="wpe-user")
-router.register(r"role-permissions", RolePermissionMatrixView, basename="wpe-role-perm")
-router.register(r"user-screen-permissions", UserScreenPermMatrixView, basename="wpe-user-screen-perm")
 
 urlpatterns = [
     path("", include(router.urls)),
