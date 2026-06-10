@@ -5,12 +5,11 @@ from __future__ import annotations
 from rest_framework import serializers
 
 from apps.login_home.models import Department
-from apps.wpe_masters.models import DepartmentMaster, RoleMaster
+from apps.wpe_masters.models import DepartmentMaster, DesignationMaster, RoleMaster
 
 from .models import (
     SCREEN_ACTIONS, 
     MainScreen,
-    Role,
     ScreenSection,
     Staff,
     UserCreation,
@@ -153,16 +152,14 @@ class StaffSerializer(serializers.ModelSerializer):
     staff_code = serializers.CharField(max_length=50, required=True)
     name = serializers.CharField(max_length=150, required=True)
     age = serializers.IntegerField(min_value=1, required=True)
-    department_name = serializers.CharField(source="department_master.name", read_only=True)
-    role_name = serializers.CharField(source="role_master.name", read_only=True)
-    department = serializers.PrimaryKeyRelatedField(
-        source="department_master",
-        queryset=DepartmentMaster.objects.filter(is_active=True),
-        required=True,
-    )
-    role = serializers.PrimaryKeyRelatedField(
-        source="role_master",
-        queryset=RoleMaster.objects.filter(is_active=True),
+    department = serializers.IntegerField(source="department_master_id", read_only=True)
+    department_name = serializers.CharField(source="department_master.name", read_only=True, allow_null=True)
+    designation_name = serializers.CharField(source="designation_master.name", read_only=True, allow_null=True)
+    role = serializers.IntegerField(source="role_master_id", read_only=True)
+    role_name = serializers.CharField(source="role_master.name", read_only=True, allow_null=True)
+    designation = serializers.PrimaryKeyRelatedField(
+        source="designation_master",
+        queryset=DesignationMaster.objects.filter(is_active=True),
         required=True,
     )
     mobile = serializers.CharField(required=True)
@@ -188,6 +185,8 @@ class StaffSerializer(serializers.ModelSerializer):
             "age",
             "department",
             "department_name",
+            "designation",
+            "designation_name",
             "role",
             "role_name",
             "mobile",
@@ -243,17 +242,20 @@ class StaffSerializer(serializers.ModelSerializer):
         return validate_mobile_number(value)
 
     def validate(self, attrs):
-        department_master = attrs.get("department_master") or getattr(self.instance, "department_master", None)
-        role_master = attrs.get("role_master") or getattr(self.instance, "role_master", None)
+        designation_master = attrs.get("designation_master") or getattr(self.instance, "designation_master", None)
 
-        if not department_master:
-            raise serializers.ValidationError({"department": "Department is required."})
-        if not role_master:
-            raise serializers.ValidationError({"role": "Role is required."})
+        if not designation_master:
+            raise serializers.ValidationError({"designation": "Desigination is required."})
 
-        role_department_id = getattr(getattr(role_master, "designation", None), "department_id", None)
-        if role_department_id and role_department_id != department_master.id:
-            raise serializers.ValidationError({"role": "Selected role does not belong to the selected department."})
+        attrs["department_master"] = designation_master.department
+        attrs["role_master"] = (
+            RoleMaster.objects.filter(
+                designation_id=designation_master.id,
+                is_active=True,
+            )
+            .order_by("id")
+            .first()
+        )
 
         if attrs.get("joining_date") == "":
             attrs["joining_date"] = None
@@ -263,8 +265,8 @@ class StaffSerializer(serializers.ModelSerializer):
             attrs["emergency_contact_no"] = None
         if attrs.get("photo") == "":
             attrs["photo"] = None
-        attrs["department"] = _resolve_legacy_department(department_master)
-        attrs["designation"] = role_master.name
+        attrs["department"] = _resolve_legacy_department(designation_master.department)
+        attrs["designation"] = designation_master.name
         return attrs
 
 
@@ -272,13 +274,6 @@ def _resolve_legacy_department(department_master: DepartmentMaster | None) -> De
     if not department_master or not department_master.name:
         return None
     return Department.objects.filter(name__iexact=department_master.name.strip()).order_by("id").first()
-
-
-def _resolve_legacy_role(role_master: RoleMaster | None) -> Role | None:
-    if not role_master or not role_master.name:
-        return None
-    return Role.objects.filter(name__iexact=role_master.name.strip()).order_by("id").first()
-
 
 class UserCreationReadSerializer(serializers.ModelSerializer):
     username = serializers.CharField(source="user.username", read_only=True)

@@ -288,7 +288,7 @@ class UserTypeViewSet(StandardizedModelViewSet):
 
 
 class StaffViewSet(StandardizedModelViewSet):
-    queryset = Staff.objects.select_related("department_master", "role_master").all().order_by("staff_code", "name", "id")
+    queryset = Staff.objects.select_related("department_master", "designation_master", "role_master").all().order_by("staff_code", "name", "id")
     serializer_class = StaffSerializer
     response_serializer_class = StaffSerializer
     resource_name = "Staff"
@@ -296,20 +296,68 @@ class StaffViewSet(StandardizedModelViewSet):
         "staff_code",
         "name",
         "department_master__name",
+        "designation_master__name",
         "role_master__name",
         "mobile",
         "email",
         "emergency_contact_no",
     )
-    ordering_fields = ("staff_code", "name", "department_master__name", "role_master__name", "id")
+    ordering_fields = ("staff_code", "name", "department_master__name", "designation_master__name", "role_master__name", "id")
     filterset_map = {
         "is_active": "is_active",
         "gender": "gender",
         "department": "department_master_id",
         "department_id": "department_master_id",
+        "designation": "designation_master_id",
+        "designation_id": "designation_master_id",
         "role": "role_master_id",
         "role_id": "role_master_id",
     }
+
+    @action(detail=True, methods=["patch"], url_path="toggle-status")
+    def toggle_status(self, request, pk=None):
+        instance = self.get_object()
+        new_value = not bool(instance.is_active)
+
+        with transaction.atomic():
+            instance.is_active = new_value
+            instance.save(update_fields=["is_active"])
+
+            account_status = (
+                UserCreation.AccountStatus.ACTIVE
+                if new_value
+                else UserCreation.AccountStatus.INACTIVE
+            )
+            for profile in instance.user_accounts.select_related("user"):
+                profile.account_status = account_status
+                profile.save()
+
+                if profile.user_id and profile.user.is_active != new_value:
+                    profile.user.is_active = new_value
+                    profile.user.save(update_fields=["is_active"])
+
+        return Response(
+            {
+                "message": f"{self.resource_name} status updated.",
+                "status": new_value,
+            }
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+
+        with transaction.atomic():
+            for profile in list(instance.user_accounts.select_related("user")):
+                delete_user_creation(profile)
+
+            try:
+                self.perform_destroy(instance)
+            except ProtectedError:
+                raise ValidationError(
+                    {"detail": f"{self.resource_name} cannot be deleted because dependent records exist."}
+                )
+
+        return Response({"message": f"{self.resource_name} deleted successfully."})
 
 
 class UserCreationViewSet(StandardizedModelViewSet):
@@ -359,7 +407,7 @@ class UserCreationViewSet(StandardizedModelViewSet):
     @action(detail=False, methods=["get"], url_path="lookup-options")
     def lookup_options(self, request):
         queryset = (
-            Staff.objects.select_related("department_master", "role_master")
+            Staff.objects.select_related("department_master", "designation_master", "role_master")
             .filter(is_active=True)
             .order_by("staff_code", "name", "id")
         )
@@ -373,6 +421,8 @@ class UserCreationViewSet(StandardizedModelViewSet):
                     "email": staff.email,
                     "department_id": staff.department_master_id,
                     "department_name": getattr(staff.department_master, "name", None),
+                    "designation_id": staff.designation_master_id,
+                    "designation_name": getattr(staff.designation_master, "name", None),
                     "role_id": staff.role_master_id,
                     "role_name": getattr(staff.role_master, "name", None),
                 }

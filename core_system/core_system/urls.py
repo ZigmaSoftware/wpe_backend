@@ -15,8 +15,6 @@ urlpatterns = [
     path("api/auth/", include("apps.auth.urls")),
     path("api/blending/", include("apps.blending.urls")),
     path("api/store/", include("apps.store.urls")),
-    path("api/presales/", include("apps.presales.urls")),
-    path("api/presales", include("apps.presales.urls")),
     path("api/contacts/", include("apps.contacts.urls")),
     path("api/users/", include("apps.admin_master.urls")),
     path("api/masters/", include("apps.common_master.urls")),
