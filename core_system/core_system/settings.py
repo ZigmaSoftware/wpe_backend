@@ -72,7 +72,6 @@ INSTALLED_APPS = [
     "apps.items",
     "apps.store",
     "apps.blending",
-    "apps.presales",
     "apps.production.apps.ProductionConfig",
     "apps.wpe_masters.apps.WpeMastersConfig",
     "apps.scale.apps.ScaleConfig",

@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from datetime import datetime
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 from django.db import transaction
-from django.utils import timezone
 
 from apps.contacts.models import Contact
 from apps.items.models import Item
-from apps.presales.models import PreSales
 from apps.store.models import StoreTransaction
 from apps.store.services import (
     apply_inward_stock,
@@ -126,96 +123,6 @@ ITEMS = [
     },
 ]
 
-PRESALES = [
-    {
-        "order_code": "PS-2026-001",
-        "stage": "Enquiry",
-        "sale_type": "Project",
-        "sale_category": "Primary",
-        "project_name": "Metro Decking Package",
-        "version_no": "V1",
-        "description": "Demo presales enquiry for decking package",
-        "lead_source": "Expo",
-        "sale_contact": "Aarav Buildtech",
-        "gp_percent": Decimal("18.50"),
-        "gp_value": Decimal("185000.00"),
-        "line_of_business": "Decking",
-        "sub_segment": "Infrastructure",
-        "segment_keyword": "premium",
-        "required_date": "2026-06-15",
-        "request_person_id": 101,
-        "request_department": "Sales",
-        "required_time_start": "10:00:00",
-        "required_time_end": "18:00:00",
-        "required_reason": "Budgetary estimate",
-        "internal_ref_id": 5001,
-        "invoice_ref_id": 9001,
-        "tolerance": "2%",
-        "profile_type": "Deck Board",
-        "capex": "No",
-        "tl_code": "TL-01",
-        "delivery_challan_type": "Standard",
-        "indent_number": "IND-001",
-        "indent_date": "2026-05-02T10:30:00",
-        "indent_receiving_datetime": "2026-05-02T11:00:00",
-        "movement_description": "Demo movement description",
-        "customer_po": "PO-DEMO-1001",
-        "customer_po_date": "2026-05-03",
-        "destination": "Pune Site",
-        "document_contact": "Aarav Procurement Team",
-        "previous_document_contact": "Legacy Contact",
-        "base_order_id": 301,
-        "base_customer_id": 401,
-        "base_customer_name": "Aarav Buildtech Pvt Ltd",
-        "base_order_date": "2026-05-01T09:30:00",
-        "activity_id": 701,
-    },
-    {
-        "order_code": "PS-2026-002",
-        "stage": "Proposal",
-        "sale_type": "Distribution",
-        "sale_category": "Secondary",
-        "project_name": "South Retail Expansion",
-        "version_no": "V2",
-        "description": "Demo distributor proposal",
-        "lead_source": "Referral",
-        "sale_contact": "Metro Pipes Lead",
-        "gp_percent": Decimal("14.00"),
-        "gp_value": Decimal("92000.00"),
-        "line_of_business": "Profiles",
-        "sub_segment": "Retail",
-        "segment_keyword": "channel",
-        "required_date": "2026-06-25",
-        "request_person_id": 102,
-        "request_department": "Sales",
-        "required_time_start": "09:00:00",
-        "required_time_end": "17:30:00",
-        "required_reason": "Demo quote",
-        "internal_ref_id": 5002,
-        "invoice_ref_id": 9002,
-        "tolerance": "3%",
-        "profile_type": "Profile",
-        "capex": "Yes",
-        "tl_code": "TL-02",
-        "delivery_challan_type": "Express",
-        "indent_number": "IND-002",
-        "indent_date": "2026-05-04T09:00:00",
-        "indent_receiving_datetime": "2026-05-04T09:15:00",
-        "movement_description": "Demo presales second record",
-        "customer_po": "PO-DEMO-1002",
-        "customer_po_date": "2026-05-04",
-        "destination": "Bengaluru Hub",
-        "document_contact": "Metro Commercial Team",
-        "previous_document_contact": "Previous Metro Team",
-        "base_order_id": 302,
-        "base_customer_id": 402,
-        "base_customer_name": "Metro Pipes",
-        "base_order_date": "2026-05-02T12:00:00",
-        "activity_id": 702,
-    },
-]
-
-
 class Command(BaseCommand):
     help = "Seed demo data for core_system modules used by the frontend."
 
@@ -225,7 +132,6 @@ class Command(BaseCommand):
             contacts = self._seed_contacts()
             items = self._seed_items()
             self._seed_stock_movements(items, contacts)
-            self._seed_presales()
 
         self.stdout.write(self.style.SUCCESS("Core demo data seeded successfully."))
 
@@ -354,20 +260,4 @@ class Command(BaseCommand):
                 remarks="Seeded transfer to blending",
                 created_by=self.admin_user,
                 transaction_date="2026-05-05",
-            )
-
-    def _seed_presales(self):
-        for payload in PRESALES:
-            normalized_payload = payload.copy()
-            for field_name in ("indent_date", "indent_receiving_datetime", "base_order_date"):
-                value = normalized_payload.get(field_name)
-                if value:
-                    normalized_payload[field_name] = timezone.make_aware(
-                        datetime.fromisoformat(value),
-                        timezone.get_current_timezone(),
-                    )
-
-            PreSales.objects.update_or_create(
-                order_code=normalized_payload["order_code"],
-                defaults=normalized_payload,
             )

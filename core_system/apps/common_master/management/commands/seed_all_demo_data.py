@@ -28,7 +28,6 @@ from apps.blending.models import BlendingInward, BlendingOutward, BlendingStock
 from apps.contacts.models import Contact
 from apps.items.models import Item, ItemStockTransaction
 from apps.login_home.models import Department
-from apps.presales.models import PreSales, PresalesAuditLog, PresalesRequest, PresalesRequestItem
 from apps.production.models import (
     BOMVariant,
     BOMVariantComponent,
@@ -155,7 +154,6 @@ class Command(BaseCommand):
             self.items = self._seed_items()
             self._seed_inventory()
             self._seed_contacts()
-            self._seed_presales()
             self._seed_production()
 
         if not options["skip_grn"]:
@@ -381,7 +379,7 @@ class Command(BaseCommand):
             "Sales": {
                 "order": 2,
                 "sections": {
-                    "CRM": ["Contacts", "Presales Request"],
+                    "CRM": ["Contacts"],
                 },
             },
             "Inventory": {
@@ -1173,91 +1171,6 @@ class Command(BaseCommand):
         ]
         for payload in contacts:
             Contact.objects.update_or_create(phone=payload["phone"], defaults=payload)
-
-    def _seed_presales(self):
-        PreSales.objects.update_or_create(
-            order_code="PS-DEMO-0001",
-            defaults={
-                "stage": "Proposal",
-                "sale_type": "Project",
-                "sale_category": "Primary",
-                "project_name": "Metro Decking Package",
-                "version_no": "V1",
-                "description": "Seed presales enquiry for decking package.",
-                "lead_source": "Expo",
-                "sale_contact": "Aarav Buildtech",
-                "gp_percent": money("18.50"),
-                "gp_value": money("185000.00"),
-                "line_of_business": "Decking",
-                "sub_segment": "Infrastructure",
-                "segment_keyword": "premium",
-                "required_date": timezone.localdate() + timedelta(days=30),
-                "request_person_id": 9001,
-                "request_department": "Sales",
-                "required_time_start": time(10, 0),
-                "required_time_end": time(18, 0),
-                "required_reason": "Budgetary estimate.",
-                "internal_ref_id": 5001,
-                "invoice_ref_id": 9001,
-                "tolerance": "2%",
-                "profile_type": "Deck Board",
-                "capex": "No",
-                "tl_code": "TL-01",
-                "delivery_challan_type": "Standard",
-                "indent_number": "IND-DEMO-001",
-                "indent_date": aware(-3, 10, 30),
-                "indent_receiving_datetime": aware(-3, 11, 0),
-                "movement_description": "Seed movement description.",
-                "customer_po": "PO-DEMO-1001",
-                "customer_po_date": timezone.localdate(),
-                "destination": "Pune Site",
-                "document_contact": "Aarav Procurement Team",
-                "previous_document_contact": "Legacy Contact",
-                "base_order_id": 301,
-                "base_customer_id": self.parties["customer"].id,
-                "base_customer_name": self.parties["customer"].customer_name,
-                "base_order_date": aware(-5, 9, 30),
-                "activity_id": 701,
-            },
-        )
-
-        request, _ = PresalesRequest.objects.update_or_create(
-            request_no="PSR-SEED-0001",
-            defaults={
-                "request_date": timezone.localdate(),
-                "category": PresalesRequest.Category.STORE,
-                "request_person": "Admin User",
-                "department": "Sales",
-                "required_reason": "Seed store availability check.",
-                "customer_type": "ADDITIVE_MO",
-                "customer_name": self.parties["customer"].customer_name,
-                "remarks": "Seed presales request.",
-                "status": PresalesRequest.Status.APPROVED,
-                "submitted_by": self.users[ADMIN_USERNAME],
-                "submitted_at": timezone.now(),
-                "approved_by": self.users[ADMIN_USERNAME],
-                "approved_at": timezone.now(),
-                "approval_remarks": "Approved by seed command.",
-                "created_by": self.users[ADMIN_USERNAME],
-            },
-        )
-        for item in [self.items["SEED-FG-001"], self.items["SEED-HDPE-001"]]:
-            PresalesRequestItem.objects.update_or_create(
-                presales_request=request,
-                item=item,
-                defaults={
-                    "quantity": money("25.000") if item.unit == "NOS" else money("100.000"),
-                    "unit": item.unit,
-                    "remarks": "Seed request line.",
-                },
-            )
-        if not PresalesAuditLog.objects.filter(presales_request=request, action="APPROVED").exists():
-            PresalesAuditLog.objects.create(
-                presales_request=request,
-                action="APPROVED",
-                performed_by=self.users[ADMIN_USERNAME],
-                notes="Seed approval log.",
-            )
 
     def _seed_production(self):
         machines = {
