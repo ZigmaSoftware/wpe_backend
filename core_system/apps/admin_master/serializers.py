@@ -214,6 +214,11 @@ class StaffSerializer(serializers.ModelSerializer):
         normalized = (value or "").strip()
         if not normalized:
             raise serializers.ValidationError("Employee ID is required.")
+        queryset = Staff.objects.filter(staff_code__iexact=normalized)
+        if self.instance and self.instance.pk:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("Employee ID already exists.")
         return normalized
 
     def validate_name(self, value):
@@ -226,6 +231,11 @@ class StaffSerializer(serializers.ModelSerializer):
         normalized = validate_mobile_number(value)
         if not normalized:
             raise serializers.ValidationError("Phone no is required.")
+        queryset = Staff.objects.filter(mobile=normalized)
+        if self.instance and self.instance.pk:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("Phone no already exists.")
         return normalized
 
     def validate_emergency_contact_no(self, value):
@@ -302,6 +312,7 @@ class UserCreationReadSerializer(serializers.ModelSerializer):
             "company_name",
             "account_status",
             "is_active",
+            "password",
             "last_login",
             "password_changed_at",
             "failed_login_attempts",

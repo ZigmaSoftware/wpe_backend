@@ -286,6 +286,7 @@ class UserCreation(UniqueIDMixin):
         db_index=True,
     )
     is_active = models.BooleanField(default=True, db_index=True)
+    password = models.CharField(max_length=128, null=True, blank=True)
     password_changed_at = models.DateTimeField(null=True, blank=True)
     failed_login_attempts = models.PositiveSmallIntegerField(default=0)
     force_password_change = models.BooleanField(default=False)
