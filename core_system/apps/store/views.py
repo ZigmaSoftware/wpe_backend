@@ -168,12 +168,13 @@ class ApproveStockRequestAPIView(generics.GenericAPIView):
             pk,
             request.user,
             approval_remarks=serializer.validated_data.get("approval_remarks"),
+            approval_lines=serializer.validated_data.get("items"),
         )
         stock_request = approval_result["stock_request"]
         availability_map = availability_map_for_requests([stock_request])
 
         return success_response(
-            message="Store request approved successfully",
+            message="Store request reviewed successfully",
             data={
                 "request": StockRequestSerializer(
                     stock_request,
