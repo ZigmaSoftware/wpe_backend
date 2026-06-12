@@ -834,8 +834,13 @@ def resolve_item_for_grn_line(grn_payload: dict[str, Any], line_payload: dict[st
         else []
     )
     item_by_name = name_matches[0] if len(name_matches) == 1 else None
+    external_item_id_conflicts_with_name = (
+        item_by_external_id is not None
+        and bool(product_description)
+        and normalize_text(item_by_external_id.item_name).casefold() != product_description.casefold()
+    )
 
-    if len(name_matches) > 1 and item_by_external_id is None:
+    if len(name_matches) > 1 and (item_by_external_id is None or external_item_id_conflicts_with_name):
         raise ValidationError(
             {
                 "product_description": (
@@ -844,6 +849,9 @@ def resolve_item_for_grn_line(grn_payload: dict[str, Any], line_payload: dict[st
                 )
             }
         )
+
+    if external_item_id_conflicts_with_name:
+        item_by_external_id = None
 
     if item_by_external_id is not None and item_by_name is not None and item_by_external_id.pk != item_by_name.pk:
         raise ValidationError(
@@ -855,7 +863,7 @@ def resolve_item_for_grn_line(grn_payload: dict[str, Any], line_payload: dict[st
 
     item = item_by_external_id or item_by_name
     if item is not None:
-        if external_item_id_text and not normalize_text(item.external_item_id):
+        if external_item_id_text and not normalize_text(item.external_item_id) and not external_item_id_conflicts_with_name:
             item.external_item_id = external_item_id_text
             item.save(update_fields=["external_item_id", "updated_at"])
         return item
@@ -871,7 +879,7 @@ def resolve_item_for_grn_line(grn_payload: dict[str, Any], line_payload: dict[st
         group=AUTO_CREATED_ITEM_GROUP,
         sub_group=AUTO_CREATED_ITEM_SUB_GROUP,
         item_name=product_description,
-        external_item_id=external_item_id_text or None,
+        external_item_id=None if external_item_id_conflicts_with_name else (external_item_id_text or None),
         hsn_code=hsn_code or None,
         unit=unit,
         product_details=f"Auto-created from GRN {resolve_grn_identifier(grn_payload)}",

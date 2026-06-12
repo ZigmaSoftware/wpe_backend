@@ -7,6 +7,7 @@ from .models import (
     DepartmentMaster,
     DesignationMaster,
     ItemMaster,
+    LocationMaster,
     ProductTypeCategory,
     ProductTypeSubtype,
     RoleMaster,
@@ -15,6 +16,88 @@ from .models import (
 
 
 UserModel = get_user_model()
+
+
+class LocationMasterApiTests(APITestCase):
+    def setUp(self):
+        self.user = UserModel.objects.create_user(
+            username="location-user",
+            email="location@example.com",
+            password="password123",
+        )
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh.access_token}")
+        self.list_url = "/api/wpe-masters/locations/"
+        self.lookup_url = "/api/wpe-masters/locations/lookup/"
+
+    def test_seeded_locations_default_to_blending_center(self):
+        seeded_location = LocationMaster.objects.get(name="Blend WIP")
+
+        self.assertEqual(seeded_location.center_type, LocationMaster.CenterType.BLENDING_CENTER)
+
+    def test_create_location_persists_selected_center_type(self):
+        response = self.client.post(
+            self.list_url,
+            {
+                "name": "QA GRN Dock",
+                "center_type": LocationMaster.CenterType.GRN_CENTER,
+                "is_active": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["center_type"], LocationMaster.CenterType.GRN_CENTER)
+        self.assertTrue(
+            LocationMaster.objects.filter(
+                name="QA GRN Dock",
+                center_type=LocationMaster.CenterType.GRN_CENTER,
+            ).exists()
+        )
+
+    def test_location_list_can_be_filtered_by_center_type(self):
+        LocationMaster.objects.create(
+            name="QA Shared Location GRN",
+            center_type=LocationMaster.CenterType.GRN_CENTER,
+        )
+        LocationMaster.objects.create(
+            name="QA Shared Location Warehouse",
+            center_type=LocationMaster.CenterType.WAREHOUSE_CENTER,
+        )
+
+        response = self.client.get(
+            self.list_url,
+            {
+                "search": "QA Shared Location",
+                "center_type": LocationMaster.CenterType.GRN_CENTER,
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["name"], "QA Shared Location GRN")
+        self.assertEqual(response.data["results"][0]["center_type"], LocationMaster.CenterType.GRN_CENTER)
+
+    def test_location_lookup_can_be_filtered_by_center_type(self):
+        grn_location = LocationMaster.objects.create(
+            name="QA Lookup GRN",
+            center_type=LocationMaster.CenterType.GRN_CENTER,
+        )
+        LocationMaster.objects.create(
+            name="QA Lookup Blending",
+            center_type=LocationMaster.CenterType.BLENDING_CENTER,
+        )
+
+        response = self.client.get(
+            self.lookup_url,
+            {"center_type": LocationMaster.CenterType.GRN_CENTER},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        matched = next((row for row in response.data if row["id"] == grn_location.id), None)
+        self.assertIsNotNone(matched)
+        self.assertEqual(matched["name"], "QA Lookup GRN")
+        self.assertFalse(any(row["name"] == "QA Lookup Blending" for row in response.data))
 
 
 class ProductTypesApiTests(APITestCase):
@@ -211,8 +294,8 @@ class ItemVariantApiTests(APITestCase):
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh.access_token}")
 
     def test_item_variants_alias_exposes_description_field(self):
-        category = ProductTypeCategory.objects.create(name="Electrical")
-        subtype = ProductTypeSubtype.objects.create(name="Cable", category=category)
+        category = ProductTypeCategory.objects.create(name="QA Electrical Category")
+        subtype = ProductTypeSubtype.objects.create(name="QA Cable", category=category)
         unit = UnitMaster.objects.create(uom_code="MTR", name="Meter", decimal_allowed=True, decimal_places=2)
         item = ItemMaster.objects.create(
             item_name="2.5 sq.mm Copper Cable",
@@ -228,13 +311,13 @@ class ItemVariantApiTests(APITestCase):
         record = next((row for row in response.data["results"] if row["id"] == item.id), None)
         self.assertIsNotNone(record)
         self.assertEqual(record["description"], "FRLS electrical cable")
-        self.assertEqual(record["sub_category_name"], "Cable")
-        self.assertEqual(record["category_name"], "Electrical")
+        self.assertEqual(record["sub_category_name"], "QA Cable")
+        self.assertEqual(record["category_name"], "QA Electrical Category")
 
     def test_duplicate_variant_name_is_blocked_only_within_same_sub_category(self):
-        category = ProductTypeCategory.objects.create(name="Blending")
-        first_subtype = ProductTypeSubtype.objects.create(name="Wood Powder", category=category)
-        second_subtype = ProductTypeSubtype.objects.create(name="HDPE Chips", category=category)
+        category = ProductTypeCategory.objects.create(name="QA Blending Category")
+        first_subtype = ProductTypeSubtype.objects.create(name="QA Wood Powder", category=category)
+        second_subtype = ProductTypeSubtype.objects.create(name="QA HDPE Chips", category=category)
         unit = UnitMaster.objects.create(uom_code="KG", name="Kilogram", decimal_allowed=True, decimal_places=3)
 
         ItemMaster.objects.create(
@@ -263,7 +346,7 @@ class ItemVariantApiTests(APITestCase):
         )
 
         self.assertEqual(duplicate_response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("item_name", duplicate_response.data)
+        self.assertIn("non_field_errors", duplicate_response.data)
 
         allowed_response = self.client.post(
             "/api/wpe-masters/item-variants/",

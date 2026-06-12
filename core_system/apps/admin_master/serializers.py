@@ -10,6 +10,7 @@ from apps.wpe_masters.models import DepartmentMaster, DesignationMaster, RoleMas
 from .models import (
     SCREEN_ACTIONS, 
     MainScreen,
+    Role,
     ScreenSection,
     Staff,
     UserCreation,
@@ -274,6 +275,13 @@ def _resolve_legacy_department(department_master: DepartmentMaster | None) -> De
     if not department_master or not department_master.name:
         return None
     return Department.objects.filter(name__iexact=department_master.name.strip()).order_by("id").first()
+
+
+def _resolve_legacy_role(role_master: RoleMaster | None) -> Role | None:
+    if not role_master or not role_master.name:
+        return None
+    return Role.objects.filter(name__iexact=role_master.name.strip()).order_by("id").first()
+
 
 class UserCreationReadSerializer(serializers.ModelSerializer):
     username = serializers.CharField(source="user.username", read_only=True)

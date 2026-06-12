@@ -49,6 +49,7 @@ class CodeTrackedMasterSerializer(serializers.ModelSerializer):
 class LocationMasterSerializer(BaseMasterSerializer):
     class Meta(BaseMasterSerializer.Meta):
         model = LocationMaster
+        fields = BaseMasterSerializer.Meta.fields + ("center_type",)
 
 
 class BranchMasterSerializer(BaseMasterSerializer):

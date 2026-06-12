@@ -189,6 +189,15 @@ class ProductTypeManagedViewSet(BaseMasterViewSet):
 class LocationMasterViewSet(BaseMasterViewSet):
     queryset = LocationMaster.objects.all()
     serializer_class = LocationMasterSerializer
+    filterset_map = {
+        "center_type": "center_type",
+        "is_active": "is_active",
+    }
+
+    @action(detail=False, methods=["get"])
+    def lookup(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True).values("id", "name")
+        return Response(list(queryset))
 
 
 class BranchMasterViewSet(BaseMasterViewSet):

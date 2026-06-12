@@ -74,7 +74,7 @@ class FullAccessPermissionResolutionTests(TestCase):
         )
         user = User.objects.create_user(
             username="imran",
-            password="developer",
+            password="developer1",
             is_staff=True,
             is_superuser=True,
             is_active=True,

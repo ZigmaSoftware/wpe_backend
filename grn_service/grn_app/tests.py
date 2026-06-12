@@ -16,6 +16,9 @@ from apps.store.models import StoreStock, StoreTransaction
 from .models import GRN, QCR
 
 
+MANUAL_GATE_ENTRY_FLAG = "_manual_gate_entry_entry"
+
+
 @override_settings(INTERNAL_API_KEY="test-internal-key")
 class GRNAPIViewTests(APITestCase):
     def setUp(self):
@@ -306,6 +309,7 @@ class GRNAPIViewTests(APITestCase):
         self.assertEqual(str(grn.rejected_qty), "1.50")
         self.assertEqual(grn.raw_payload["document_details"]["po_no"], "PO-RCV-001")
         self.assertEqual(grn.raw_payload["document_details"]["gateentry_bookno"], "GATE-EDIT-100")
+        self.assertTrue(grn.raw_payload["document_details"][MANUAL_GATE_ENTRY_FLAG])
         self.assertEqual(grn.raw_payload["supplier_details"]["trade_name"], "Receiver Supplier")
         self.assertEqual(grn.raw_payload["items"][0]["item_id"], "ITEM-RCV-001")
         self.assertEqual(grn.raw_payload["items"][0]["item_serial_number"], 3)
@@ -330,7 +334,42 @@ class GRNAPIViewTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assertEqual(response.data["status"], "error")
-        self.assertIn("Only active GRN Process records can be updated", response.data["message"])
+        self.assertIn("Gate Entry stage", response.data["message"])
+
+    def test_grn_detail_patch_requires_gate_entry_book_fields(self):
+        payload = self.build_receiver_payload("GRN-EDIT-REQ-001")
+        grn = GRN.objects.create(
+            grn_no="GRN-EDIT-REQ-001",
+            po_no="PO-RCV-001",
+            grn_date=date(2026, 4, 30),
+            gateentry_bookno="GATE-001",
+            gateentry_bookdate=date(2026, 4, 30),
+            raw_payload=payload,
+        )
+
+        response = self.client.patch(
+            self.detail_url(grn.id),
+            {
+                "document_details": {
+                    "gateentry_bookno": "",
+                    "gateentry_bookdate": "",
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["status"], "error")
+        self.assertEqual(response.data["message"], "Validation failed")
+        self.assertEqual(
+            response.data["errors"],
+            {
+                "document_details": {
+                    "gateentry_bookno": ["Gate Entry Book No is required."],
+                    "gateentry_bookdate": ["Gate Entry Book Date is required."],
+                }
+            },
+        )
 
     def test_grn_receiver_creates_grn_from_sender_payload(self):
         payload = self.build_receiver_payload()
@@ -583,21 +622,311 @@ class GRNQCRFlowTests(TestCase):
         self.client = APIClient()
         self.client.credentials(HTTP_X_API_KEY="test-internal-key")
 
-    def test_moved_grn_is_removed_from_grn_list(self):
-        grn = GRN.objects.create(grn_no="GRN-101")
+    def create_active_qcr_record(self, *, grn_no="GRN-QCR-001"):
+        raw_payload = {
+            "document_details": {
+                "grn_no": grn_no,
+                "grn_date": "2026-05-05",
+            },
+            "supplier_details": {
+                "trade_name": "Acme Polymers",
+            },
+            "items": [
+                {
+                    "item_id": f"{grn_no}-ITEM-1",
+                    "product_description": "QCR Line Item 1",
+                    "quantity": "10.000",
+                    "received_qty": "9",
+                    "accepted_qty": "9",
+                    "rejected_qty": "1",
+                    "unit": "kg",
+                    "store_in_id": "1",
+                    "store_in_name": "Main Store",
+                },
+                {
+                    "item_id": f"{grn_no}-ITEM-2",
+                    "product_description": "QCR Line Item 2",
+                    "quantity": "5.000",
+                    "received_qty": "5",
+                    "accepted_qty": "5",
+                    "rejected_qty": "0",
+                    "unit": "kg",
+                    "store_in_id": "2",
+                    "store_in_name": "QC Rack",
+                },
+            ],
+        }
+        pending_items = [
+            {
+                "line_index": 0,
+                "item_id": f"{grn_no}-ITEM-1",
+                "item_name": "QCR Line Item 1",
+                "unit": "kg",
+                "sent_qty": "10.000",
+                "received_qty": "9",
+                "store_in_id": "1",
+                "store_in_name": "Main Store",
+            },
+            {
+                "line_index": 1,
+                "item_id": f"{grn_no}-ITEM-2",
+                "item_name": "QCR Line Item 2",
+                "unit": "kg",
+                "sent_qty": "5.000",
+                "received_qty": "5",
+                "store_in_id": "2",
+                "store_in_name": "QC Rack",
+            },
+        ]
+        grn = GRN.objects.create(
+            grn_no=grn_no,
+            grn_date=date(2026, 5, 5),
+            trade_name="Acme Polymers",
+            item_id=f"{grn_no}-ITEM-1",
+            product_description="QCR Line Item 1",
+            accepted_qty="14.00",
+            rejected_qty="1.00",
+            unit="kg",
+            raw_payload=raw_payload,
+            grn_pending_items=pending_items,
+            status=False,
+            process_status=GRN.PROCESS_STATUS_QCR,
+        )
+        qcr = QCR.objects.create(
+            source_grn=grn,
+            grn_reference_no=grn.grn_no,
+            snapshot={
+                "grn_no": grn.grn_no,
+                "raw_payload": raw_payload,
+                "grn_pending_items": pending_items,
+            },
+            status="Active",
+            moved_to_qcr_at=grn.created_at,
+        )
+        return grn, qcr
+
+    def test_gate_entry_move_routes_record_to_pending_list(self):
+        grn = GRN.objects.create(
+            grn_no="GRN-101",
+            gateentry_bookno="GATE-101",
+            gateentry_bookdate=date(2026, 5, 1),
+            raw_payload={"document_details": {MANUAL_GATE_ENTRY_FLAG: True}},
+        )
 
         move_response = self.client.post(f"/api/grn/{grn.id}/move-to-qcr/", {}, format="json")
 
-        self.assertEqual(move_response.status_code, 201)
+        self.assertEqual(move_response.status_code, 200)
 
         grn.refresh_from_db()
-        self.assertFalse(grn.status)
-        self.assertEqual(grn.process_status, "Moved to QCR")
+        self.assertTrue(grn.status)
+        self.assertEqual(grn.process_status, GRN.PROCESS_STATUS_GRN_PENDING)
 
         list_response = self.client.get("/api/grn/")
+        pending_response = self.client.get("/api/grn/pending/")
 
         self.assertEqual(list_response.status_code, 200)
         self.assertEqual(list_response.json()["data"], [])
+        self.assertEqual(pending_response.status_code, 200)
+        self.assertEqual(len(pending_response.json()["data"]), 1)
+        self.assertEqual(pending_response.json()["data"][0]["id"], grn.id)
+
+    def test_move_to_qcr_requires_gate_entry_book_fields(self):
+        grn = GRN.objects.create(grn_no="GRN-101-BLANK")
+
+        move_response = self.client.post(f"/api/grn/{grn.id}/move-to-qcr/", {}, format="json")
+
+        self.assertEqual(move_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(move_response.data["status"], "error")
+        self.assertEqual(
+            move_response.data["errors"],
+            {
+                "gateentry_bookno": "Gate Entry Book No is required before moving to GRN Pending.",
+                "gateentry_bookdate": "Gate Entry Book Date is required before moving to GRN Pending.",
+            },
+        )
+
+    def test_move_to_qcr_requires_manual_gate_entry_confirmation(self):
+        grn = GRN.objects.create(
+            grn_no="GRN-101-AUTO",
+            gateentry_bookno="GATE-101-AUTO",
+            gateentry_bookdate=date(2026, 5, 1),
+            raw_payload={"document_details": {"gateentry_bookno": "GATE-101-AUTO", "gateentry_bookdate": "2026-05-01"}},
+        )
+
+        move_response = self.client.post(f"/api/grn/{grn.id}/move-to-qcr/", {}, format="json")
+
+        self.assertEqual(move_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            move_response.data["errors"],
+            {
+                "gateentry_bookno": "Gate Entry Book No must be entered manually before moving to GRN Pending.",
+                "gateentry_bookdate": "Gate Entry Book Date must be entered manually before moving to GRN Pending.",
+            },
+        )
+
+    def test_grn_pending_move_to_qcr_requires_complete_item_rows(self):
+        grn = GRN.objects.create(
+            grn_no="GRN-101-PENDING",
+            process_status=GRN.PROCESS_STATUS_GRN_PENDING,
+            raw_payload={
+                "items": [
+                    {"item_id": "ITEM-1", "product_description": "Pending Item 1", "quantity": "10.000"},
+                    {"item_id": "ITEM-2", "product_description": "Pending Item 2", "quantity": "5.000"},
+                ]
+            },
+        )
+
+        response = self.client.post(
+            f"/api/grn/{grn.id}/move-pending-to-qcr/",
+            {
+                "items": [
+                    {"received_qty": "9", "store_in_id": "1", "store_in_name": "Main Store"},
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["status"], "error")
+        self.assertIn("items", response.data["errors"])
+
+    def test_grn_pending_move_to_qcr_creates_qcr_and_updates_quantities(self):
+        grn = GRN.objects.create(
+            grn_no="GRN-101-TO-QCR",
+            trade_name="Acme Polymers",
+            item_id="ITEM-1",
+            product_description="Pending Item 1",
+            process_status=GRN.PROCESS_STATUS_GRN_PENDING,
+            raw_payload={
+                "supplier_details": {"trade_name": "Acme Polymers"},
+                "items": [
+                    {"item_id": "ITEM-1", "product_description": "Pending Item 1", "quantity": "10.000", "unit": "kg"},
+                    {"item_id": "ITEM-2", "product_description": "Pending Item 2", "quantity": "5.000", "unit": "kg"},
+                ],
+            },
+        )
+
+        response = self.client.post(
+            f"/api/grn/{grn.id}/move-pending-to-qcr/",
+            {
+                "items": [
+                    {"received_qty": "9", "store_in_id": "1", "store_in_name": "Main Store"},
+                    {"received_qty": "5", "store_in_id": "2", "store_in_name": "QC Rack"},
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        grn.refresh_from_db()
+        qcr = QCR.objects.get(source_grn=grn)
+
+        self.assertEqual(grn.process_status, GRN.PROCESS_STATUS_QCR)
+        self.assertFalse(grn.status)
+        self.assertEqual(str(grn.accepted_qty), "14.00")
+        self.assertEqual(str(grn.rejected_qty), "1.00")
+        self.assertEqual(grn.raw_payload["items"][0]["accepted_qty"], "9")
+        self.assertEqual(grn.raw_payload["items"][0]["store_in_name"], "Main Store")
+        self.assertEqual(grn.raw_payload["items"][1]["accepted_qty"], "5")
+        self.assertEqual(qcr.status, "Active")
+
+        pending_response = self.client.get("/api/grn/pending/")
+        qcr_response = self.client.get("/api/qcr/")
+
+        self.assertEqual(pending_response.status_code, 200)
+        self.assertEqual(pending_response.json()["data"], [])
+        self.assertEqual(qcr_response.status_code, 200)
+        self.assertEqual(len(qcr_response.json()), 1)
+
+    def test_warehouse_inventory_lists_qc_pending_rows_from_store_in_selection(self):
+        grn = GRN.objects.create(
+            grn_no="GRN-WH-001",
+            po_no="PO-WH-001",
+            trade_name="ABC Traders",
+            item_id="ITEM-WH-001",
+            product_description="Dell Server Rack",
+            process_status=GRN.PROCESS_STATUS_GRN_PENDING,
+            raw_payload={
+                "document_details": {"po_no": "PO-WH-001"},
+                "supplier_details": {"trade_name": "ABC Traders"},
+                "items": [
+                    {"item_id": "ITEM-WH-001", "product_description": "Dell Server Rack", "quantity": "10.000", "unit": "NOS"},
+                    {"item_id": "ITEM-WH-002", "product_description": "LAN Cable", "quantity": "5.000", "unit": "NOS"},
+                ],
+            },
+        )
+
+        move_response = self.client.post(
+            f"/api/grn/{grn.id}/move-pending-to-qcr/",
+            {
+                "items": [
+                    {
+                        "received_qty": "9",
+                        "store_in_id": "101",
+                        "store_in_name": "QC Pending Warehouse - CBE",
+                    },
+                    {
+                        "received_qty": "5",
+                        "store_in_id": "102",
+                        "store_in_name": "Main Store",
+                    },
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(move_response.status_code, status.HTTP_201_CREATED)
+
+        response = self.client.get(
+            "/api/warehouse-inventory/",
+            {"warehouse_name": "QC Pending Warehouse - CBE"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertIsNone(response.data["previous"])
+
+        row = response.data["results"][0]
+        self.assertEqual(row["grn_no"], "GRN-WH-001")
+        self.assertEqual(row["supplier"], "ABC Traders")
+        self.assertEqual(row["po_no"], "PO-WH-001")
+        self.assertEqual(row["items"], "Dell Server Rack")
+        self.assertEqual(row["inward_qty"], "9")
+        self.assertEqual(row["outward_qty"], "0")
+        self.assertEqual(row["status"], GRN.PROCESS_STATUS_QCR)
+
+    def test_warehouse_inventory_lists_rejected_rows_after_qcr_completion(self):
+        _grn, qcr = self.create_active_qcr_record(grn_no="GRN-WH-REJ-001")
+
+        update_response = self.client.post(
+            f"/api/qcr/{qcr.id}/status/",
+            {
+                "action": "complete",
+                "items": [
+                    {"line_index": 0, "rejected_qty": "2", "reason": "Damaged during inspection"},
+                    {"line_index": 1, "rejected_qty": "0", "reason": ""},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+
+        response = self.client.get(
+            "/api/warehouse-inventory/",
+            {"warehouse_name": "Rejected Warehouse - CBE"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+
+        row = response.data["results"][0]
+        self.assertEqual(row["grn_no"], "GRN-WH-REJ-001")
+        self.assertEqual(row["supplier"], "Acme Polymers")
+        self.assertEqual(row["items"], "QCR Line Item 1")
+        self.assertEqual(row["inward_qty"], "2")
+        self.assertEqual(row["reason"], "Damaged during inspection")
 
     def test_qcr_move_to_grn_reenables_record_in_grn_list(self):
         grn = GRN.objects.create(
@@ -647,7 +976,7 @@ class GRNQCRFlowTests(TestCase):
         grn.refresh_from_db()
         qcr.refresh_from_db()
         self.assertTrue(grn.status)
-        self.assertEqual(grn.process_status, "Moved to GRN")
+        self.assertEqual(grn.process_status, "GRN Approved")
         self.assertEqual(qcr.status, "Moved to GRN")
 
         list_response = self.client.get("/api/grn/")
@@ -726,6 +1055,193 @@ class GRNQCRFlowTests(TestCase):
             1,
         )
 
+    def test_qcr_complete_moves_only_accepted_qty_to_store_and_saves_item_results(self):
+        grn, qcr = self.create_active_qcr_record(grn_no="GRN-108")
+
+        response = self.client.post(
+            f"/api/qcr/{qcr.id}/status/",
+            {
+                "action": "complete",
+                "items": [
+                    {"line_index": 0, "rejected_qty": "2", "reason": "Damaged during inspection"},
+                    {"line_index": 1, "rejected_qty": "0", "reason": ""},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        grn.refresh_from_db()
+        qcr.refresh_from_db()
+
+        self.assertEqual(grn.process_status, GRN.PROCESS_STATUS_APPROVED)
+        self.assertEqual(grn.qc_status, "Partial")
+        self.assertTrue(grn.status)
+        self.assertEqual(str(grn.accepted_qty), "12.00")
+        self.assertEqual(str(grn.rejected_qty), "2.00")
+        self.assertEqual(qcr.status, GRN.PROCESS_STATUS_MOVED_TO_GRN)
+        self.assertIsNotNone(qcr.qcr_completed_at)
+        self.assertEqual(qcr.qcr_items[0]["accepted_qty"], "7")
+        self.assertEqual(qcr.qcr_items[0]["rejected_qty"], "2")
+        self.assertEqual(qcr.qcr_items[0]["rejection_reason"], "Damaged during inspection")
+        self.assertEqual(qcr.qcr_items[1]["accepted_qty"], "5")
+        self.assertEqual(grn.raw_payload["items"][0]["accepted_qty"], "7")
+        self.assertEqual(grn.raw_payload["items"][0]["rejected_qty"], "2")
+        self.assertEqual(grn.raw_payload["items"][0]["rejection_reason"], "Damaged during inspection")
+
+        first_item = Item.objects.get(external_item_id="GRN-108-ITEM-1")
+        second_item = Item.objects.get(external_item_id="GRN-108-ITEM-2")
+        first_stock = StoreStock.objects.get(item=first_item)
+        second_stock = StoreStock.objects.get(item=second_item)
+
+        self.assertEqual(str(first_stock.quantity), "7.000")
+        self.assertEqual(str(second_stock.quantity), "5.000")
+        self.assertEqual(
+            StoreTransaction.objects.filter(
+                transaction_type=StoreTransaction.TransactionType.GRN_INWARD,
+                reference_type=StoreTransaction.ReferenceType.GRN,
+            ).count(),
+            2,
+        )
+
+    def test_qcr_complete_uses_product_name_when_external_item_id_points_to_different_item(self):
+        Item.objects.create(
+            category="GRN Imported",
+            group="Inbound GRN",
+            sub_group="Auto Created",
+            item_name="Test Product Description",
+            external_item_id="ITEM001",
+            unit="NOS",
+            opening_stock="0.000",
+            current_stock="0.000",
+        )
+        raw_payload = {
+            "document_details": {
+                "grn_no": "GRN-108-CONFLICT",
+                "grn_date": "2026-05-05",
+            },
+            "supplier_details": {
+                "trade_name": "Acme Polymers",
+            },
+            "items": [
+                {
+                    "item_id": "ITEM001",
+                    "product_description": "Dell Server Rack",
+                    "quantity": "10.000",
+                    "received_qty": "10",
+                    "accepted_qty": "10",
+                    "rejected_qty": "0",
+                    "unit": "NOS",
+                    "store_in_id": "1",
+                    "store_in_name": "Main Store",
+                }
+            ],
+        }
+        pending_items = [
+            {
+                "line_index": 0,
+                "item_id": "ITEM001",
+                "item_name": "Dell Server Rack",
+                "unit": "NOS",
+                "sent_qty": "10.000",
+                "received_qty": "10",
+                "store_in_id": "1",
+                "store_in_name": "Main Store",
+            }
+        ]
+        grn = GRN.objects.create(
+            grn_no="GRN-108-CONFLICT",
+            grn_date=date(2026, 5, 5),
+            trade_name="Acme Polymers",
+            item_id="ITEM001",
+            product_description="Dell Server Rack",
+            accepted_qty="10.00",
+            rejected_qty="0.00",
+            unit="NOS",
+            raw_payload=raw_payload,
+            grn_pending_items=pending_items,
+            status=False,
+            process_status=GRN.PROCESS_STATUS_QCR,
+        )
+        qcr = QCR.objects.create(
+            source_grn=grn,
+            grn_reference_no=grn.grn_no,
+            snapshot={
+                "grn_no": grn.grn_no,
+                "raw_payload": raw_payload,
+                "grn_pending_items": pending_items,
+            },
+            status="Active",
+            moved_to_qcr_at=grn.created_at,
+        )
+
+        response = self.client.post(
+            f"/api/qcr/{qcr.id}/status/",
+            {
+                "action": "complete",
+                "items": [
+                    {"line_index": 0, "rejected_qty": "2", "reason": "Damaged during inspection"},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        conflicting_item = Item.objects.get(external_item_id="ITEM001")
+        resolved_item = Item.objects.get(item_name="Dell Server Rack")
+        stock_row = StoreStock.objects.get(item=resolved_item)
+
+        self.assertEqual(conflicting_item.item_name, "Test Product Description")
+        self.assertIsNone(resolved_item.external_item_id)
+        self.assertEqual(str(stock_row.quantity), "8.000")
+        self.assertFalse(StoreStock.objects.filter(item=conflicting_item).exists())
+
+    def test_qcr_complete_requires_reason_when_rejected_qty_is_positive(self):
+        _grn, qcr = self.create_active_qcr_record(grn_no="GRN-109")
+
+        response = self.client.post(
+            f"/api/qcr/{qcr.id}/status/",
+            {
+                "action": "complete",
+                "items": [
+                    {"line_index": 0, "rejected_qty": "1", "reason": ""},
+                    {"line_index": 1, "rejected_qty": "0", "reason": ""},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["status"], "error")
+        self.assertEqual(
+            response.data["errors"],
+            {"items[0].reason": "Reason is required when Rejected Qty is greater than zero."},
+        )
+
+    def test_qcr_complete_rejects_quantity_above_received_qty(self):
+        _grn, qcr = self.create_active_qcr_record(grn_no="GRN-110")
+
+        response = self.client.post(
+            f"/api/qcr/{qcr.id}/status/",
+            {
+                "action": "complete",
+                "items": [
+                    {"line_index": 0, "rejected_qty": "12", "reason": "Damaged during inspection"},
+                    {"line_index": 1, "rejected_qty": "0", "reason": ""},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["status"], "error")
+        self.assertEqual(
+            response.data["errors"],
+            {"items[0].rejected_qty": "Rejected Qty cannot exceed Received Qty."},
+        )
+
     def test_qcr_list_shows_only_active_records_by_default(self):
         active_grn = GRN.objects.create(grn_no="GRN-103", status=False, process_status="Moved to QCR")
         active_qcr = QCR.objects.create(
@@ -772,7 +1288,7 @@ class GRNQCRFlowTests(TestCase):
 
         update_response = self.client.post(
             f"/api/qcr/{qcr.id}/status/",
-            {"action": "reject"},
+            {"action": "reject", "remarks": "Rejected during test"},
             format="json",
         )
 
@@ -794,3 +1310,28 @@ class GRNQCRFlowTests(TestCase):
         self.assertEqual(rejected_alias_response.status_code, 200)
         self.assertEqual(len(rejected_alias_response.json()), 1)
         self.assertEqual(rejected_alias_response.json()[0]["id"], qcr.id)
+
+    def test_partially_rejected_qcr_records_are_listed_in_both_completed_and_rejected_views(self):
+        _grn, qcr = self.create_active_qcr_record(grn_no="GRN-111")
+
+        update_response = self.client.post(
+            f"/api/qcr/{qcr.id}/status/",
+            {
+                "action": "complete",
+                "items": [
+                    {"line_index": 0, "rejected_qty": "2", "reason": "Damaged during inspection"},
+                    {"line_index": 1, "rejected_qty": "0", "reason": ""},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+
+        completed_response = self.client.get("/api/qcr/?tab=grn")
+        rejected_response = self.client.get("/api/qcr/?tab=cancelled")
+
+        self.assertEqual(completed_response.status_code, 200)
+        self.assertEqual(rejected_response.status_code, 200)
+        self.assertEqual([row["id"] for row in completed_response.json()], [qcr.id])
+        self.assertEqual([row["id"] for row in rejected_response.json()], [qcr.id])
