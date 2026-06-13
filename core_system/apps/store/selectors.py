@@ -15,6 +15,7 @@ def store_request_queryset():
         "issuing_warehouse",
         "requested_by",
         "action_by",
+        "head_action_by",
         "cancelled_by",
     ).prefetch_related("items__item")
 

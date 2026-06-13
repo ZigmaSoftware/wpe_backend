@@ -95,7 +95,7 @@ class StoreStockRequestAPIView(generics.GenericAPIView):
 
 
 class StoreRequestApprovalListAPIView(WrappedListAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsStoreUser]
     serializer_class = StockRequestSerializer
     search_fields = ("request_no", "requested_by__username", "items__item__item_name", "items__item__item_code")
     ordering_fields = ("requested_at", "request_no", "status", "id")
@@ -110,7 +110,7 @@ class StoreRequestApprovalListAPIView(WrappedListAPIView):
     list_message = "Store request queue fetched successfully."
 
     def get_queryset(self):
-        queryset = store_request_queryset()
+        queryset = store_request_queryset().filter(status=StockRequest.Status.PENDING_STORE_ISSUE)
         request_no = self.request.query_params.get("request_no")
         date_from = self.request.query_params.get("date_from")
         date_to = self.request.query_params.get("date_to")
@@ -139,7 +139,7 @@ class StoreRequestDetailAPIView(generics.RetrieveAPIView):
     lookup_field = "pk"
 
     def get_queryset(self):
-        return store_request_queryset()
+        return store_request_queryset().filter(status=StockRequest.Status.PENDING_STORE_ISSUE)
 
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -305,7 +305,7 @@ class StockDashboardAPIView(generics.GenericAPIView):
     def get(self, request, *args, **kwargs):
         data = {
             "warehouse_summary": stock_dashboard_summary(),
-            "pending_store_requests": StockRequest.objects.filter(status=StockRequest.Status.PENDING).count(),
+            "pending_store_requests": StockRequest.objects.filter(status=StockRequest.Status.PENDING_STORE_ISSUE).count(),
             "approved_store_requests": StockRequest.objects.filter(status=StockRequest.Status.APPROVED).count(),
             "stock_ledger_entries": StoreTransaction.objects.count(),
             "warehouses": StoreStock.objects.values("warehouse_id").distinct().count(),

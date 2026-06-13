@@ -252,14 +252,16 @@ class StockRequest(models.Model):
         ADDITIVE = "ADDITIVE", "Additive"
 
     class Status(models.TextChoices):
-        PENDING = "PENDING", "Pending"
-        APPROVED = "APPROVED", "Approved"
-        REJECTED = "REJECTED", "Rejected"
-        PARTIALLY_APPROVED = "PARTIALLY_APPROVED", "Partially Approved"
+        PENDING_HEAD_APPROVAL = "PENDING_HEAD_APPROVAL", "Pending Blending Head Approval"
+        PENDING_STORE_ISSUE = "PENDING_STORE_ISSUE", "Pending Store Issue"
+        HEAD_REJECTED = "HEAD_REJECTED", "Rejected by Blending Head"
+        APPROVED = "APPROVED", "Fully Issued"
+        PARTIALLY_APPROVED = "PARTIALLY_APPROVED", "Partially Issued"
+        REJECTED = "REJECTED", "Rejected by Store"
         CANCELLED = "CANCELLED", "Cancelled"
 
     request_no = models.CharField(max_length=30, unique=True, blank=True, null=True, db_index=True)
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True)
+    status = models.CharField(max_length=25, choices=Status.choices, default=Status.PENDING_HEAD_APPROVAL, db_index=True)
     requesting_warehouse = models.ForeignKey(
         Warehouse,
         on_delete=models.PROTECT,
@@ -288,6 +290,7 @@ class StockRequest(models.Model):
     )
     remarks = models.TextField(blank=True, null=True)
     approval_remarks = models.TextField(blank=True, null=True)
+    head_approval_remarks = models.TextField(blank=True, null=True)
     requested_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
@@ -300,6 +303,13 @@ class StockRequest(models.Model):
         null=True,
         blank=True,
     )
+    head_action_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="head_reviewed_stock_requests",
+        null=True,
+        blank=True,
+    )
     cancelled_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -309,6 +319,7 @@ class StockRequest(models.Model):
     )
     requested_at = models.DateTimeField(auto_now_add=True)
     action_at = models.DateTimeField(null=True, blank=True)
+    head_action_at = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:

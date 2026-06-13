@@ -194,6 +194,14 @@ def ensure_dev_master_data() -> None:
             "folder_name": "/app/blending/transactions",
         },
         {
+            "screen_name": "Blending Head Approval",
+            "code": "blending-head-approval-workspace",
+            "section": blending_workspace_section,
+            "order_no": 3,
+            "folder_name": "/app/blending/head-approval",
+            "available_actions": ["list", "view", "update"],
+        },
+        {
             "screen_name": "AD Weightage",
             "code": "production-ad-weightage-workspace",
             "section": production_workspace_section,

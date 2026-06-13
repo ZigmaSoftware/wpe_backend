@@ -512,8 +512,8 @@ def update_store_request(
             .select_for_update()
             .get(pk=request_id)
         )
-        if stock_request.status != StockRequest.Status.PENDING:
-            raise ValidationError({"status": "Only pending store requests can be edited."})
+        if stock_request.status != StockRequest.Status.PENDING_HEAD_APPROVAL:
+            raise ValidationError({"status": "Only requests pending Blending Head approval can be edited."})
 
         if stock_request.requested_by_id != getattr(requested_by, "id", None) and not user_has_role(
             requested_by,
@@ -584,8 +584,8 @@ def cancel_store_request(request_id: int, cancelled_by, remarks: str | None = No
             .select_for_update()
             .get(pk=request_id)
         )
-        if stock_request.status != StockRequest.Status.PENDING:
-            raise ValidationError({"status": "Only pending store requests can be cancelled."})
+        if stock_request.status != StockRequest.Status.PENDING_HEAD_APPROVAL:
+            raise ValidationError({"status": "Only requests pending Blending Head approval can be cancelled."})
 
         if stock_request.requested_by_id != getattr(cancelled_by, "id", None) and not user_has_role(
             cancelled_by,
@@ -625,8 +625,10 @@ def approve_stock_request(
             .select_for_update()
             .get(pk=request_id)
         )
-        if stock_request.status != StockRequest.Status.PENDING:
-            raise ValidationError({"status": "Only pending store requests can be approved."})
+        if stock_request.status == StockRequest.Status.PENDING_HEAD_APPROVAL:
+            raise ValidationError({"status": "This request is pending Blending Head approval."})
+        if stock_request.status != StockRequest.Status.PENDING_STORE_ISSUE:
+            raise ValidationError({"status": "Only requests pending Store issue can be approved."})
 
         issuing_warehouse = stock_request.issuing_warehouse or get_store_warehouse()
         requesting_warehouse = stock_request.requesting_warehouse or get_blending_warehouse()
@@ -843,8 +845,10 @@ def reject_stock_request(request_id: int, approver, approval_remarks: str | None
             .select_for_update()
             .get(pk=request_id)
         )
-        if stock_request.status != StockRequest.Status.PENDING:
-            raise ValidationError({"status": "Only pending store requests can be rejected."})
+        if stock_request.status == StockRequest.Status.PENDING_HEAD_APPROVAL:
+            raise ValidationError({"status": "This request is pending Blending Head approval."})
+        if stock_request.status != StockRequest.Status.PENDING_STORE_ISSUE:
+            raise ValidationError({"status": "Only requests pending Store issue can be rejected."})
 
         stock_request.status = StockRequest.Status.REJECTED
         stock_request.approval_remarks = normalize_text(approval_remarks) or None
