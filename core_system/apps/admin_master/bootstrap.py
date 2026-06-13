@@ -15,7 +15,7 @@ def ensure_dev_full_access_user() -> None:
         return
 
     username = os.environ.get("DEV_FULL_ACCESS_USERNAME", "imran").strip()
-    password = os.environ.get("DEV_FULL_ACCESS_PASSWORD", "developer")
+    password = os.environ.get("DEV_FULL_ACCESS_PASSWORD", "developer1")
     email = os.environ.get("DEV_FULL_ACCESS_EMAIL", "")
 
     if not username or not password:
@@ -243,7 +243,7 @@ def ensure_dev_master_data() -> None:
             "folder_name": "/app/store/transactions",
         },
         {
-            "screen_name": "GRN Process",
+            "screen_name": "Gate Entry",
             "code": "grn-process-workspace",
             "section": grn_workspace_section,
             "order_no": 1,

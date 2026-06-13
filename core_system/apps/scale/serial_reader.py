@@ -324,6 +324,7 @@ def _read_loop(port: str, baud_rate: int) -> None:
                             detected_port=None,
                         )
                         _stop_event.wait(timeout=retry_delay)
+                        retry_delay = min(retry_delay * 2, 60)
                         continue
                 else:
                     active_port = port
@@ -334,6 +335,7 @@ def _read_loop(port: str, baud_rate: int) -> None:
                             detected_port=active_port,
                         )
                         _stop_event.wait(timeout=retry_delay)
+                        retry_delay = min(retry_delay * 2, 60)
                         continue
 
                 logger.info("Opening %s at %d baud…", active_port, baud_rate)
@@ -346,6 +348,7 @@ def _read_loop(port: str, baud_rate: int) -> None:
                     timeout=1,
                 )
                 logger.info("Opened %s successfully.", active_port)
+                retry_delay = 3
                 _update_state(status="connected", error=None, detected_port=active_port)
 
             raw_bytes = ser.readline()

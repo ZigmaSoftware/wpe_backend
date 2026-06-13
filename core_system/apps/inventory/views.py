@@ -2,6 +2,8 @@ from rest_framework import filters, generics
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 
+from apps.store.inventory_monitoring import BaseInventorySummaryAPIView
+from apps.store.services import get_warehouse_by_name
 from common.drf import StandardResultsSetPagination, success_response
 
 from .models import ProductionInventoryTransaction
@@ -67,3 +69,19 @@ class ProductionInventoryListAPIView(generics.ListAPIView):
             message="Production inventory fetched successfully.",
             data={"count": len(serializer.data), "results": serializer.data},
         )
+
+
+class WarehouseInventorySummaryAPIView(BaseInventorySummaryAPIView):
+    permission_classes = [IsAuthenticated]
+    list_message = "Warehouse inventory summary fetched successfully."
+
+    def get_warehouse_name(self) -> str:
+        warehouse_name = (self.request.query_params.get("warehouse_name") or "").strip()
+        if not warehouse_name:
+            raise ValidationError({"warehouse_name": "The 'warehouse_name' query parameter is required."})
+        return warehouse_name
+
+    def get_warehouse(self):
+        if not hasattr(self, "_warehouse"):
+            self._warehouse = get_warehouse_by_name(self.get_warehouse_name())
+        return self._warehouse

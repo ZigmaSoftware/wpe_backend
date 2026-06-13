@@ -81,6 +81,7 @@ class GRNReadSerializer(serializers.ModelSerializer):
             "moved_to_qcr_at": instance.moved_to_qcr_at,
             "moved_to_qcr_by": instance.moved_to_qcr_by,
             "raw_payload": raw_payload,
+            "grn_pending_items": instance.grn_pending_items if isinstance(instance.grn_pending_items, list) else [],
             "document_details": {
                 "po_no": instance.po_no,
                 "po_date": instance.po_date,

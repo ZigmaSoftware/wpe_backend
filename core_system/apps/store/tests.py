@@ -80,6 +80,78 @@ class StoreWorkflowTests(APITestCase):
         self.assertEqual(request_item.approved_qty, Decimal("50.000"))
         self.assertEqual(request_item.issued_qty, Decimal("50.000"))
 
+    def test_partial_approval_allows_per_item_quantities(self):
+        first_item = Item.objects.create(
+            category="Raw Material",
+            group="polymer",
+            sub_group="ldpe",
+            item_name="LDPE Granules",
+            unit="kg",
+        )
+        second_item = Item.objects.create(
+            category="Raw Material",
+            group="polymer",
+            sub_group="hdpe",
+            item_name="HDPE Granules",
+            unit="kg",
+        )
+        apply_inward_stock(
+            item=first_item,
+            warehouse=self.store_warehouse,
+            quantity="20.000",
+            transaction_type=StoreTransaction.TransactionType.OPENING_STOCK,
+            reference_type=StoreTransaction.ReferenceType.OPENING_STOCK,
+            reference_id="OPEN-3",
+            created_by=self.store_user,
+        )
+        apply_inward_stock(
+            item=second_item,
+            warehouse=self.store_warehouse,
+            quantity="20.000",
+            transaction_type=StoreTransaction.TransactionType.OPENING_STOCK,
+            reference_type=StoreTransaction.ReferenceType.OPENING_STOCK,
+            reference_id="OPEN-4",
+            created_by=self.store_user,
+        )
+
+        request_response = self.blending_client.post(
+            "/api/blending/store-requests/",
+            {
+                "remarks": "Partial approval check",
+                "items": [
+                    {"item_id": first_item.id, "quantity": "10.000"},
+                    {"item_id": second_item.id, "quantity": "6.000"},
+                ],
+            },
+            format="json",
+        )
+        request_id = request_response.data["data"]["id"]
+
+        approve_response = self.store_client.post(
+            f"/api/store/requests/{request_id}/approve/",
+            {
+                "items": [
+                    {"item": first_item.id, "provided_qty": "4.000", "remarks": "Only partial stock released"},
+                    {"item": second_item.id, "provided_qty": "0.000", "remarks": "No stock released"},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(approve_response.status_code, 200)
+        stock_request = StockRequest.objects.prefetch_related("items").get(pk=request_id)
+        first_request_item = stock_request.items.get(item=first_item)
+        second_request_item = stock_request.items.get(item=second_item)
+
+        self.assertEqual(stock_request.status, StockRequest.Status.PARTIALLY_APPROVED)
+        self.assertEqual(first_request_item.approved_qty, Decimal("4.000"))
+        self.assertEqual(first_request_item.issued_qty, Decimal("4.000"))
+        self.assertEqual(first_request_item.remarks, "Only partial stock released")
+        self.assertEqual(second_request_item.approved_qty, Decimal("0.000"))
+        self.assertEqual(second_request_item.issued_qty, Decimal("0.000"))
+        self.assertEqual(approve_response.data["data"]["issue_transactions"][0]["quantity"], "4.000")
+        self.assertEqual(approve_response.data["data"]["receipt_transactions"][0]["quantity"], "4.000")
+
     def test_legacy_request_stock_endpoint_sets_additive_metadata(self):
         item = Item.objects.create(
             category="Additive",
