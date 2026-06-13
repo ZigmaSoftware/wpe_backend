@@ -54,26 +54,26 @@ class DevFullAccessUserBootstrapTests(TestCase):
 
 class FullAccessPermissionResolutionTests(TestCase):
     def test_superuser_receives_full_menu_permissions_without_admin_profile(self):
-        main_screen = MainScreen.objects.create(name="Operations", code="operations", order_no=1, status=True)
+        main_screen = MainScreen.objects.create(name="Operations-Test", code="operations-test", order_no=1, status=True)
         section = ScreenSection.objects.create(
             main_screen=main_screen,
-            name="Production",
-            code="production",
+            name="Production-Test",
+            code="production-test",
             order_no=1,
             is_active=True,
         )
-        UserScreen.objects.create(
+        test_screen = UserScreen.objects.create(
             main_screen=main_screen,
             screen_section=section,
-            screen_name="Store",
-            code="store-screen",
+            screen_name="Store-Test",
+            code="store-screen-test",
             folder_name="store",
             order_no=1,
             is_active=True,
             available_actions=["list", "view", "update"],
         )
         user = User.objects.create_user(
-            username="imran",
+            username="imran-test",
             password="developer1",
             is_staff=True,
             is_superuser=True,
@@ -83,13 +83,19 @@ class FullAccessPermissionResolutionTests(TestCase):
         data = resolve_subject_permissions(user=user)
 
         self.assertEqual(data["user_type"]["code"], "full-access")
-        self.assertEqual(len(data["menu"]), 1)
-        screen = data["menu"][0]["sections"][0]["screens"][0]
-        self.assertTrue(screen["action_permissions"]["all"])
-        self.assertTrue(screen["action_permissions"]["list"])
-        self.assertTrue(screen["action_permissions"]["view"])
-        self.assertTrue(screen["action_permissions"]["update"])
-        self.assertFalse(screen["action_permissions"]["delete"])
+        self.assertGreater(len(data["menu"]), 1)
+        found = False
+        for main in data["menu"]:
+            for sec in main["sections"]:
+                for screen in sec["screens"]:
+                    if screen["id"] == test_screen.id:
+                        found = True
+                        self.assertTrue(screen["action_permissions"]["all"])
+                        self.assertTrue(screen["action_permissions"]["list"])
+                        self.assertTrue(screen["action_permissions"]["view"])
+                        self.assertTrue(screen["action_permissions"]["update"])
+                        self.assertFalse(screen["action_permissions"]["delete"])
+        self.assertTrue(found, "Test screen should be in the full access menu")
 
     @override_settings(DEBUG=True)
     @mock.patch.dict(
@@ -290,16 +296,16 @@ class StaffViewSetActionTests(TestCase):
 
 class UserCreationWriteSerializerTests(TestCase):
     def test_allows_password_similar_to_username_and_creates_role_based_login(self):
-        legacy_department = Department.objects.create(name="Admin")
-        legacy_role = Role.objects.create(name="Admin")
-        department_master = DepartmentMaster.objects.create(name="Admin")
-        role_master = RoleMaster.objects.create(name="Admin")
+        legacy_department, _ = Department.objects.get_or_create(name="Admin-Test")
+        legacy_role, _ = Role.objects.get_or_create(name="Admin-Test")
+        department_master, _ = DepartmentMaster.objects.get_or_create(name="Admin-Test")
+        role_master, _ = RoleMaster.objects.get_or_create(name="Admin-Test")
         user_type = UserType.objects.create(
-            name="",
+            name="Test User Type",
             department=department_master,
             role=role_master,
         )
-        company = Company.objects.create(name="Zigma", code="COMP999")
+        company = Company.objects.create(name="Zigma-Test", code="COMP999")
         staff = Staff.objects.create(
             staff_code="968",
             name="Mohamed Imran",
@@ -309,15 +315,15 @@ class UserCreationWriteSerializerTests(TestCase):
             role_master=role_master,
         )
         main_screen = MainScreen.objects.create(
-            name="Masters",
-            code="masters",
+            name="Masters-Test",
+            code="masters-test",
             order_no=1,
             status=True,
         )
         section = ScreenSection.objects.create(
             main_screen=main_screen,
-            name="Admin Master",
-            code="admin-master",
+            name="Admin Master-Test",
+            code="admin-master-test",
             order_no=1,
             is_active=True,
         )
@@ -325,7 +331,7 @@ class UserCreationWriteSerializerTests(TestCase):
             main_screen=main_screen,
             screen_section=section,
             screen_name="User Creation",
-            code="user-creation",
+            code="user-creation-test",
             folder_name="/admin/user-creation",
             order_no=1,
             is_active=True,
