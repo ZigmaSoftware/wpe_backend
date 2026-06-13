@@ -244,6 +244,7 @@ class StockRequestSerializer(serializers.ModelSerializer):
     quantity = serializers.SerializerMethodField()
     requested_by_username = serializers.CharField(source="requested_by.username", read_only=True)
     action_by_username = serializers.CharField(source="action_by.username", read_only=True)
+    head_action_by_username = serializers.CharField(source="head_action_by.username", read_only=True)
     cancelled_by_username = serializers.CharField(source="cancelled_by.username", read_only=True)
     requesting_warehouse_code = serializers.CharField(source="requesting_warehouse.code", read_only=True)
     requesting_warehouse_name = serializers.CharField(source="requesting_warehouse.name", read_only=True)
@@ -286,16 +287,20 @@ class StockRequestSerializer(serializers.ModelSerializer):
             "issuing_warehouse_name",
             "remarks",
             "approval_remarks",
+            "head_approval_remarks",
             "requested_by",
             "requested_by_username",
             "action_by",
             "action_by_username",
+            "head_action_by",
+            "head_action_by_username",
             "approved_by",
             "approved_by_username",
             "cancelled_by",
             "cancelled_by_username",
             "requested_at",
             "action_at",
+            "head_action_at",
             "approved_at",
             "cancelled_at",
             "total_requested_qty",
@@ -393,6 +398,10 @@ class StockRequestApproveSerializer(serializers.Serializer):
 
 class StockRequestRejectSerializer(serializers.Serializer):
     approval_remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
+class StockRequestHeadActionSerializer(serializers.Serializer):
+    remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
 class StockRequestCancelSerializer(serializers.Serializer):

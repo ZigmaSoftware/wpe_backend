@@ -1090,7 +1090,7 @@ class Command(BaseCommand):
         pending_request, _ = StockRequest.objects.update_or_create(
             request_no="SR-SEED-0001",
             defaults={
-                "status": StockRequest.Status.PENDING,
+                "status": StockRequest.Status.PENDING_HEAD_APPROVAL,
                 "requesting_warehouse": blending_warehouse,
                 "issuing_warehouse": store_warehouse,
                 "request_type": StockRequest.RequestType.GENERAL,

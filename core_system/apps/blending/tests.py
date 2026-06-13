@@ -21,7 +21,7 @@ class BlendingStoreRequestTests(APITestCase):
         department = None
         if department_name:
             department = DepartmentMaster.objects.create(name=department_name)
-        user_type = UserType.objects.create(name=role_name, department=department)
+        user_type, _ = UserType.objects.get_or_create(name=role_name, defaults={"department": department})
         UserCreation.objects.create(user=user, staff=staff, user_type=user_type)
         return user
 
@@ -38,8 +38,10 @@ class BlendingStoreRequestTests(APITestCase):
             department_name="Compounding",
         )
         self.store_user = self.create_role_user(username="store-user", role_name="Store User")
+        self.blending_head = self.create_role_user(username="blending-head", role_name="Blending Head")
         self.client = self.make_auth_client(self.blending_user)
         self.store_user_client = self.make_auth_client(self.store_user)
+        self.blending_head_client = self.make_auth_client(self.blending_head)
         self.blending_warehouse = get_blending_warehouse()
         self.store_warehouse = get_store_warehouse()
 
@@ -69,13 +71,102 @@ class BlendingStoreRequestTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.data["data"]["status"], StockRequest.Status.PENDING)
+        self.assertEqual(response.data["data"]["status"], StockRequest.Status.PENDING_HEAD_APPROVAL)
         self.assertEqual(response.data["data"]["request_type"], StockRequest.RequestType.ADDITIVE)
         self.assertEqual(response.data["data"]["item"], item.id)
         self.assertEqual(response.data["data"]["department"], "Compounding")
         self.assertEqual(str(response.data["data"]["request_date"]), "2026-05-20")
         self.assertEqual(str(response.data["data"]["require_date"]), "2026-05-21")
         self.assertEqual(str(response.data["data"]["require_time"]), "14:30:00")
+
+    def test_head_approval_moves_request_to_store_queue_without_inventory_movement(self):
+        item = Item.objects.create(
+            category="Raw Material",
+            group="blend",
+            sub_group="approval",
+            item_name="Head Approval Material",
+            unit="kg",
+        )
+        create_response = self.client.post(
+            "/api/blending/store-requests/",
+            {
+                "department": "BLENDING",
+                "items": [{"item_id": item.id, "quantity": "8.000"}],
+            },
+            format="json",
+        )
+        request_id = create_response.data["data"]["id"]
+        stock_request = StockRequest.objects.get(pk=request_id)
+        stock_request.department = "BLENDING"
+        stock_request.save(update_fields=["department"])
+        transaction_count = StoreTransaction.objects.count()
+
+        head_queue = self.blending_head_client.get("/api/blending/head-approvals/")
+        before_store_queue = self.store_user_client.get("/api/store/requests/")
+        approval_response = self.blending_head_client.post(
+            f"/api/blending/head-approvals/{request_id}/approve/",
+            {"remarks": "Approved for batch BL-104"},
+            format="json",
+        )
+        after_store_queue = self.store_user_client.get("/api/store/requests/")
+
+        self.assertEqual(head_queue.data["data"]["count"], 1)
+        self.assertEqual(before_store_queue.data["data"]["count"], 0)
+        self.assertEqual(approval_response.status_code, 200)
+        self.assertEqual(approval_response.data["data"]["status"], StockRequest.Status.PENDING_STORE_ISSUE)
+        self.assertEqual(approval_response.data["data"]["head_action_by"], self.blending_head.id)
+        self.assertEqual(approval_response.data["data"]["head_approval_remarks"], "Approved for batch BL-104")
+        self.assertIsNotNone(approval_response.data["data"]["head_action_at"])
+        self.assertEqual(after_store_queue.data["data"]["count"], 1)
+        self.assertEqual(StoreTransaction.objects.count(), transaction_count)
+
+    def test_head_rejection_does_not_change_inventory(self):
+        item = Item.objects.create(
+            category="Raw Material",
+            group="blend",
+            sub_group="approval",
+            item_name="Rejected Head Material",
+            unit="kg",
+        )
+        create_response = self.client.post(
+            "/api/blending/store-requests/",
+            {"items": [{"item_id": item.id, "quantity": "3.000"}]},
+            format="json",
+        )
+        request_id = create_response.data["data"]["id"]
+        transaction_count = StoreTransaction.objects.count()
+
+        rejection_response = self.blending_head_client.post(
+            f"/api/blending/head-approvals/{request_id}/reject/",
+            {"remarks": "Existing stock is sufficient"},
+            format="json",
+        )
+
+        self.assertEqual(rejection_response.status_code, 200)
+        self.assertEqual(rejection_response.data["data"]["status"], StockRequest.Status.HEAD_REJECTED)
+        self.assertEqual(StoreTransaction.objects.count(), transaction_count)
+
+    def test_regular_blending_user_cannot_review_head_approval(self):
+        item = Item.objects.create(
+            category="Raw Material",
+            group="blend",
+            sub_group="approval",
+            item_name="Protected Head Approval Material",
+            unit="kg",
+        )
+        create_response = self.client.post(
+            "/api/blending/store-requests/",
+            {"items": [{"item_id": item.id, "quantity": "3.000"}]},
+            format="json",
+        )
+
+        approval_response = self.client.post(
+            f"/api/blending/head-approvals/{create_response.data['data']['id']}/approve/",
+            {"remarks": "Should not be allowed"},
+            format="json",
+        )
+
+        self.assertEqual(approval_response.status_code, 403)
 
     def test_legacy_additive_request_endpoint_still_works(self):
         item = Item.objects.create(
