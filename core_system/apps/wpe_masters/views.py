@@ -9,7 +9,6 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from apps.admin_master.models import MainScreen, UserScreen
 from apps.admin_master.permissions import AdminMasterRBACPermission
 from apps.common_master.services import build_running_number
 
@@ -34,8 +33,6 @@ from .models import (
     WarehouseMaster,
     WeighmentScaleMaster,
     WPEUserCreation,
-    WPERolePermission,
-    WPEUserScreenPermission,
 )
 from .serializers import (
     BranchMasterSerializer,
@@ -60,7 +57,6 @@ from .serializers import (
     WeighmentScaleMasterSerializer,
     WPEUserCreationReadSerializer,
     WPEUserCreationWriteSerializer,
-    PERMISSION_FIELDS,
 )
 from .pagination import WpeMasterPagination
 
@@ -193,6 +189,15 @@ class ProductTypeManagedViewSet(BaseMasterViewSet):
 class LocationMasterViewSet(BaseMasterViewSet):
     queryset = LocationMaster.objects.all()
     serializer_class = LocationMasterSerializer
+    filterset_map = {
+        "center_type": "center_type",
+        "is_active": "is_active",
+    }
+
+    @action(detail=False, methods=["get"])
+    def lookup(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True).values("id", "name")
+        return Response(list(queryset))
 
 
 class BranchMasterViewSet(BaseMasterViewSet):
@@ -603,156 +608,3 @@ class WPEUserCreationViewSet(viewsets.ModelViewSet):
                 for row in queryset
             ]
         )
-
-
-class RolePermissionMatrixView(viewsets.ViewSet):
-    """
-    Provides a Role × MainScreen permission matrix.
-    GET  ?main_screen_id=<id>  → full matrix for that screen (all active roles)
-    POST bulk-save/            → upsert permissions for one main screen
-    GET  screens/              → list main screens that have active user screens
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    @action(detail=False, methods=["get"])
-    def screens(self, request):
-        screens = (
-            MainScreen.objects.filter(
-                status=True,
-                user_screens__is_active=True,
-            )
-            .distinct()
-            .order_by("order_no", "name")
-            .values("id", "name", "code", "order_no")
-        )
-        return Response(list(screens))
-
-    @action(detail=False, methods=["get"])
-    def matrix(self, request):
-        main_screen_id = request.query_params.get("main_screen_id")
-        if not main_screen_id:
-            return Response({"detail": "main_screen_id query param is required."}, status=400)
-
-        roles = RoleMaster.objects.filter(is_active=True).order_by("name")
-        existing = {
-            p.role_id: p
-            for p in WPERolePermission.objects.filter(main_screen_id=main_screen_id)
-        }
-
-        result = []
-        for role in roles:
-            p = existing.get(role.id)
-            row = {"role_id": role.id, "role_name": role.name}
-            for field in PERMISSION_FIELDS:
-                row[field] = getattr(p, field) if p else False
-            result.append(row)
-
-        return Response(result)
-
-    @action(detail=False, methods=["post"], url_path="bulk-save")
-    def bulk_save(self, request):
-        main_screen_id = request.data.get("main_screen_id")
-        permissions = request.data.get("permissions", [])
-
-        if not main_screen_id:
-            return Response({"detail": "main_screen_id is required."}, status=400)
-
-        try:
-            main_screen = MainScreen.objects.get(pk=main_screen_id)
-        except MainScreen.DoesNotExist:
-            return Response({"detail": "MainScreen not found."}, status=404)
-
-        with transaction.atomic():
-            for item in permissions:
-                role_id = item.get("role_id")
-                if not role_id:
-                    continue
-                defaults = {field: bool(item.get(field, False)) for field in PERMISSION_FIELDS}
-                WPERolePermission.objects.update_or_create(
-                    role_id=role_id,
-                    main_screen=main_screen,
-                    defaults=defaults,
-                )
-
-        return Response({"detail": "Permissions saved successfully."})
-
-
-class UserScreenPermMatrixView(viewsets.ViewSet):
-    """
-    Provides a UserScreen permission matrix grouped by MainScreen tabs.
-    GET  screens/              → list main screens that have active user screens
-    GET  matrix/?main_screen_id=<id>  → all active user screens + their permissions
-    POST bulk-save/            → upsert permissions per user_screen
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    @action(detail=False, methods=["get"])
-    def screens(self, request):
-        screens = (
-            MainScreen.objects.filter(
-                status=True,
-                user_screens__is_active=True,
-            )
-            .distinct()
-            .order_by("order_no", "name")
-            .values("id", "name", "code", "order_no")
-        )
-        return Response(list(screens))
-
-    @action(detail=False, methods=["get"])
-    def matrix(self, request):
-        main_screen_id = request.query_params.get("main_screen_id")
-        if not main_screen_id:
-            return Response({"detail": "main_screen_id query param is required."}, status=400)
-
-        user_screens = (
-            UserScreen.objects.filter(main_screen_id=main_screen_id, is_active=True)
-            .select_related("screen_section")
-            .order_by("order_no", "screen_name")
-        )
-        existing = {
-            p.user_screen_id: p
-            for p in WPEUserScreenPermission.objects.filter(
-                user_screen__main_screen_id=main_screen_id
-            )
-        }
-
-        result = []
-        for us in user_screens:
-            p = existing.get(us.id)
-            row = {
-                "user_screen_id": us.id,
-                "screen_name": us.screen_name,
-                "screen_section_name": us.screen_section.name if us.screen_section_id else "",
-            }
-            for field in PERMISSION_FIELDS:
-                row[field] = getattr(p, field) if p else False
-            result.append(row)
-
-        return Response(result)
-
-    @action(detail=False, methods=["post"], url_path="bulk-save")
-    def bulk_save(self, request):
-        main_screen_id = request.data.get("main_screen_id")
-        permissions = request.data.get("permissions", [])
-
-        if not main_screen_id:
-            return Response({"detail": "main_screen_id is required."}, status=400)
-
-        if not MainScreen.objects.filter(pk=main_screen_id).exists():
-            return Response({"detail": "MainScreen not found."}, status=404)
-
-        with transaction.atomic():
-            for item in permissions:
-                user_screen_id = item.get("user_screen_id")
-                if not user_screen_id:
-                    continue
-                defaults = {field: bool(item.get(field, False)) for field in PERMISSION_FIELDS}
-                WPEUserScreenPermission.objects.update_or_create(
-                    user_screen_id=user_screen_id,
-                    defaults=defaults,
-                )
-
-        return Response({"detail": "Permissions saved successfully."})

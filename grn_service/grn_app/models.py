@@ -29,6 +29,13 @@ class WPEUniqueIDModel(models.Model):
 
 
 class GRN(WPEUniqueIDModel):
+    PROCESS_STATUS_GATE_ENTRY = "Gate Entry"
+    PROCESS_STATUS_GRN_PENDING = "GRN Pending"
+    PROCESS_STATUS_QCR = "Moved to QCR"
+    PROCESS_STATUS_MOVED_TO_GRN = "Moved to GRN"
+    PROCESS_STATUS_APPROVED = "GRN Approved"
+    PROCESS_STATUS_REJECTED = "Rejected"
+
     # =========================
     # Document Details
     # =========================
@@ -136,9 +143,10 @@ class GRN(WPEUniqueIDModel):
     total_after_tax = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
 
     raw_payload = models.JSONField(default=dict, blank=True)
+    grn_pending_items = models.JSONField(default=list, blank=True)
 
     # =========================
-    # Invoice / Order Details (GRN Process editable)
+    # Invoice / Order Details (Gate Entry editable)
     # =========================
     purchase_bill_no = models.CharField(max_length=100, unique=True, blank=True, null=True)
     purchase_bill_date = models.DateField(blank=True, null=True)
@@ -149,7 +157,7 @@ class GRN(WPEUniqueIDModel):
     order_rating = models.IntegerField(default=0, blank=True, null=True)
 
     # =========================
-    # Warehouse Routing (GRN Process editable)
+    # Warehouse Routing (Gate Entry editable)
     # =========================
     grn_warehouse = models.CharField(max_length=255, default="QC Pending Warehouse - CBE", blank=True)
     source_warehouse = models.CharField(max_length=255, blank=True, null=True)
@@ -163,7 +171,7 @@ class GRN(WPEUniqueIDModel):
     updated_at = models.DateTimeField(auto_now=True)
 
     status = models.BooleanField(default=True)
-    process_status = models.CharField(max_length=100, default="GRN Process")
+    process_status = models.CharField(max_length=100, default=PROCESS_STATUS_GATE_ENTRY)
     qc_status = models.CharField(max_length=20, default="Pending", blank=True)
     moved_to_qcr_at = models.DateTimeField(blank=True, null=True)
     moved_to_qcr_by = models.CharField(max_length=255, blank=True, null=True)
@@ -186,10 +194,13 @@ class QCR(WPEUniqueIDModel):
     source_grn = models.OneToOneField(GRN, on_delete=models.PROTECT, related_name="qcr_record")
     grn_reference_no = models.CharField(max_length=100, db_index=True)
     snapshot = models.JSONField(default=dict)
+    qcr_items = models.JSONField(default=list, blank=True)
     status = models.CharField(max_length=100, default="Active")
     remarks = models.TextField(blank=True, null=True)
     moved_to_qcr_at = models.DateTimeField()
     moved_to_qcr_by = models.CharField(max_length=255, blank=True, null=True)
+    qcr_completed_at = models.DateTimeField(blank=True, null=True)
+    qcr_completed_by = models.CharField(max_length=255, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -199,7 +210,8 @@ class QCR(WPEUniqueIDModel):
 
 class GRNAuditLog(models.Model):
     STAGE_GRN_CREATED = "GRN Created"
-    STAGE_GRN_EDITED = "GRN Process Edited"
+    STAGE_GRN_EDITED = "Gate Entry Edited"
+    STAGE_MOVED_TO_GRN_PENDING = "Moved to GRN Pending"
     STAGE_MOVED_TO_QCR = "Moved to QCR"
     STAGE_QCR_ACCEPTED = "QCR Accepted"
     STAGE_QCR_REJECTED = "QCR Rejected"

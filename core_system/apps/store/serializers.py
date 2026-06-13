@@ -225,6 +225,12 @@ class StockRequestItemReadSerializer(serializers.ModelSerializer):
         return serialize_quantity(shortage if shortage > STOCK_ZERO else STOCK_ZERO)
 
 
+class StockRequestApprovalItemSerializer(serializers.Serializer):
+    item = serializers.PrimaryKeyRelatedField(queryset=Item.objects.filter(status=True))
+    provided_qty = serializers.DecimalField(max_digits=14, decimal_places=3)
+    remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
 class StockRequestSerializer(serializers.ModelSerializer):
     items = StockRequestItemReadSerializer(many=True, read_only=True)
     item = serializers.SerializerMethodField()
@@ -361,6 +367,28 @@ class StockRequestSerializer(serializers.ModelSerializer):
 
 class StockRequestApproveSerializer(serializers.Serializer):
     approval_remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    items = StockRequestApprovalItemSerializer(many=True, required=False)
+
+    def validate_items(self, value):
+        if value is None:
+            return value
+
+        if not value:
+            raise serializers.ValidationError("At least one approval line is required when items are provided.")
+
+        item_ids: list[int] = []
+        for row in value:
+            item = row.get("item")
+            item_id = getattr(item, "id", None)
+
+            if item_id in item_ids:
+                raise serializers.ValidationError("Duplicate items are not allowed in a store request review.")
+            item_ids.append(item_id)
+
+            if item_id in (None, ""):
+                raise serializers.ValidationError("Each approval line requires an item_id.")
+
+        return value
 
 
 class StockRequestRejectSerializer(serializers.Serializer):

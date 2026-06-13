@@ -139,6 +139,18 @@ class ProductTypeGovernedMaster(models.Model):
 
 
 class LocationMaster(BaseMaster):
+    class CenterType(models.TextChoices):
+        GRN_CENTER = "GRN_CENTER", "GRN Stock Center"
+        BLENDING_CENTER = "BLENDING_CENTER", "Blending Stock Center"
+        WAREHOUSE_CENTER = "WAREHOUSE_CENTER", "Warehouse Stock Center"
+
+    center_type = models.CharField(
+        max_length=20,
+        choices=CenterType.choices,
+        default=CenterType.BLENDING_CENTER,
+        db_index=True,
+    )
+
     class Meta(BaseMaster.Meta):
         abstract = False
         db_table = "wpe_location_master"

@@ -34,9 +34,9 @@ class ProductTypeSubtypeInline(admin.TabularInline):
 
 @admin.register(LocationMaster)
 class LocationMasterAdmin(admin.ModelAdmin):
-    list_display = ("name", "is_active", "created_at")
+    list_display = ("name", "center_type", "is_active", "created_at")
     search_fields = ("name",)
-    list_filter = ("is_active",)
+    list_filter = ("center_type", "is_active")
 
 
 @admin.register(BranchMaster)
