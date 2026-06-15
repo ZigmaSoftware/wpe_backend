@@ -28,6 +28,9 @@ class BlendingAdditiveRequestSerializer(serializers.Serializer):
         },
     )
     quantity = serializers.DecimalField(max_digits=14, decimal_places=3)
+    request_date = serializers.DateField(required=False)
+    require_date = serializers.DateField(required=False, allow_null=True)
+    require_time = serializers.TimeField(required=False, allow_null=True)
     requested_for_name = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
     request_reason = serializers.CharField(required=False, allow_blank=True, default="")
     department = serializers.CharField(max_length=100, default="BLENDING", required=False)

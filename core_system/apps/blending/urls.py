@@ -3,11 +3,14 @@ from django.urls import path
 from .views import (
     BlendingInventoryHistoryAPIView,
     BlendingInventorySummaryAPIView,
+    BlendingHeadApprovalListAPIView,
     BlendingRequestableAdditiveStockListAPIView,
     BlendingStockListAPIView,
     BlendingStoreRequestDetailAPIView,
     BlendingStoreRequestListCreateAPIView,
     CancelBlendingStoreRequestAPIView,
+    ApproveBlendingHeadRequestAPIView,
+    RejectBlendingHeadRequestAPIView,
     RequestBlendingStockAPIView,
 )
 
@@ -21,6 +24,12 @@ urlpatterns = [
     path("store-requests/<int:pk>", BlendingStoreRequestDetailAPIView.as_view(), name="blending-store-request-detail-no-slash"),
     path("store-requests/<int:pk>/cancel/", CancelBlendingStoreRequestAPIView.as_view(), name="blending-store-request-cancel"),
     path("store-requests/<int:pk>/cancel", CancelBlendingStoreRequestAPIView.as_view(), name="blending-store-request-cancel-no-slash"),
+    path("head-approvals/", BlendingHeadApprovalListAPIView.as_view(), name="blending-head-approval-list"),
+    path("head-approvals", BlendingHeadApprovalListAPIView.as_view(), name="blending-head-approval-list-no-slash"),
+    path("head-approvals/<int:pk>/approve/", ApproveBlendingHeadRequestAPIView.as_view(), name="blending-head-approval-approve"),
+    path("head-approvals/<int:pk>/approve", ApproveBlendingHeadRequestAPIView.as_view(), name="blending-head-approval-approve-no-slash"),
+    path("head-approvals/<int:pk>/reject/", RejectBlendingHeadRequestAPIView.as_view(), name="blending-head-approval-reject"),
+    path("head-approvals/<int:pk>/reject", RejectBlendingHeadRequestAPIView.as_view(), name="blending-head-approval-reject-no-slash"),
     path("requestable-additive-stock/", BlendingRequestableAdditiveStockListAPIView.as_view(), name="blending-requestable-additive-stock"),
     path("requestable-additive-stock", BlendingRequestableAdditiveStockListAPIView.as_view(), name="blending-requestable-additive-stock-no-slash"),
     path("inventory/summary/", BlendingInventorySummaryAPIView.as_view(), name="blending-inventory-summary"),

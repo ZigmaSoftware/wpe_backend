@@ -20,11 +20,11 @@ BLENDING_ROLE_TOKENS = {
     "blending_user",
     "blending_manager",
 }
-PRESALES_ROLE_TOKENS = {
-    "presales",
-    "presales_user",
-    "presales_manager",
-    "sales",
+BLENDING_HEAD_ROLE_TOKENS = {
+    "blending_head",
+    "blending_incharge",
+    "blending_manager",
+    "blending_request_approver",
 }
 PRODUCTION_ROLE_TOKENS = {
     "production",
@@ -56,9 +56,17 @@ def resolve_user_role_tokens(user) -> set[str]:
     values = [
         getattr(getattr(profile, "user_type", None), "name", None),
         getattr(getattr(profile, "user_type", None), "code", None),
+        getattr(getattr(getattr(profile, "user_type", None), "role", None), "name", None),
+        getattr(
+            getattr(getattr(getattr(profile, "user_type", None), "role", None), "designation", None),
+            "name",
+            None,
+        ),
         getattr(getattr(profile, "role", None), "name", None),
         getattr(getattr(profile, "department", None), "name", None),
         getattr(getattr(getattr(profile, "staff", None), "department", None), "name", None),
+        getattr(getattr(getattr(profile, "staff", None), "designation_master", None), "name", None),
+        getattr(getattr(getattr(profile, "staff", None), "role_master", None), "name", None),
     ]
     for value in values:
         token = _normalize_role_token(value)

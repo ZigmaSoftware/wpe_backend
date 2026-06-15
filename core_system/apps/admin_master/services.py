@@ -5,8 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from django.db.models import Q
+from django.db.models.deletion import ProtectedError
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
@@ -100,10 +102,37 @@ def _get_or_prepare_auth_user(
         except UserCreation.DoesNotExist:
             existing_profile = None
         if existing_profile and (instance is None or existing_profile.pk != instance.pk):
-            raise ValidationError({"username": "This username is already linked to another user account."})
+            raise ValidationError({"username": "This username is already linked to another user creation record."})
         return existing_user
 
     return UserModel(username=username)
+
+
+@transaction.atomic
+def delete_user_creation(instance: UserCreation) -> None:
+    linked_user = instance.user
+    instance.delete()
+
+    if not linked_user:
+        return
+
+    if UserCreation.objects.filter(user=linked_user).exists():
+        return
+
+    try:
+        wpe_profile = linked_user.wpe_profile
+    except ObjectDoesNotExist:
+        wpe_profile = None
+
+    if wpe_profile is not None:
+        return
+
+    try:
+        linked_user.delete()
+    except ProtectedError:
+        # Preserve historical references owned by the auth user while still
+        # allowing the admin profile row to be removed.
+        return
 
 
 @transaction.atomic
@@ -172,6 +201,8 @@ def upsert_user_creation(
     profile.account_status = account_status
     profile.force_password_change = force_password_change
     profile.is_team_head = is_team_head
+    if password:
+        profile.password = password
 
     if account_status != UserCreation.AccountStatus.LOCKED:
         profile.failed_login_attempts = 0

@@ -12,22 +12,26 @@ from apps.store.selectors import availability_map_for_requests, stock_source_map
 from apps.store.serializers import (
     StockRequestCancelSerializer,
     StockRequestCreateSerializer,
+    StockRequestHeadActionSerializer,
     StockRequestSerializer,
 )
 from apps.store.services import request_stock
 
-from .permissions import IsBlendingUser
+from .permissions import IsBlendingHeadUser, IsBlendingUser
 from .serializers import (
     BlendingAdditiveRequestSerializer,
     BlendingStockSerializer,
 )
 from .services import (
     BLENDING_DEPARTMENT,
+    approve_blending_store_request_by_head,
     blending_stock_queryset,
     cancel_blending_store_request,
     create_blending_store_request,
     get_blending_warehouse,
+    reject_blending_store_request_by_head,
     requestable_additive_stock_queryset,
+    resolve_blending_request_department,
     update_blending_store_request,
 )
 
@@ -116,7 +120,13 @@ class RequestBlendingStockAPIView(generics.GenericAPIView):
             quantity=serializer.validated_data["quantity"],
             user=request.user,
             request_type=StockRequest.RequestType.ADDITIVE,
-            department=serializer.validated_data.get("department") or BLENDING_DEPARTMENT,
+            department=resolve_blending_request_department(
+                request.user,
+                fallback=serializer.validated_data.get("department") or BLENDING_DEPARTMENT,
+            ),
+            request_date=serializer.validated_data.get("request_date"),
+            require_date=serializer.validated_data.get("require_date"),
+            require_time=serializer.validated_data.get("require_time"),
             requested_for_name=serializer.validated_data["requested_for_name"],
             request_reason=serializer.validated_data["request_reason"],
         )
@@ -141,7 +151,7 @@ class BlendingStoreRequestListCreateAPIView(WrappedBlendingListAPIView, generics
         "status": "status",
         "requested_by": "requested_by_id",
         "request_type": "request_type",
-        "department": "department",
+        "department": "department__iexact",
     }
     list_message = "Blending store requests fetched successfully."
 
@@ -195,7 +205,13 @@ class BlendingStoreRequestListCreateAPIView(WrappedBlendingListAPIView, generics
             ],
             remarks=serializer.validated_data.get("remarks"),
             request_type=serializer.validated_data.get("request_type", StockRequest.RequestType.GENERAL),
-            department=serializer.validated_data.get("department", BLENDING_DEPARTMENT),
+            department=resolve_blending_request_department(
+                request.user,
+                fallback=serializer.validated_data.get("department", BLENDING_DEPARTMENT),
+            ),
+            request_date=serializer.validated_data.get("request_date"),
+            require_date=serializer.validated_data.get("require_date"),
+            require_time=serializer.validated_data.get("require_time"),
             requested_for_name=serializer.validated_data.get("requested_for_name", ""),
             request_reason=serializer.validated_data.get("request_reason", ""),
         )
@@ -207,6 +223,72 @@ class BlendingStoreRequestListCreateAPIView(WrappedBlendingListAPIView, generics
             message="Store request created successfully.",
             data=response_serializer.data,
             status_code=status.HTTP_201_CREATED,
+        )
+
+
+class BlendingHeadApprovalListAPIView(WrappedBlendingListAPIView):
+    permission_classes = [IsAuthenticated, IsBlendingHeadUser]
+    serializer_class = StockRequestSerializer
+    search_fields = ("request_no", "requested_by__username", "items__item__item_name", "items__item__item_code")
+    ordering_fields = ("requested_at", "request_no", "id")
+    list_message = "Blending Head approval queue fetched successfully."
+
+    def get_queryset(self):
+        return (
+            store_request_queryset()
+            .filter(
+                status=StockRequest.Status.PENDING_HEAD_APPROVAL,
+                department__iexact=BLENDING_DEPARTMENT,
+            )
+            .distinct()
+        )
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        rows = getattr(self, "_serializer_rows", [])
+        context["availability_map"] = availability_map_for_requests(rows)
+        return context
+
+
+class ApproveBlendingHeadRequestAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated, IsBlendingHeadUser]
+    serializer_class = StockRequestHeadActionSerializer
+
+    def post(self, request, pk: int, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        stock_request = approve_blending_store_request_by_head(
+            pk,
+            head_user=request.user,
+            remarks=serializer.validated_data.get("remarks"),
+        )
+        return success_response(
+            message="Blending store request approved by Blending Head.",
+            data=StockRequestSerializer(
+                stock_request,
+                context={"availability_map": availability_map_for_requests([stock_request])},
+            ).data,
+        )
+
+
+class RejectBlendingHeadRequestAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated, IsBlendingHeadUser]
+    serializer_class = StockRequestHeadActionSerializer
+
+    def post(self, request, pk: int, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        stock_request = reject_blending_store_request_by_head(
+            pk,
+            head_user=request.user,
+            remarks=serializer.validated_data.get("remarks"),
+        )
+        return success_response(
+            message="Blending store request rejected by Blending Head.",
+            data=StockRequestSerializer(
+                stock_request,
+                context={"availability_map": availability_map_for_requests([stock_request])},
+            ).data,
         )
 
 
@@ -252,7 +334,13 @@ class BlendingStoreRequestDetailAPIView(generics.RetrieveUpdateAPIView):
             ],
             remarks=serializer.validated_data.get("remarks"),
             request_type=serializer.validated_data.get("request_type", StockRequest.RequestType.GENERAL),
-            department=serializer.validated_data.get("department", BLENDING_DEPARTMENT),
+            department=resolve_blending_request_department(
+                request.user,
+                fallback=serializer.validated_data.get("department", BLENDING_DEPARTMENT),
+            ),
+            request_date=serializer.validated_data.get("request_date"),
+            require_date=serializer.validated_data.get("require_date"),
+            require_time=serializer.validated_data.get("require_time"),
             requested_for_name=serializer.validated_data.get("requested_for_name", ""),
             request_reason=serializer.validated_data.get("request_reason", ""),
         )

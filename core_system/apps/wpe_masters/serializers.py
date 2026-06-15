@@ -9,19 +9,26 @@ from rest_framework import serializers
 from .models import (
     BranchMaster,
     DepartmentMaster,
+    DesignationMaster,
+    ItemMaster,
     LocationMaster,
+    PrinterMaster,
     PriceBookMaster,
     ProductTypeCategory,
     ProductTypeSubtype,
     ProductionTypeMaster,
     PurchaseTypeMaster,
+    QRLabelTemplateMaster,
     RoleMaster,
     SaleTypeMaster,
+    SerialPortConfigurationMaster,
+    StoreMaster,
+    UnitMaster,
     WarehouseMaster,
+    WeighmentScaleMaster,
     WPEUserCreation,
-    WPERolePermission,
-    WPEUserScreenPermission,
 )
+from apps.production.models import ProductionMachine
 
 
 UserModel = get_user_model()
@@ -33,9 +40,16 @@ class BaseMasterSerializer(serializers.ModelSerializer):
         read_only_fields = ("unique_id", "created_at", "updated_at")
 
 
+class CodeTrackedMasterSerializer(serializers.ModelSerializer):
+    class Meta:
+        fields = ("id", "unique_id", "code", "name", "description", "is_active", "created_at", "updated_at")
+        read_only_fields = ("unique_id", "code", "created_at", "updated_at")
+
+
 class LocationMasterSerializer(BaseMasterSerializer):
     class Meta(BaseMasterSerializer.Meta):
         model = LocationMaster
+        fields = BaseMasterSerializer.Meta.fields + ("center_type",)
 
 
 class BranchMasterSerializer(BaseMasterSerializer):
@@ -48,9 +62,10 @@ class PriceBookMasterSerializer(BaseMasterSerializer):
         model = PriceBookMaster
 
 
-class WarehouseMasterSerializer(BaseMasterSerializer):
-    class Meta(BaseMasterSerializer.Meta):
+class WarehouseMasterSerializer(CodeTrackedMasterSerializer):
+    class Meta(CodeTrackedMasterSerializer.Meta):
         model = WarehouseMaster
+        fields = CodeTrackedMasterSerializer.Meta.fields + ("warehouse_type",)
 
 
 class ProductionTypeMasterSerializer(BaseMasterSerializer):
@@ -68,14 +83,95 @@ class PurchaseTypeMasterSerializer(BaseMasterSerializer):
         model = PurchaseTypeMaster
 
 
-class RoleMasterSerializer(BaseMasterSerializer):
-    class Meta(BaseMasterSerializer.Meta):
-        model = RoleMaster
+class StoreMasterSerializer(CodeTrackedMasterSerializer):
+    class Meta(CodeTrackedMasterSerializer.Meta):
+        model = StoreMaster
 
 
-class DepartmentMasterSerializer(BaseMasterSerializer):
-    class Meta(BaseMasterSerializer.Meta):
+class DepartmentMasterSerializer(CodeTrackedMasterSerializer):
+    department_head_name = serializers.CharField(source="department_head.full_name", read_only=True, allow_null=True)
+    department_head = serializers.PrimaryKeyRelatedField(
+        queryset=WPEUserCreation.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+
+    class Meta(CodeTrackedMasterSerializer.Meta):
         model = DepartmentMaster
+        fields = CodeTrackedMasterSerializer.Meta.fields + ("department_head", "department_head_name")
+
+
+class DesignationMasterSerializer(CodeTrackedMasterSerializer):
+    department_name = serializers.CharField(source="department.name", read_only=True)
+    department = serializers.PrimaryKeyRelatedField(queryset=DepartmentMaster.objects.filter(is_active=True))
+
+    class Meta(CodeTrackedMasterSerializer.Meta):
+        model = DesignationMaster
+        fields = CodeTrackedMasterSerializer.Meta.fields + ("department", "department_name")
+
+
+class RoleMasterSerializer(CodeTrackedMasterSerializer):
+    designation_name = serializers.CharField(source="designation.name", read_only=True, allow_null=True)
+    designation = serializers.PrimaryKeyRelatedField(
+        queryset=DesignationMaster.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+
+    class Meta(CodeTrackedMasterSerializer.Meta):
+        model = RoleMaster
+        fields = CodeTrackedMasterSerializer.Meta.fields + ("designation", "designation_name")
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        designation = attrs.get("designation", getattr(self.instance, "designation", None))
+        if designation is None:
+            raise serializers.ValidationError({"designation": "Designation is required."})
+        return attrs
+
+
+class UnitMasterSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UnitMaster
+        fields = (
+            "id",
+            "unique_id",
+            "uom_code",
+            "name",
+            "decimal_allowed",
+            "decimal_places",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("unique_id", "created_at", "updated_at")
+
+    def validate_uom_code(self, value: str) -> str:
+        normalized = (value or "").strip().upper()
+        if not normalized:
+            raise serializers.ValidationError("UOM code is required.")
+        queryset = UnitMaster.objects.filter(uom_code__iexact=normalized)
+        if self.instance and self.instance.pk:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("A unit with this UOM code already exists.")
+        return normalized
+
+    def validate_name(self, value: str) -> str:
+        normalized = (value or "").strip()
+        if not normalized:
+            raise serializers.ValidationError("UOM name is required.")
+        return normalized
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        decimal_allowed = attrs.get("decimal_allowed", getattr(self.instance, "decimal_allowed", False))
+        decimal_places = attrs.get("decimal_places", getattr(self.instance, "decimal_places", 0))
+        if not decimal_allowed:
+            attrs["decimal_places"] = 0
+        elif decimal_places < 0:
+            raise serializers.ValidationError({"decimal_places": "Decimal places must be zero or greater."})
+        return attrs
 
 
 class ProductTypeNameValidationMixin:
@@ -109,6 +205,7 @@ class ProductTypeNameValidationMixin:
 
 class ProductTypeSubtypeNestedSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source="category.name", read_only=True)
+    variant_count = serializers.IntegerField(read_only=True, default=0)
 
     class Meta:
         model = ProductTypeSubtype
@@ -120,6 +217,7 @@ class ProductTypeSubtypeNestedSerializer(serializers.ModelSerializer):
             "name",
             "code",
             "description",
+            "variant_count",
             "sort_order",
             "is_active",
             "created_at",
@@ -173,6 +271,7 @@ class ProductTypeCategoryTreeSerializer(ProductTypeCategorySerializer):
 
 class ProductTypeSubtypeSerializer(ProductTypeNameValidationMixin, serializers.ModelSerializer):
     category_name = serializers.CharField(source="category.name", read_only=True)
+    variant_count = serializers.IntegerField(read_only=True, default=0)
 
     class Meta:
         model = ProductTypeSubtype
@@ -184,12 +283,13 @@ class ProductTypeSubtypeSerializer(ProductTypeNameValidationMixin, serializers.M
             "name",
             "code",
             "description",
+            "variant_count",
             "sort_order",
             "is_active",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("unique_id", "code", "category_name", "created_at", "updated_at")
+        read_only_fields = ("unique_id", "code", "category_name", "variant_count", "created_at", "updated_at")
         validators = []
 
     def validate(self, attrs):
@@ -207,6 +307,205 @@ class ProductTypeSubtypeSerializer(ProductTypeNameValidationMixin, serializers.M
             filters={"category": category},
         )
         return attrs
+
+
+class ItemMasterSerializer(serializers.ModelSerializer):
+    sub_category_name = serializers.CharField(source="sub_category.name", read_only=True)
+    category = serializers.IntegerField(source="sub_category.category_id", read_only=True)
+    category_name = serializers.CharField(source="sub_category.category.name", read_only=True)
+    uom_code = serializers.CharField(source="uom.uom_code", read_only=True)
+    uom_name = serializers.CharField(source="uom.name", read_only=True)
+    sub_category = serializers.PrimaryKeyRelatedField(queryset=ProductTypeSubtype.objects.filter(is_active=True, category__is_active=True))
+    uom = serializers.PrimaryKeyRelatedField(queryset=UnitMaster.objects.filter(is_active=True))
+
+    class Meta:
+        model = ItemMaster
+        fields = (
+            "id",
+            "unique_id",
+            "item_code",
+            "item_name",
+            "sub_category",
+            "sub_category_name",
+            "category",
+            "category_name",
+            "description",
+            "item_type",
+            "uom",
+            "uom_code",
+            "uom_name",
+            "hsn_code",
+            "gst_percentage",
+            "minimum_stock",
+            "maximum_stock",
+            "reorder_level",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = (
+            "unique_id",
+            "item_code",
+            "sub_category_name",
+            "category",
+            "category_name",
+            "uom_code",
+            "uom_name",
+            "created_at",
+            "updated_at",
+        )
+
+    def validate_item_name(self, value: str) -> str:
+        normalized = (value or "").strip()
+        if not normalized:
+            raise serializers.ValidationError("Item name is required.")
+        return normalized
+
+    def validate_hsn_code(self, value: str) -> str:
+        return (value or "").strip()
+
+    def validate_description(self, value: str) -> str:
+        return (value or "").strip()
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        minimum_stock = attrs.get("minimum_stock", getattr(self.instance, "minimum_stock", None))
+        maximum_stock = attrs.get("maximum_stock", getattr(self.instance, "maximum_stock", None))
+        reorder_level = attrs.get("reorder_level", getattr(self.instance, "reorder_level", None))
+        sub_category = attrs.get("sub_category", getattr(self.instance, "sub_category", None))
+        item_name = attrs.get("item_name", getattr(self.instance, "item_name", ""))
+        if sub_category is None:
+            raise serializers.ValidationError({"sub_category": "Item sub category is required."})
+        duplicate_queryset = ItemMaster.objects.filter(sub_category=sub_category, item_name=item_name)
+        if self.instance and self.instance.pk:
+            duplicate_queryset = duplicate_queryset.exclude(pk=self.instance.pk)
+        if duplicate_queryset.exists():
+            raise serializers.ValidationError(
+                {"item_name": "An item variant with this name already exists in the selected item sub category."}
+            )
+        if minimum_stock is not None and maximum_stock is not None and minimum_stock > maximum_stock:
+            raise serializers.ValidationError({"minimum_stock": "Minimum stock cannot exceed maximum stock."})
+        if reorder_level is not None and maximum_stock is not None and reorder_level > maximum_stock:
+            raise serializers.ValidationError({"reorder_level": "Reorder level cannot exceed maximum stock."})
+        return attrs
+
+
+class DeviceLabelCodeMasterSerializer(CodeTrackedMasterSerializer):
+    def validate_name(self, value: str) -> str:
+        normalized = (value or "").strip()
+        if not normalized:
+            raise serializers.ValidationError("Name is required.")
+        return normalized
+
+    def validate_description(self, value: str) -> str:
+        return (value or "").strip()
+
+
+class WeighmentScaleMasterSerializer(DeviceLabelCodeMasterSerializer):
+    department_name = serializers.CharField(source="department.name", read_only=True)
+    machine_name = serializers.CharField(source="machine.name", read_only=True)
+    machine_code = serializers.CharField(source="machine.machine_code", read_only=True)
+    unit_name = serializers.CharField(source="unit.name", read_only=True, allow_null=True)
+    unit_code = serializers.CharField(source="unit.uom_code", read_only=True, allow_null=True)
+    department = serializers.PrimaryKeyRelatedField(queryset=DepartmentMaster.objects.filter(is_active=True))
+    machine = serializers.PrimaryKeyRelatedField(queryset=ProductionMachine.objects.filter(is_active=True))
+    unit = serializers.PrimaryKeyRelatedField(
+        queryset=UnitMaster.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+
+    class Meta(CodeTrackedMasterSerializer.Meta):
+        model = WeighmentScaleMaster
+        fields = CodeTrackedMasterSerializer.Meta.fields + (
+            "department",
+            "department_name",
+            "machine",
+            "machine_name",
+            "machine_code",
+            "connection_type",
+            "port_name",
+            "baud_rate",
+            "data_bits",
+            "parity",
+            "stop_bits",
+            "unit",
+            "unit_name",
+            "unit_code",
+            "is_auto_capture",
+        )
+
+
+class PrinterMasterSerializer(DeviceLabelCodeMasterSerializer):
+    department_name = serializers.CharField(source="department.name", read_only=True)
+    department = serializers.PrimaryKeyRelatedField(queryset=DepartmentMaster.objects.filter(is_active=True))
+
+    class Meta(CodeTrackedMasterSerializer.Meta):
+        model = PrinterMaster
+        fields = CodeTrackedMasterSerializer.Meta.fields + (
+            "printer_type",
+            "department",
+            "department_name",
+            "connection_type",
+            "ip_address",
+            "port",
+            "paper_size",
+        )
+
+    def validate_paper_size(self, value: str) -> str:
+        normalized = (value or "").strip()
+        return normalized or "LABEL"
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        connection_type = attrs.get("connection_type", getattr(self.instance, "connection_type", None))
+        ip_address = attrs.get("ip_address", getattr(self.instance, "ip_address", None))
+        port = attrs.get("port", getattr(self.instance, "port", None))
+
+        if connection_type == PrinterMaster.ConnectionType.NETWORK:
+            errors: dict[str, str] = {}
+            if not ip_address:
+                errors["ip_address"] = "IP address is required for network printers."
+            if port in (None, ""):
+                errors["port"] = "Port is required for network printers."
+            if errors:
+                raise serializers.ValidationError(errors)
+        elif connection_type == PrinterMaster.ConnectionType.USB:
+            attrs["ip_address"] = None
+            attrs["port"] = None
+        return attrs
+
+
+class QRLabelTemplateMasterSerializer(DeviceLabelCodeMasterSerializer):
+    printer_name = serializers.CharField(source="printer.name", read_only=True)
+    printer_code = serializers.CharField(source="printer.code", read_only=True)
+    printer = serializers.PrimaryKeyRelatedField(queryset=PrinterMaster.objects.filter(is_active=True))
+
+    class Meta(CodeTrackedMasterSerializer.Meta):
+        model = QRLabelTemplateMaster
+        fields = CodeTrackedMasterSerializer.Meta.fields + (
+            "label_type",
+            "width",
+            "height",
+            "qr_data_format",
+            "printer",
+            "printer_name",
+            "printer_code",
+        )
+
+
+class SerialPortConfigurationMasterSerializer(DeviceLabelCodeMasterSerializer):
+    class Meta(CodeTrackedMasterSerializer.Meta):
+        model = SerialPortConfigurationMaster
+        fields = CodeTrackedMasterSerializer.Meta.fields + (
+            "port_name",
+            "baud_rate",
+            "parity",
+            "data_bits",
+            "stop_bits",
+            "timeout",
+            "read_format",
+        )
 
 
 class WPEUserCreationReadSerializer(serializers.ModelSerializer):
@@ -373,34 +672,3 @@ class WPEUserCreationWriteSerializer(serializers.ModelSerializer):
                     getattr(instance, field).set(items)
 
         return instance
-
-
-PERMISSION_FIELDS = (
-    "view_all", "view_self", "can_add", "can_edit",
-    "can_duplicate", "can_delete",
-    "generate_invoice_access", "invoice_access", "access",
-)
-
-
-class WPERolePermissionSerializer(serializers.ModelSerializer):
-    role_name = serializers.CharField(source="role.name", read_only=True)
-    main_screen_name = serializers.CharField(source="main_screen.name", read_only=True)
-
-    class Meta:
-        model = WPERolePermission
-        fields = (
-            "id", "role", "role_name", "main_screen", "main_screen_name",
-        ) + PERMISSION_FIELDS + ("created_at", "updated_at")
-        read_only_fields = ("created_at", "updated_at")
-
-
-class WPEUserScreenPermissionSerializer(serializers.ModelSerializer):
-    screen_name = serializers.CharField(source="user_screen.screen_name", read_only=True)
-    screen_section_name = serializers.CharField(source="user_screen.screen_section.name", read_only=True)
-
-    class Meta:
-        model = WPEUserScreenPermission
-        fields = (
-            "id", "user_screen", "screen_name", "screen_section_name",
-        ) + PERMISSION_FIELDS + ("created_at", "updated_at")
-        read_only_fields = ("created_at", "updated_at")

@@ -76,6 +76,9 @@ class StoreStockRequestAPIView(generics.GenericAPIView):
             user=request.user,
             request_type=serializer.validated_data.get("request_type", StockRequest.RequestType.GENERAL),
             department=serializer.validated_data.get("department", "BLENDING"),
+            request_date=serializer.validated_data.get("request_date"),
+            require_date=serializer.validated_data.get("require_date"),
+            require_time=serializer.validated_data.get("require_time"),
             requested_for_name=serializer.validated_data.get("requested_for_name", ""),
             request_reason=serializer.validated_data.get("request_reason", ""),
         )
@@ -92,7 +95,7 @@ class StoreStockRequestAPIView(generics.GenericAPIView):
 
 
 class StoreRequestApprovalListAPIView(WrappedListAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsStoreUser]
     serializer_class = StockRequestSerializer
     search_fields = ("request_no", "requested_by__username", "items__item__item_name", "items__item__item_code")
     ordering_fields = ("requested_at", "request_no", "status", "id")
@@ -102,12 +105,12 @@ class StoreRequestApprovalListAPIView(WrappedListAPIView):
         "requesting_warehouse": "requesting_warehouse_id",
         "issuing_warehouse": "issuing_warehouse_id",
         "request_type": "request_type",
-        "department": "department",
+        "department": "department__iexact",
     }
     list_message = "Store request queue fetched successfully."
 
     def get_queryset(self):
-        queryset = store_request_queryset()
+        queryset = store_request_queryset().filter(status=StockRequest.Status.PENDING_STORE_ISSUE)
         request_no = self.request.query_params.get("request_no")
         date_from = self.request.query_params.get("date_from")
         date_to = self.request.query_params.get("date_to")
@@ -136,7 +139,7 @@ class StoreRequestDetailAPIView(generics.RetrieveAPIView):
     lookup_field = "pk"
 
     def get_queryset(self):
-        return store_request_queryset()
+        return store_request_queryset().filter(status=StockRequest.Status.PENDING_STORE_ISSUE)
 
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -165,12 +168,13 @@ class ApproveStockRequestAPIView(generics.GenericAPIView):
             pk,
             request.user,
             approval_remarks=serializer.validated_data.get("approval_remarks"),
+            approval_lines=serializer.validated_data.get("items"),
         )
         stock_request = approval_result["stock_request"]
         availability_map = availability_map_for_requests([stock_request])
 
         return success_response(
-            message="Store request approved successfully",
+            message="Store request reviewed successfully",
             data={
                 "request": StockRequestSerializer(
                     stock_request,
@@ -301,7 +305,7 @@ class StockDashboardAPIView(generics.GenericAPIView):
     def get(self, request, *args, **kwargs):
         data = {
             "warehouse_summary": stock_dashboard_summary(),
-            "pending_store_requests": StockRequest.objects.filter(status=StockRequest.Status.PENDING).count(),
+            "pending_store_requests": StockRequest.objects.filter(status=StockRequest.Status.PENDING_STORE_ISSUE).count(),
             "approved_store_requests": StockRequest.objects.filter(status=StockRequest.Status.APPROVED).count(),
             "stock_ledger_entries": StoreTransaction.objects.count(),
             "warehouses": StoreStock.objects.values("warehouse_id").distinct().count(),

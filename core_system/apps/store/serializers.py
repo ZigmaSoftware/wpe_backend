@@ -131,6 +131,9 @@ class LegacyStockRequestCreateSerializer(serializers.Serializer):
         required=False,
     )
     department = serializers.CharField(max_length=100, default="BLENDING", required=False)
+    request_date = serializers.DateField(required=False)
+    require_date = serializers.DateField(required=False, allow_null=True)
+    require_time = serializers.TimeField(required=False, allow_null=True)
     requested_for_name = serializers.CharField(max_length=255, allow_blank=True, required=False)
     request_reason = serializers.CharField(allow_blank=True, required=False)
 
@@ -159,6 +162,9 @@ class StockRequestCreateSerializer(serializers.Serializer):
         required=False,
     )
     department = serializers.CharField(max_length=100, default="BLENDING", required=False)
+    request_date = serializers.DateField(required=False)
+    require_date = serializers.DateField(required=False, allow_null=True)
+    require_time = serializers.TimeField(required=False, allow_null=True)
     requested_for_name = serializers.CharField(max_length=255, allow_blank=True, required=False)
     request_reason = serializers.CharField(allow_blank=True, required=False)
     items = StockRequestItemWriteSerializer(many=True)
@@ -219,6 +225,12 @@ class StockRequestItemReadSerializer(serializers.ModelSerializer):
         return serialize_quantity(shortage if shortage > STOCK_ZERO else STOCK_ZERO)
 
 
+class StockRequestApprovalItemSerializer(serializers.Serializer):
+    item = serializers.PrimaryKeyRelatedField(queryset=Item.objects.filter(status=True))
+    provided_qty = serializers.DecimalField(max_digits=14, decimal_places=3)
+    remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
 class StockRequestSerializer(serializers.ModelSerializer):
     items = StockRequestItemReadSerializer(many=True, read_only=True)
     item = serializers.SerializerMethodField()
@@ -232,6 +244,7 @@ class StockRequestSerializer(serializers.ModelSerializer):
     quantity = serializers.SerializerMethodField()
     requested_by_username = serializers.CharField(source="requested_by.username", read_only=True)
     action_by_username = serializers.CharField(source="action_by.username", read_only=True)
+    head_action_by_username = serializers.CharField(source="head_action_by.username", read_only=True)
     cancelled_by_username = serializers.CharField(source="cancelled_by.username", read_only=True)
     requesting_warehouse_code = serializers.CharField(source="requesting_warehouse.code", read_only=True)
     requesting_warehouse_name = serializers.CharField(source="requesting_warehouse.name", read_only=True)
@@ -260,6 +273,9 @@ class StockRequestSerializer(serializers.ModelSerializer):
             "quantity",
             "request_type",
             "department",
+            "request_date",
+            "require_date",
+            "require_time",
             "requested_for_name",
             "request_reason",
             "status",
@@ -271,16 +287,20 @@ class StockRequestSerializer(serializers.ModelSerializer):
             "issuing_warehouse_name",
             "remarks",
             "approval_remarks",
+            "head_approval_remarks",
             "requested_by",
             "requested_by_username",
             "action_by",
             "action_by_username",
+            "head_action_by",
+            "head_action_by_username",
             "approved_by",
             "approved_by_username",
             "cancelled_by",
             "cancelled_by_username",
             "requested_at",
             "action_at",
+            "head_action_at",
             "approved_at",
             "cancelled_at",
             "total_requested_qty",
@@ -352,10 +372,36 @@ class StockRequestSerializer(serializers.ModelSerializer):
 
 class StockRequestApproveSerializer(serializers.Serializer):
     approval_remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    items = StockRequestApprovalItemSerializer(many=True, required=False)
+
+    def validate_items(self, value):
+        if value is None:
+            return value
+
+        if not value:
+            raise serializers.ValidationError("At least one approval line is required when items are provided.")
+
+        item_ids: list[int] = []
+        for row in value:
+            item = row.get("item")
+            item_id = getattr(item, "id", None)
+
+            if item_id in item_ids:
+                raise serializers.ValidationError("Duplicate items are not allowed in a store request review.")
+            item_ids.append(item_id)
+
+            if item_id in (None, ""):
+                raise serializers.ValidationError("Each approval line requires an item_id.")
+
+        return value
 
 
 class StockRequestRejectSerializer(serializers.Serializer):
     approval_remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
+class StockRequestHeadActionSerializer(serializers.Serializer):
+    remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
 class StockRequestCancelSerializer(serializers.Serializer):

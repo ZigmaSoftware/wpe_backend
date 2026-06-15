@@ -1,9 +1,22 @@
 from django.contrib import admin
 from .models import (
+    BagCreationMaster,
+    BinCreationMaster,
+    ColorCreationMaster,
+    PackingMaterialMaster,
+    PackingTypeMaster,
+    ProductionBatch,
+    ProductionLineMaster,
+    ProductionMachine,
     ProductionOrder,
+    ProfileCreationMaster,
+    ProfileSizeMaster,
     MaterialMovement,
+    RegrindMaterialEntry,
     ProductionTransaction,
     ProductionSummary,
+    WorkCentreCreationMaster,
+    BOMVariant,
 )
 
 
@@ -156,3 +169,87 @@ class ProductionSummaryAdmin(admin.ModelAdmin):
             "classes": ("collapse",)
         }),
     )
+
+
+@admin.register(ProductionMachine)
+class ProductionMachineAdmin(admin.ModelAdmin):
+    list_display = ["machine_code", "name", "machine_type", "department", "status", "is_active", "updated_at"]
+    list_filter = ["machine_type", "status", "is_active", "department"]
+    search_fields = ["machine_code", "name", "serial_no", "manufacturer"]
+
+
+class ProductionCodeMasterAdmin(admin.ModelAdmin):
+    list_display = ["code", "name", "is_active", "updated_at"]
+    list_filter = ["is_active", "created_at", "updated_at"]
+    search_fields = ["code", "name", "description"]
+
+
+@admin.register(ProfileCreationMaster)
+class ProfileCreationMasterAdmin(ProductionCodeMasterAdmin):
+    list_display = ["code", "name", "profile_type", "profile_size", "color", "is_active", "updated_at"]
+    list_filter = ["is_active", "profile_type", "color", "packing_type"]
+
+
+@admin.register(ProfileSizeMaster)
+class ProfileSizeMasterAdmin(ProductionCodeMasterAdmin):
+    list_display = ["code", "name", "width", "thickness", "length", "uom", "is_active"]
+
+
+@admin.register(ColorCreationMaster)
+class ColorCreationMasterAdmin(ProductionCodeMasterAdmin):
+    list_display = ["code", "name", "color_group", "is_active", "updated_at"]
+    list_filter = ["color_group", "is_active"]
+
+
+@admin.register(WorkCentreCreationMaster)
+class WorkCentreCreationMasterAdmin(ProductionCodeMasterAdmin):
+    list_display = ["code", "name", "department", "capacity", "is_active", "updated_at"]
+    list_filter = ["department", "is_active"]
+
+
+@admin.register(ProductionLineMaster)
+class ProductionLineMasterAdmin(ProductionCodeMasterAdmin):
+    list_display = ["code", "name", "department", "machine", "status", "is_active", "updated_at"]
+    list_filter = ["department", "status", "is_active"]
+
+
+@admin.register(BinCreationMaster)
+class BinCreationMasterAdmin(ProductionCodeMasterAdmin):
+    list_display = ["code", "name", "department", "capacity", "capacity_uom", "current_status", "is_active"]
+    list_filter = ["department", "current_status", "is_active"]
+
+
+@admin.register(BagCreationMaster)
+class BagCreationMasterAdmin(ProductionCodeMasterAdmin):
+    list_display = ["code", "name", "department", "standard_weight", "current_status", "is_active"]
+    list_filter = ["department", "current_status", "is_active"]
+
+
+@admin.register(PackingTypeMaster)
+class PackingTypeMasterAdmin(ProductionCodeMasterAdmin):
+    list_display = ["code", "name", "standard_pcs", "standard_weight", "uom", "is_active"]
+
+
+@admin.register(PackingMaterialMaster)
+class PackingMaterialMasterAdmin(ProductionCodeMasterAdmin):
+    list_display = ["code", "name", "item", "uom", "standard_consumption", "is_active"]
+
+
+@admin.register(BOMVariant)
+class BOMVariantAdmin(admin.ModelAdmin):
+    list_display = ["variant_code", "name", "revision", "is_active", "updated_at"]
+    list_filter = ["is_active", "created_at", "updated_at"]
+    search_fields = ["variant_code", "name"]
+
+
+@admin.register(ProductionBatch)
+class ProductionBatchAdmin(admin.ModelAdmin):
+    list_display = ["batch_no", "production_order", "stage", "machine", "status", "started_at", "completed_at"]
+    list_filter = ["stage", "status", "machine"]
+    search_fields = ["batch_no", "production_order__production_id"]
+
+
+@admin.register(RegrindMaterialEntry)
+class RegrindMaterialEntryAdmin(admin.ModelAdmin):
+    list_display = ["production_order", "batch", "stage", "item", "quantity_grams", "is_valid", "added_at"]
+    list_filter = ["stage", "is_valid", "added_at"]

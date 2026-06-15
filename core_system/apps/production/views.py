@@ -1,3 +1,4 @@
+import re
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -37,11 +38,12 @@ class ProductionOrderViewSet(viewsets.ModelViewSet):
 
     queryset = ProductionOrder.objects.select_related('summary').prefetch_related(
         'material_movements',
+        'material_plans',
         'transactions'
     )
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['status', 'production_type', 'batch_number', 'production_date']
-    search_fields = ['production_id', 'batch_number', 'plan_id', 'line_name']
+    search_fields = ['production_id', 'production_for', 'batch_number', 'plan_id', 'line_name']
     ordering_fields = ['production_date', 'created_at', 'total_cost']
     ordering = ['-production_date', '-created_at']
 
@@ -52,6 +54,18 @@ class ProductionOrderViewSet(viewsets.ModelViewSet):
         elif self.action in ['create', 'update', 'partial_update']:
             return ProductionOrderCreateUpdateSerializer
         return ProductionOrderListSerializer
+
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        """Return the next available production order ID (e.g. 005, 006)."""
+        ids = ProductionOrder.objects.values_list("production_id", flat=True)
+        numeric_pattern = re.compile(r"^(\d+)$")
+        highest = 0
+        for pid in ids:
+            match = numeric_pattern.match(str(pid or "").strip())
+            if match:
+                highest = max(highest, int(match.group(1)))
+        return Response({"code": f"{highest + 1:03d}"})
 
     @action(detail=True, methods=['get'])
     def material_movements(self, request, pk=None):
@@ -173,11 +187,14 @@ class ProductionSummaryViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
-# ===== NEW OIMS PRODUCTION VIEWS =====
+# ===== RECIPE / BOM AND PRODUCTION MASTER VIEWS =====
 
+import re
 from decimal import Decimal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, Prefetch, Q
+from django.db.models import Count, Prefetch, ProtectedError, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics
@@ -187,19 +204,280 @@ from rest_framework.permissions import IsAuthenticated
 from common.drf import QueryParamFilterMixin, StandardResultsSetPagination, success_response
 
 from .models import (
-    ProductionMachine, BOMVariant, BOMVariantComponent,
-    ProductionBatch, BatchWeightEntry, RegrindMaterialEntry,
+    BagCreationMaster,
+    BinCreationMaster,
+    BOMCreationMaster,
+    BOMItemCreationMaster,
+    BOMVariant,
+    BOMVariantComponent,
+    BatchWeightEntry,
+    ColorCreationMaster,
+    PackingMaterialMaster,
+    PackingTypeMaster,
+    ProductionBatch,
+    ProductionOutputCapture,
+    ProductionLineMaster,
+    ProductionMachine,
+    ProfileCreationMaster,
+    ProfileSizeMaster,
+    RegrindMaterialEntry,
+    WorkCentreCreationMaster,
     WEIGHT_MIN_GRAMS, WEIGHT_MAX_GRAMS,
+    build_alpha_running_code,
+    build_prefixed_running_number,
+    resolve_workflow_batch_no,
 )
 from .serializers import (
+    BagCreationMasterSerializer,
+    BinCreationMasterSerializer,
+    BOMCreationMasterSerializer,
+    BOMItemCreationMasterSerializer,
     ProductionMachineSerializer,
     BOMVariantComponentSerializer,
     BOMVariantListSerializer,
     BOMVariantDetailSerializer,
+    RecipeMasterSerializer,
+    RecipeMasterDetailSerializer,
     ProductionBatchSerializer,
+    ProductionOutputCaptureSerializer,
     BatchWeightEntrySerializer,
+    ColorCreationMasterSerializer,
+    PackingMaterialMasterSerializer,
+    PackingTypeMasterSerializer,
+    ProductionLineMasterSerializer,
+    ProfileCreationMasterSerializer,
+    ProfileSizeMasterSerializer,
+    ProductionStageRecordSerializer,
     RegrindMaterialEntrySerializer,
+    WorkCentreCreationMasterSerializer,
 )
+
+
+def _next_code_response(model_cls, *, field_name: str, prefix: str, width: int = 3, alpha: bool = False):
+    with transaction.atomic():
+        if alpha:
+            code = build_alpha_running_code(model_cls, field_name=field_name, prefix=prefix)
+        else:
+            code = build_prefixed_running_number(model_cls, field_name=field_name, prefix=prefix, width=width)
+    return Response({"code": code})
+
+
+class ProductionMasterPagination(StandardResultsSetPagination):
+    page_size = 25
+    max_page_size = 500
+
+
+class ProductionBaseMasterViewSet(QueryParamFilterMixin, viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    pagination_class = ProductionMasterPagination
+    filter_backends = [SearchFilter, OrderingFilter]
+    search_fields = ["name"]
+    ordering_fields = ["name", "created_at", "is_active"]
+    ordering = ["name"]
+    filterset_map = {
+        "is_active": "is_active",
+    }
+    lookup_code_attr: str | None = None
+
+    @action(detail=False, methods=["get"])
+    def lookup(self, request):
+        queryset = self.get_queryset().filter(is_active=True).order_by("name")
+        rows: list[dict[str, object]] = []
+        for instance in queryset:
+            row: dict[str, object] = {
+                "id": instance.pk,
+                "name": getattr(instance, "name", str(instance)),
+            }
+            if self.lookup_code_attr:
+                code_value = getattr(instance, self.lookup_code_attr, None)
+                if code_value:
+                    row["code"] = code_value
+            rows.append(row)
+        return Response(rows)
+
+    @action(detail=True, methods=["patch"], url_path="toggle")
+    def toggle_status(self, request, pk=None):
+        try:
+            instance = self.get_object()
+        except Exception:
+            return Response(
+                {"detail": "Record not found. It may have been deleted — please refresh the list."},
+                status=drf_status.HTTP_404_NOT_FOUND,
+            )
+        instance.is_active = not instance.is_active
+        instance.save(update_fields=["is_active", "updated_at"])
+        return Response(self.get_serializer(instance).data)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        try:
+            self.perform_destroy(instance)
+            return Response(status=drf_status.HTTP_204_NO_CONTENT)
+        except ProtectedError:
+            return Response(
+                {"detail": "Cannot delete: this record is referenced by other data."},
+                status=drf_status.HTTP_400_BAD_REQUEST,
+            )
+
+
+class ProductionCodeMasterViewSet(ProductionBaseMasterViewSet):
+    search_fields = ["name", "code", "description"]
+    ordering_fields = ["name", "code", "created_at", "is_active"]
+    next_code_prefix: str | None = None
+    next_code_width = 3
+    lookup_code_attr = "code"
+
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        if not self.next_code_prefix:
+            return Response({"detail": "Next code preview is not configured for this resource."}, status=drf_status.HTTP_404_NOT_FOUND)
+        return _next_code_response(
+            self.get_queryset().model,
+            field_name="code",
+            prefix=self.next_code_prefix,
+            width=self.next_code_width,
+        )
+
+
+class ProfileCreationMasterViewSet(ProductionCodeMasterViewSet):
+    queryset = ProfileCreationMaster.objects.select_related(
+        "profile_type",
+        "profile_size",
+        "color",
+        "packing_type",
+    ).all()
+    serializer_class = ProfileCreationMasterSerializer
+    search_fields = ["name", "code", "profile_type__name", "profile_size__name", "color__name", "packing_type__name"]
+    ordering_fields = ["name", "code", "profile_type__name", "created_at", "is_active"]
+    filterset_map = {
+        "profile_type": "profile_type_id",
+        "profile_size": "profile_size_id",
+        "color": "color_id",
+        "packing_type": "packing_type_id",
+        "is_active": "is_active",
+    }
+    next_code_prefix = "PRD"
+
+
+class ProfileSizeMasterViewSet(ProductionCodeMasterViewSet):
+    queryset = ProfileSizeMaster.objects.all()
+    serializer_class = ProfileSizeMasterSerializer
+    search_fields = ["name", "code", "description", "uom"]
+    next_code_prefix = "SIZE"
+
+
+class ColorCreationMasterViewSet(ProductionCodeMasterViewSet):
+    queryset = ColorCreationMaster.objects.all()
+    serializer_class = ColorCreationMasterSerializer
+    search_fields = ["name", "code", "color_group"]
+    next_code_prefix = "COLR"
+
+
+class ProductionMachineMasterViewSet(ProductionBaseMasterViewSet):
+    queryset = ProductionMachine.objects.select_related("department").all()
+    serializer_class = ProductionMachineSerializer
+    search_fields = ["name", "machine_code", "machine_type", "serial_no", "manufacturer", "department__name"]
+    ordering_fields = ["machine_code", "name", "machine_type", "status", "created_at", "is_active"]
+    ordering = ["machine_code"]
+    filterset_map = {
+        "department": "department_id",
+        "department_id": "department_id",
+        "machine_type": "machine_type",
+        "status": "status",
+        "is_active": "is_active",
+    }
+    lookup_code_attr = "machine_code"
+
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        return _next_code_response(
+            self.get_queryset().model,
+            field_name="machine_code",
+            prefix="MCH",
+            width=3,
+        )
+
+
+class WorkCentreCreationMasterViewSet(ProductionCodeMasterViewSet):
+    queryset = WorkCentreCreationMaster.objects.select_related("department").all()
+    serializer_class = WorkCentreCreationMasterSerializer
+    search_fields = ["name", "code", "description", "department__name"]
+    filterset_map = {
+        "department": "department_id",
+        "department_id": "department_id",
+        "is_active": "is_active",
+    }
+    next_code_prefix = "WC"
+
+
+class ProductionLineMasterViewSet(ProductionCodeMasterViewSet):
+    queryset = ProductionLineMaster.objects.select_related("department", "machine").all()
+    serializer_class = ProductionLineMasterSerializer
+    search_fields = ["name", "code", "department__name", "machine__name", "machine__machine_code", "status"]
+    filterset_map = {
+        "department": "department_id",
+        "department_id": "department_id",
+        "machine": "machine_id",
+        "machine_id": "machine_id",
+        "status": "status",
+        "is_active": "is_active",
+    }
+    next_code_prefix = "LINE"
+    next_code_width = 2
+
+
+class BinCreationMasterViewSet(ProductionCodeMasterViewSet):
+    queryset = BinCreationMaster.objects.select_related("department").all()
+    serializer_class = BinCreationMasterSerializer
+    search_fields = ["name", "code", "department__name", "current_material"]
+    filterset_map = {
+        "department": "department_id",
+        "department_id": "department_id",
+        "current_status": "current_status",
+        "is_active": "is_active",
+    }
+    next_code_prefix = "BIN"
+
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        return _next_code_response(
+            self.get_queryset().model,
+            field_name="code",
+            prefix="BIN",
+            alpha=True,
+        )
+
+
+class BagCreationMasterViewSet(ProductionCodeMasterViewSet):
+    queryset = BagCreationMaster.objects.select_related("department").all()
+    serializer_class = BagCreationMasterSerializer
+    search_fields = ["name", "code", "department__name", "current_status"]
+    filterset_map = {
+        "department": "department_id",
+        "department_id": "department_id",
+        "current_status": "current_status",
+        "is_active": "is_active",
+    }
+    next_code_prefix = "BAG"
+
+
+class PackingTypeMasterViewSet(ProductionCodeMasterViewSet):
+    queryset = PackingTypeMaster.objects.all()
+    serializer_class = PackingTypeMasterSerializer
+    search_fields = ["name", "code", "description", "uom"]
+    next_code_prefix = "PACK"
+
+
+class PackingMaterialMasterViewSet(ProductionCodeMasterViewSet):
+    queryset = PackingMaterialMaster.objects.select_related("item").all()
+    serializer_class = PackingMaterialMasterSerializer
+    search_fields = ["name", "code", "item__item_name", "item__item_code"]
+    filterset_map = {
+        "item": "item_id",
+        "item_id": "item_id",
+        "is_active": "is_active",
+    }
+    next_code_prefix = "PM"
 
 
 def bom_component_queryset():
@@ -210,7 +488,7 @@ def bom_component_queryset():
 
 
 def bom_variant_queryset():
-    return BOMVariant.objects.select_related("product_item").prefetch_related(
+    return BOMVariant.objects.select_related("product_item", "approved_by").prefetch_related(
         Prefetch("components", queryset=bom_component_queryset())
     )
 
@@ -255,8 +533,249 @@ def validate_bom_component_payload(component_data, fallback_sequence):
         "sequence": component_data.get("sequence", fallback_sequence),
         "is_regrind": component_data.get("is_regrind", False),
         "unit": unit,
+        "is_active": component_data.get("is_active", True),
     }
+
+    try:
+        target_weight = Decimal(str(payload["target_weight_grams"]))
+        min_weight = Decimal(str(payload["min_weight_grams"]))
+        max_weight = Decimal(str(payload["max_weight_grams"]))
+    except Exception:
+        return None, "Weight values must be numeric."
+
+    if target_weight <= Decimal("0"):
+        return None, "target_weight_grams must be greater than zero."
+    if min_weight < Decimal("0"):
+        return None, "min_weight_grams must be zero or greater."
+    if max_weight < Decimal("0"):
+        return None, "max_weight_grams must be zero or greater."
+    if min_weight > target_weight:
+        return None, "min_weight_grams cannot exceed target_weight_grams."
+    if max_weight < target_weight:
+        return None, "max_weight_grams cannot be less than target_weight_grams."
+    if min_weight > max_weight:
+        return None, "min_weight_grams cannot exceed max_weight_grams."
+
     return payload, None
+
+
+def get_production_scancode_timezone():
+    timezone_name = getattr(settings, "PRODUCTION_SCANCODE_TIME_ZONE", "Asia/Kolkata") or "Asia/Kolkata"
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("Asia/Kolkata")
+
+
+def _bom_component_source_key_from_payload(payload):
+    if payload["product_subtype"] is not None:
+        return ("product_subtype", payload["product_subtype"].pk)
+    return ("item", payload["item"].pk)
+
+
+def _bom_component_source_key(component):
+    if component.product_subtype_id is not None:
+        return ("product_subtype", component.product_subtype_id)
+    return ("item", component.item_id)
+
+
+def validate_bom_component_payloads(components):
+    seen_keys = set()
+    component_specs = []
+    for index, comp_data in enumerate(components, start=1):
+        payload, error = validate_bom_component_payload(comp_data, index)
+        if error:
+            return None, f"Component {index}: {error}"
+
+        duplicate_key = _bom_component_source_key_from_payload(payload)
+        if duplicate_key in seen_keys:
+            return None, f"Component {index}: duplicate component selection is not allowed."
+        seen_keys.add(duplicate_key)
+
+        requested_id = comp_data.get("id")
+        if requested_id in (None, "", 0, "0"):
+            requested_id = None
+        else:
+            try:
+                requested_id = int(requested_id)
+            except (TypeError, ValueError):
+                return None, f"Component {index}: id must be numeric."
+
+        component_specs.append(
+            {
+                "payload": payload,
+                "source_key": duplicate_key,
+                "requested_id": requested_id,
+                "index": index,
+            }
+        )
+
+    return component_specs, None
+
+
+def sync_bom_variant_components(bom_variant, component_specs):
+    existing_components = list(bom_variant.components.select_for_update())
+    existing_by_id = {component.pk: component for component in existing_components}
+    existing_by_key = {_bom_component_source_key(component): component for component in existing_components}
+    retained_component_ids = set()
+    component_fields = [
+        "item",
+        "product_subtype",
+        "target_weight_grams",
+        "min_weight_grams",
+        "max_weight_grams",
+        "sequence",
+        "is_regrind",
+        "unit",
+        "is_active",
+    ]
+
+    for spec in component_specs:
+        payload = spec["payload"]
+        component = None
+        requested_id = spec["requested_id"]
+        if requested_id is not None:
+            component = existing_by_id.get(requested_id)
+            if component is None:
+                return f"Component {spec['index']}: id does not belong to this recipe."
+        if component is None:
+            component = existing_by_key.get(spec["source_key"])
+
+        if component is None:
+            component = BOMVariantComponent.objects.create(bom_variant=bom_variant, **payload)
+        else:
+            for field_name in component_fields:
+                setattr(component, field_name, payload[field_name])
+            component.save(update_fields=component_fields)
+
+        retained_component_ids.add(component.pk)
+
+    unused_components = bom_variant.components.exclude(pk__in=retained_component_ids)
+    try:
+        unused_components.delete()
+    except ProtectedError:
+        return "Cannot remove recipe item because it is already used in batch weight entries. Mark it inactive instead."
+
+    return None
+
+
+class RecipeMasterViewSet(ProductionBaseMasterViewSet):
+    queryset = bom_variant_queryset().annotate(component_count=Count("components", distinct=True))
+    serializer_class = RecipeMasterSerializer
+    search_fields = ["variant_code", "name", "revision", "status", "batch_uom"]
+    ordering_fields = ["variant_code", "name", "revision", "status", "created_at", "updated_at"]
+    ordering = ["variant_code"]
+    filterset_map = {
+        "status": "status",
+        "approved_by": "approved_by_id",
+        "approved_by_id": "approved_by_id",
+        "is_active": "is_active",
+    }
+    lookup_code_attr = "variant_code"
+
+    def get_serializer_class(self):
+        if self.action in {"retrieve", "items"}:
+            return RecipeMasterDetailSerializer
+        return RecipeMasterSerializer
+
+    @action(detail=False, methods=["get"], url_path="next-code")
+    def next_code(self, request):
+        return _next_code_response(
+            self.get_queryset().model,
+            field_name="variant_code",
+            prefix="REC",
+            width=3,
+        )
+
+    @action(detail=False, methods=["get"], url_path="approver-options")
+    def approver_options(self, request):
+        from apps.admin_master.models import UserCreation
+
+        queryset = (
+            UserCreation.objects.select_related("user", "staff")
+            .filter(is_active=True, user__isnull=False)
+            .order_by("staff__name", "user__username", "id")
+        )
+        rows = []
+        for user_creation in queryset:
+            display_name = (
+                getattr(user_creation.staff, "name", "")
+                or getattr(user_creation.user, "get_full_name", lambda: "")()
+                or getattr(user_creation.user, "username", "")
+            )
+            rows.append(
+                {
+                    "id": user_creation.user_id,
+                    "name": display_name,
+                    "code": getattr(user_creation.staff, "staff_code", None),
+                }
+            )
+        return Response(rows)
+
+    @action(detail=True, methods=["get", "put"], url_path="items")
+    def items(self, request, pk=None):
+        recipe = get_object_or_404(bom_variant_queryset(), pk=pk)
+
+        if request.method.lower() == "get":
+            return Response(RecipeMasterDetailSerializer(recipe).data)
+
+        components = request.data.get("components", [])
+        if not isinstance(components, list):
+            return Response({"detail": "components must be a list."}, status=drf_status.HTTP_400_BAD_REQUEST)
+
+        component_specs, error = validate_bom_component_payloads(components)
+        if error:
+            return Response({"detail": error}, status=drf_status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            error = sync_bom_variant_components(recipe, component_specs)
+            if error:
+                transaction.set_rollback(True)
+                return Response({"detail": error}, status=drf_status.HTTP_400_BAD_REQUEST)
+
+        refreshed = bom_variant_queryset().annotate(component_count=Count("components", distinct=True)).get(pk=recipe.pk)
+        return Response(RecipeMasterDetailSerializer(refreshed).data)
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+    def destroy(self, request, *args, **kwargs):
+        recipe = self.get_object()
+        recipe.is_active = False
+        recipe.status = BOMVariant.RecipeStatus.INACTIVE
+        recipe.save(update_fields=["is_active", "status", "updated_at"])
+        return Response(status=drf_status.HTTP_204_NO_CONTENT)
+
+
+class BOMCreationMasterViewSet(ProductionCodeMasterViewSet):
+    queryset = BOMCreationMaster.objects.select_related("product").all()
+    serializer_class = BOMCreationMasterSerializer
+    search_fields = ["name", "code", "product__name", "product__code", "bom_version", "status"]
+    ordering_fields = ["code", "name", "product__name", "created_at", "is_active"]
+    ordering = ["code"]
+    filterset_map = {
+        "product": "product_id",
+        "product_id": "product_id",
+        "status": "status",
+        "is_active": "is_active",
+    }
+    next_code_prefix = "BOM"
+
+
+class BOMItemCreationMasterViewSet(ProductionBaseMasterViewSet):
+    queryset = BOMItemCreationMaster.objects.select_related("bom", "item").all()
+    serializer_class = BOMItemCreationMasterSerializer
+    search_fields = ["bom__code", "bom__name", "item__item_code", "item__item_name", "item_type", "uom"]
+    ordering_fields = ["bom__code", "item__item_code", "created_at", "is_active"]
+    ordering = ["bom__code", "item__item_code"]
+    filterset_map = {
+        "bom": "bom_id",
+        "bom_id": "bom_id",
+        "item": "item_id",
+        "item_id": "item_id",
+        "item_type": "item_type",
+        "is_active": "is_active",
+    }
 
 
 class ProductionMachineListAPIView(generics.ListAPIView):
@@ -342,7 +861,7 @@ class BOMVariantListAPIView(generics.ListAPIView):
         return qs.order_by("variant_code")
 
     def list(self, request, *args, **kwargs):
-        return success_response(message="BOM variants fetched.", data=list(BOMVariantListSerializer(self.get_queryset(), many=True).data))
+        return success_response(message="Recipes fetched.", data=list(BOMVariantListSerializer(self.get_queryset(), many=True).data))
 
     def post(self, request, *args, **kwargs):
         data = request.data
@@ -364,6 +883,11 @@ class BOMVariantListAPIView(generics.ListAPIView):
                 name=data["name"].strip(),
                 product_item=product_item,
                 revision=data.get("revision", "v1"),
+                batch_size=data.get("batch_size") or None,
+                batch_uom=data.get("batch_uom", ""),
+                status=data.get("status", BOMVariant.RecipeStatus.DRAFT),
+                approved_by_id=data.get("approved_by") or None,
+                approved_at=data.get("approved_at") or None,
                 notes=data.get("notes", ""),
                 is_active=True,
                 created_by=request.user,
@@ -400,7 +924,7 @@ class BOMVariantListAPIView(generics.ListAPIView):
                 BOMVariantComponent.objects.create(bom_variant=bom, **payload)
 
         full_bom = bom_variant_queryset().get(pk=bom.pk)
-        return success_response(message="BOM variant created.", data=BOMVariantDetailSerializer(full_bom).data, status_code=201)
+        return success_response(message="Recipe created.", data=BOMVariantDetailSerializer(full_bom).data, status_code=201)
 
 
 class BOMVariantDetailAPIView(generics.GenericAPIView):
@@ -411,26 +935,29 @@ class BOMVariantDetailAPIView(generics.GenericAPIView):
 
     def get(self, request, pk, *args, **kwargs):
         bom = self.get_object(pk)
-        return success_response(message="BOM variant fetched.", data=BOMVariantDetailSerializer(bom).data)
+        return success_response(message="Recipe fetched.", data=BOMVariantDetailSerializer(bom).data)
 
     def patch(self, request, pk, *args, **kwargs):
         bom = self.get_object(pk)
         data = request.data
-        for field in ("name", "revision", "notes", "is_active"):
+        for field in ("name", "revision", "notes", "is_active", "batch_size", "batch_uom", "status", "approved_at"):
             if field in data:
                 setattr(bom, field, data[field])
+        if "approved_by" in data:
+            bom.approved_by_id = data.get("approved_by") or None
         if data.get("product_item"):
             from apps.items.models import Item
             bom.product_item = get_object_or_404(Item, pk=data["product_item"])
         bom.save()
         refreshed = bom_variant_queryset().annotate(component_count=Count("components", distinct=True)).get(pk=bom.pk)
-        return success_response(message="BOM variant updated.", data=BOMVariantListSerializer(refreshed).data)
+        return success_response(message="Recipe updated.", data=BOMVariantListSerializer(refreshed).data)
 
     def delete(self, request, pk, *args, **kwargs):
         bom = self.get_object(pk)
         bom.is_active = False
+        bom.status = BOMVariant.RecipeStatus.INACTIVE
         bom.save()
-        return success_response(message="BOM variant deactivated.", data={})
+        return success_response(message="Recipe deactivated.", data={})
 
 
 class BOMVariantSetPasswordAPIView(generics.GenericAPIView):
@@ -458,11 +985,11 @@ class BOMVariantComponentAPIView(generics.GenericAPIView):
 
         duplicate_filter = {"product_subtype": payload["product_subtype"]} if payload["product_subtype"] else {"item": payload["item"]}
         if BOMVariantComponent.objects.filter(bom_variant=bom, **duplicate_filter).exists():
-            return success_response(message="This component is already mapped to this BOM variant.", data={}, status_code=400)
+            return success_response(message="This item is already mapped to this recipe.", data={}, status_code=400)
 
         comp = BOMVariantComponent.objects.create(bom_variant=bom, **payload)
         comp = bom_component_queryset().get(pk=comp.pk)
-        return success_response(message="Component added.", data=BOMVariantComponentSerializer(comp).data, status_code=201)
+        return success_response(message="Recipe item added.", data=BOMVariantComponentSerializer(comp).data, status_code=201)
 
     def put(self, request, pk, *args, **kwargs):
         bom = get_object_or_404(BOMVariant, pk=pk, is_active=True)
@@ -470,46 +997,34 @@ class BOMVariantComponentAPIView(generics.GenericAPIView):
         if not isinstance(components, list):
             return success_response(message="components must be a list.", data={}, status_code=400)
 
-        seen_keys = set()
-        new_components = []
-        for index, comp_data in enumerate(components, start=1):
-            payload, error = validate_bom_component_payload(comp_data, index)
-            if error:
-                return success_response(
-                    message=f"Component {index}: {error}",
-                    data={},
-                    status_code=400,
-                )
-
-            duplicate_key = (
-                ("product_subtype", payload["product_subtype"].pk)
-                if payload["product_subtype"] is not None
-                else ("item", payload["item"].pk)
+        component_specs, error = validate_bom_component_payloads(components)
+        if error:
+            return success_response(
+                message=error,
+                data={},
+                status_code=400,
             )
-            if duplicate_key in seen_keys:
-                return success_response(
-                    message=f"Component {index}: duplicate component selection is not allowed.",
-                    data={},
-                    status_code=400,
-                )
-            seen_keys.add(duplicate_key)
-            new_components.append(BOMVariantComponent(bom_variant=bom, **payload))
 
         with transaction.atomic():
-            bom.components.all().delete()
-            if new_components:
-                BOMVariantComponent.objects.bulk_create(new_components)
+            error = sync_bom_variant_components(bom, component_specs)
+            if error:
+                transaction.set_rollback(True)
+                return success_response(
+                    message=error,
+                    data={},
+                    status_code=400,
+                )
 
         refreshed = bom_variant_queryset().get(pk=bom.pk)
         return success_response(
-            message="BOM components saved.",
+            message="Recipe items saved.",
             data=BOMVariantDetailSerializer(refreshed).data,
         )
 
     def delete(self, request, pk, comp_id, *args, **kwargs):
         comp = get_object_or_404(BOMVariantComponent, pk=comp_id, bom_variant_id=pk)
         comp.delete()
-        return success_response(message="Component removed.", data={})
+        return success_response(message="Recipe item removed.", data={})
 
 
 class BOMVariantVerifyPasswordAPIView(generics.GenericAPIView):
@@ -540,27 +1055,270 @@ class BOMVariantRecipeAPIView(generics.GenericAPIView):
         return success_response(message="Recipe fetched.", data=BOMVariantDetailSerializer(bom).data)
 
 
+class ProductionStageRecordListAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProductionStageRecordSerializer
+    pagination_class = StandardResultsSetPagination
+    AD_PRODUCTION_TYPE = "WPE Additive Production"
+    STAGE_PRODUCTION_TYPE_BY_STAGE = {
+        ProductionBatch.Stage.AD: "WPE Additive Production",
+        ProductionBatch.Stage.BL: "WPE Blend Production",
+        ProductionBatch.Stage.GL: "WPE Granulated Blend Production",
+    }
+    BATCH_STATUS_PRIORITY = {
+        ProductionBatch.BatchStatus.IN_PROGRESS: 0,
+        ProductionBatch.BatchStatus.PENDING: 1,
+        ProductionBatch.BatchStatus.COMPLETED: 2,
+        ProductionBatch.BatchStatus.FAILED: 3,
+    }
+    NEXT_WORKFLOW_STATUS_BY_STAGE = {
+        ProductionBatch.Stage.AD: ProductionBatch.Stage.BL,
+        ProductionBatch.Stage.BL: ProductionBatch.Stage.GL,
+        ProductionBatch.Stage.GL: "PR",
+    }
+
+    def get(self, request, *args, **kwargs):
+        stage = str(request.query_params.get("stage", "")).upper().strip()
+        if stage not in {"AD", "BL", "GL", "PR"}:
+            return success_response(
+                message="stage is required and must be one of: AD, BL, GL, PR.",
+                data={},
+                status_code=400,
+            )
+
+        queryset = self._build_queryset(stage)
+        page = self.paginate_queryset(queryset)
+        rows = list(page) if page is not None else list(queryset)
+        serializer = self.get_serializer(self._build_records(stage, rows), many=True)
+
+        if page is not None:
+            return success_response(
+                message="Production stage records fetched.",
+                data=self.paginator.get_paginated_data(serializer.data),
+            )
+
+        return success_response(
+            message="Production stage records fetched.",
+            data={"count": len(serializer.data), "results": serializer.data},
+        )
+
+    def _build_queryset(self, stage: str):
+        search = str(self.request.query_params.get("search", "")).strip()
+        status = str(self.request.query_params.get("status", "")).strip()
+        date_from = str(self.request.query_params.get("date_from", "")).strip()
+        date_to = str(self.request.query_params.get("date_to", "")).strip()
+
+        batch_prefetch = Prefetch(
+            "batches",
+            queryset=ProductionBatch.objects.select_related("machine").order_by("-created_at"),
+        )
+        queryset = ProductionOrder.objects.prefetch_related(batch_prefetch).order_by("-production_date", "-created_at")
+        if stage == ProductionBatch.Stage.AD:
+            queryset = queryset.filter(
+                Q(production_type=self.AD_PRODUCTION_TYPE) | Q(batches__stage=ProductionBatch.Stage.AD)
+            ).distinct()
+        elif stage in {ProductionBatch.Stage.BL, ProductionBatch.Stage.GL}:
+            queryset = queryset.filter(batches__stage=stage).distinct()
+        elif stage == "PR":
+            queryset = queryset.filter(
+                batches__stage=ProductionBatch.Stage.GL,
+                batches__status=ProductionBatch.BatchStatus.COMPLETED,
+            ).distinct()
+        if status:
+            if stage in {ProductionBatch.Stage.BL, ProductionBatch.Stage.GL}:
+                queryset = queryset.filter(batches__stage=stage, batches__status=status).distinct()
+            elif stage == "PR":
+                if status != "IN_PROGRESS":
+                    queryset = queryset.none()
+            else:
+                queryset = queryset.filter(status=status)
+        if date_from:
+            queryset = queryset.filter(production_date__gte=date_from)
+        if date_to:
+            queryset = queryset.filter(production_date__lte=date_to)
+        if search:
+            queryset = queryset.filter(
+                Q(production_id__icontains=search)
+                | Q(production_type__icontains=search)
+                | Q(batch_number__icontains=search)
+                | Q(plan_id__icontains=search)
+                | Q(line_name__icontains=search)
+                | Q(line_number__icontains=search)
+                | Q(batches__machine__name__icontains=search)
+                | Q(batches__workflow_batch_no__icontains=search)
+                | Q(batches__batch_no__icontains=search)
+            ).distinct()
+        return queryset
+
+    def _build_records(self, stage: str, rows: list[ProductionOrder]):
+        return [self._build_order_record(order, stage=stage) for order in rows]
+
+    def _build_order_record(self, order: ProductionOrder, stage: str = "PR"):
+        stage_batches = self._get_stage_batches(order, stage) if stage in {"AD", "BL", "GL"} else self._get_order_batches(order)
+        preferred_batch = self._get_preferred_stage_batch(stage_batches)
+        display_batch_no = self._resolve_batch_display_no(preferred_batch)
+        return {
+            "id": order.id,
+            "order_id": order.id,
+            "production_id": order.production_id,
+            "stage": stage,
+            "production_type": self._resolve_stage_production_type(order, stage),
+            "batch_no": display_batch_no,
+            "display_batch_no": display_batch_no,
+            "batch_count": len(stage_batches) if stage in {"AD", "BL", "GL"} else len(self._get_order_batches(order)),
+            "production_date": order.production_date,
+            "shift": order.shift,
+            "line_no": self._format_order_line(order, preferred_batch),
+            "start_date_time": preferred_batch.started_at if preferred_batch and preferred_batch.started_at else order.start_date_time,
+            "end_date_time": self._resolve_stage_end_time(order, stage, stage_batches, preferred_batch),
+            "plan_id": self._format_plan_id(order.plan_id),
+            "status": self._resolve_stage_status(order, stage, stage_batches, preferred_batch),
+            "workflow_status": self._get_stage_workflow_status(order, stage, stage_batches),
+        }
+
+    def _format_plan_id(self, value):
+        text = str(value or "").strip()
+        return text or "0"
+
+    def _format_batch_line(self, batch: ProductionBatch):
+        machine_name = str(getattr(batch.machine, "name", "") or "").strip()
+        if machine_name:
+            return machine_name
+
+        order_line = self._format_order_line(batch.production_order)
+        if order_line != "-":
+            return order_line
+
+        if batch.stage == ProductionBatch.Stage.BL:
+            return "Line: Blending"
+        if batch.stage == ProductionBatch.Stage.GL:
+            return "Line: Granulation"
+        return "-"
+
+    def _format_order_line(self, order: ProductionOrder, preferred_batch: ProductionBatch | None = None):
+        line_number = str(order.line_number or "").strip()
+        line_name = str(order.line_name or "").strip()
+        if line_number and line_name:
+            prefix = line_number if line_number.lower().startswith("line") else f"Line {line_number}"
+            return f"{prefix}: {line_name}"
+        if line_name:
+            return line_name
+        if line_number:
+            return line_number if line_number.lower().startswith("line") else f"Line {line_number}"
+        if preferred_batch and preferred_batch.machine_id and preferred_batch.machine:
+            return preferred_batch.machine.name
+        return "-"
+
+    def _get_order_batches(self, order: ProductionOrder):
+        prefetched_batches = getattr(order, "_prefetched_objects_cache", {}).get("batches")
+        if prefetched_batches is not None:
+            return list(prefetched_batches)
+        return list(order.batches.all())
+
+    def _get_stage_batches(self, order: ProductionOrder, stage: str):
+        return [batch for batch in self._get_order_batches(order) if batch.stage == stage]
+
+    def _get_preferred_stage_batch(self, batches: list[ProductionBatch]):
+        if not batches:
+            return None
+        return sorted(
+            batches,
+            key=lambda batch: (
+                self.BATCH_STATUS_PRIORITY.get(batch.status, 99),
+                -(batch.id or 0),
+            ),
+        )[0]
+
+    def _get_stage_workflow_status(self, order: ProductionOrder, stage: str, stage_batches: list[ProductionBatch]):
+        if stage != "PR" and order.status in {"PLAN_COMPLETED", "CLOSED"}:
+            return "COMPLETED"
+
+        if stage == "PR":
+            return "PR"
+
+        if stage == ProductionBatch.Stage.AD and not stage_batches:
+            return ProductionBatch.Stage.AD
+        if any(batch.status in {ProductionBatch.BatchStatus.IN_PROGRESS, ProductionBatch.BatchStatus.PENDING} for batch in stage_batches):
+            return stage
+        if stage_batches and all(batch.status == ProductionBatch.BatchStatus.COMPLETED for batch in stage_batches):
+            next_stage = self.NEXT_WORKFLOW_STATUS_BY_STAGE.get(stage, stage)
+            if next_stage == "PR":
+                return "PR"
+            if next_stage == "COMPLETED":
+                return "COMPLETED"
+            if self._get_stage_batches(order, next_stage):
+                return next_stage
+        return stage
+
+    def _resolve_stage_end_time(
+        self,
+        order: ProductionOrder,
+        stage: str,
+        stage_batches: list[ProductionBatch],
+        preferred_batch: ProductionBatch | None = None,
+    ):
+        if stage == "PR":
+            return order.end_date_time or (preferred_batch.completed_at if preferred_batch else None)
+        if any(batch.status in {ProductionBatch.BatchStatus.IN_PROGRESS, ProductionBatch.BatchStatus.PENDING} for batch in stage_batches):
+            return None
+        completed_times = [batch.completed_at for batch in stage_batches if batch.completed_at is not None]
+        return max(completed_times) if completed_times else None
+
+    def _resolve_stage_status(
+        self,
+        order: ProductionOrder,
+        stage: str,
+        stage_batches: list[ProductionBatch],
+        preferred_batch: ProductionBatch | None = None,
+    ):
+        if stage == "PR":
+            return "IN_PROGRESS"
+        if stage == ProductionBatch.Stage.AD:
+            return order.status
+        return preferred_batch.status if preferred_batch is not None else order.status
+
+    def _resolve_stage_production_type(self, order: ProductionOrder, stage: str):
+        if stage in self.STAGE_PRODUCTION_TYPE_BY_STAGE:
+            return self.STAGE_PRODUCTION_TYPE_BY_STAGE[stage]
+        return order.production_type
+
+    def _resolve_batch_display_no(self, preferred_batch: ProductionBatch | None = None):
+        if preferred_batch is None:
+            return None
+        return resolve_workflow_batch_no(preferred_batch)
+
+
 class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = ProductionBatchSerializer
     filterset_map = {"stage": "stage", "status": "status"}
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["requested_stage"] = self.request.query_params.get("stage")
+        return context
+
     def get_queryset(self):
+        order_batch_prefetch = Prefetch(
+            "production_order__batches",
+            queryset=ProductionBatch.objects.select_related("machine", "output_capture").order_by("-created_at"),
+        )
         return ProductionBatch.objects.filter(
             production_order_id=self.kwargs["order_pk"]
-        ).select_related("machine", "bom_variant", "operator").prefetch_related(
+        ).select_related("production_order", "machine", "bom_variant", "operator", "output_capture").prefetch_related(
+            order_batch_prefetch,
             "weight_entries__item",
             "weight_entries__bom_component__item",
             "weight_entries__bom_component__product_subtype__category",
             "regrind_entries__item",
-        ).order_by("stage", "created_at")
+        ).order_by("stage", "-created_at")
 
     def list(self, request, *args, **kwargs):
         qs = self.filter_queryset(self.get_queryset())
-        return success_response(message="Batches fetched.", data=list(ProductionBatchSerializer(qs, many=True).data))
+        serializer = self.get_serializer(qs, many=True)
+        return success_response(message="Batches fetched.", data=list(serializer.data))
 
     def post(self, request, *args, **kwargs):
-        order = get_object_or_404(ProductionOrder, pk=self.kwargs["order_pk"])
         stage = request.data.get("stage")
         valid_stages = [s[0] for s in ProductionBatch.Stage.choices]
         if stage not in valid_stages:
@@ -570,37 +1328,113 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
         machine_id = request.data.get("machine") or None
         notes = request.data.get("notes", "")
 
-        batch = ProductionBatch.objects.create(
-            production_order=order,
-            stage=stage,
-            bom_variant_id=bom_variant_id,
-            machine_id=machine_id,
-            notes=notes,
-            operator=request.user,
-            status=ProductionBatch.BatchStatus.PENDING,
-        )
+        with transaction.atomic():
+            order = get_object_or_404(
+                ProductionOrder.objects.select_for_update(),
+                pk=self.kwargs["order_pk"],
+            )
 
-        if bom_variant_id:
-            bom = bom_variant_queryset().get(pk=bom_variant_id)
-            for component in bom.components.all():
-                BatchWeightEntry.objects.get_or_create(
-                    batch=batch,
-                    bom_component=component,
-                    defaults={
-                        "item": component.item,
-                        "target_weight_grams": component.target_weight_grams,
-                        "entered_by": request.user,
-                    }
-                )
+            batch = ProductionBatch.objects.create(
+                production_order=order,
+                stage=stage,
+                bom_variant_id=bom_variant_id,
+                machine_id=machine_id,
+                notes=notes,
+                operator=request.user,
+                status=ProductionBatch.BatchStatus.PENDING,
+            )
+
+            workflow_batch_no = str(order.batch_number or "").strip()
+            if not workflow_batch_no and batch.batch_no:
+                ProductionOrder.objects.filter(pk=order.pk).update(batch_number=batch.batch_no)
+
+            if bom_variant_id:
+                bom = bom_variant_queryset().get(pk=bom_variant_id)
+                for component in bom.components.filter(is_active=True):
+                    BatchWeightEntry.objects.get_or_create(
+                        batch=batch,
+                        bom_component=component,
+                        defaults={
+                            "item": component.item,
+                            "target_weight_grams": component.target_weight_grams,
+                            "entered_by": request.user,
+                        }
+                    )
 
         batch.refresh_from_db()
-        full_batch = ProductionBatch.objects.prefetch_related(
+        full_batch = ProductionBatch.objects.select_related(
+            "production_order", "machine", "bom_variant", "operator", "output_capture"
+        ).prefetch_related(
+            Prefetch(
+                "production_order__batches",
+                queryset=ProductionBatch.objects.select_related("machine", "output_capture").order_by("-created_at"),
+            ),
             "weight_entries__item",
             "weight_entries__bom_component__item",
             "weight_entries__bom_component__product_subtype__category",
             "regrind_entries__item"
         ).get(pk=batch.pk)
         return success_response(message="Batch created.", data=ProductionBatchSerializer(full_batch).data, status_code=201)
+
+
+class ProductionBatchDestroyAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _get_batch_capture(batch: ProductionBatch):
+        try:
+            return batch.output_capture
+        except ProductionOutputCapture.DoesNotExist:
+            return None
+
+    def delete(self, request, order_pk, pk, *args, **kwargs):
+        order = get_object_or_404(ProductionOrder, pk=order_pk)
+        target_batch = get_object_or_404(
+            ProductionBatch.objects.select_related("production_order"),
+            pk=pk,
+            production_order_id=order_pk,
+        )
+
+        with transaction.atomic():
+            order_batches = list(
+                order.batches.select_related("machine", "output_capture").order_by("-created_at", "-id")
+            )
+            workflow_batch_no = resolve_workflow_batch_no(target_batch, sibling_batches=order_batches) or str(
+                target_batch.batch_no or ""
+            )
+            related_batches = [
+                batch
+                for batch in order_batches
+                if resolve_workflow_batch_no(batch, sibling_batches=order_batches) == workflow_batch_no
+            ]
+            related_batch_ids = [batch.id for batch in related_batches]
+
+            for batch in related_batches:
+                capture = self._get_batch_capture(batch)
+                if batch.stage == ProductionBatch.Stage.BL:
+                    ProductionBatchConfirmAPIView._release_assigned_bin(capture)
+                elif batch.stage == ProductionBatch.Stage.GL:
+                    ProductionBatchConfirmAPIView._release_assigned_bag(capture)
+
+            ProductionBatch.objects.filter(production_order_id=order_pk, id__in=related_batch_ids).delete()
+
+            remaining_batches = list(
+                order.batches.select_related("machine").exclude(id__in=related_batch_ids).order_by("-created_at", "-id")
+            )
+            next_batch_number = (
+                resolve_workflow_batch_no(remaining_batches[0], sibling_batches=remaining_batches)
+                if remaining_batches
+                else ""
+            )
+            ProductionOrder.objects.filter(pk=order.pk).update(batch_number=next_batch_number or None)
+
+        return success_response(
+            message="Batch deleted.",
+            data={
+                "workflow_batch_no": workflow_batch_no,
+                "deleted_batch_ids": related_batch_ids,
+            },
+        )
 
 
 class ProductionBatchStartAPIView(generics.GenericAPIView):
@@ -619,27 +1453,532 @@ class ProductionBatchStartAPIView(generics.GenericAPIView):
 class ProductionBatchConfirmAPIView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
 
+    NEXT_STAGE_BY_STAGE = {
+        ProductionBatch.Stage.AD: ProductionBatch.Stage.BL,
+        ProductionBatch.Stage.BL: ProductionBatch.Stage.GL,
+    }
+
+    @staticmethod
+    def _sanitize_scancode_token(value: str) -> str:
+        token = re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+        return token or "NA"
+
+    def _get_required_weight_entries(self, batch: ProductionBatch):
+        entries = list(
+            batch.weight_entries.select_related(
+                "bom_component__item",
+                "bom_component__product_subtype__category",
+            ).all()
+        )
+        entries.sort(key=lambda entry: (getattr(entry.bom_component, "sequence", 0), entry.id))
+        positive_entries = [entry for entry in entries if float(entry.target_weight_grams or 0) > 0]
+        return positive_entries or entries
+
+    def _build_output_session_key(self, entries: list[BatchWeightEntry]) -> str:
+        return "|".join(
+            f"{entry.bom_component_id}:{Decimal(entry.entered_weight_grams or 0):.3f}:{entry.entered_at.isoformat()}"
+            for entry in entries
+        )
+
+    def _build_output_scancode(self, batch: ProductionBatch, sequence: int, captured_at):
+        return ProductionOutputCaptureListAPIView._build_stage_output_scancode(
+            batch,
+            sequence,
+            captured_at,
+        )
+
+    def _seed_batch_weight_entries(self, batch: ProductionBatch, entered_by):
+        if not batch.bom_variant_id:
+            return
+
+        for component in batch.bom_variant.components.filter(is_active=True):
+            BatchWeightEntry.objects.get_or_create(
+                batch=batch,
+                bom_component=component,
+                defaults={
+                    "item": component.item,
+                    "target_weight_grams": component.target_weight_grams,
+                    "entered_by": entered_by,
+                }
+            )
+
+    def _create_stage_handoff_batch(
+        self,
+        source_batch: ProductionBatch,
+        next_stage: str,
+        transitioned_at,
+    ):
+        workflow_batch_no = resolve_workflow_batch_no(source_batch)
+        existing_batch = ProductionBatch.objects.filter(
+            production_order=source_batch.production_order,
+            stage=next_stage,
+            workflow_batch_no=workflow_batch_no,
+        ).order_by("-created_at").first()
+        if existing_batch is not None:
+            return existing_batch
+
+        next_batch = ProductionBatch.objects.create(
+            production_order=source_batch.production_order,
+            bom_variant=source_batch.bom_variant,
+            stage=next_stage,
+            machine=source_batch.machine,
+            workflow_batch_no=workflow_batch_no or None,
+            status=ProductionBatch.BatchStatus.IN_PROGRESS,
+            started_at=transitioned_at,
+            operator=self.request.user,
+            notes=f"Moved from {source_batch.stage} batch {source_batch.batch_no}.",
+        )
+        self._seed_batch_weight_entries(next_batch, self.request.user)
+        return next_batch
+
+    def _create_output_capture(self, batch: ProductionBatch):
+        if batch.stage != ProductionBatch.Stage.AD:
+            return None
+
+        existing_capture = getattr(batch, "output_capture", None)
+        if existing_capture is not None:
+            return ProductionOutputCaptureListAPIView._ensure_capture_scancode_format(existing_capture)
+
+        entries = self._get_required_weight_entries(batch)
+        captured_at = batch.completed_at or timezone.now()
+        total_weight = sum(((entry.entered_weight_grams or Decimal("0.000")) for entry in entries), Decimal("0.000"))
+        existing_sequences = ProductionOutputCapture.objects.select_for_update().filter(
+            production_order=batch.production_order
+        ).values_list("sequence", flat=True)
+        next_sequence = max(existing_sequences, default=0) + 1
+
+        capture, _ = ProductionOutputCapture.objects.get_or_create(
+            source_batch=batch,
+            defaults={
+                "production_order": batch.production_order,
+                "sequence": next_sequence,
+                "scancode_id": self._build_output_scancode(batch, next_sequence, captured_at),
+                "recipe_no": str(getattr(batch.bom_variant, "variant_code", "") or batch.production_order.production_id or ""),
+                "quantity_kg": total_weight,
+                "weight_kg": total_weight,
+                "binlot": str(batch.batch_no or ""),
+                "session_key": self._build_output_session_key(entries),
+                "captured_at": captured_at,
+            },
+        )
+        return capture
+
+    @staticmethod
+    def _release_assigned_bin(capture: ProductionOutputCapture | None):
+        if capture is None:
+            return None
+
+        assigned_bin_code = str(capture.binlot or "").strip()
+        source_batch_code = str(getattr(capture.source_batch, "batch_no", "") or "").strip()
+        if not assigned_bin_code or assigned_bin_code == source_batch_code:
+            return None
+
+        assigned_bin = (
+            BinCreationMaster.objects.select_for_update()
+            .filter(code__iexact=assigned_bin_code)
+            .first()
+        )
+        if assigned_bin is None:
+            return None
+
+        assigned_bin.current_status = BinCreationMaster.BinStatus.FREE
+        assigned_bin.current_material = ""
+        assigned_bin.save(update_fields=["current_status", "current_material", "updated_at"])
+        return assigned_bin
+
+    @staticmethod
+    def _release_assigned_bag(capture: ProductionOutputCapture | None):
+        if capture is None:
+            return None
+
+        assigned_bag_code = str(capture.binlot or "").strip()
+        source_batch_code = str(getattr(capture.source_batch, "batch_no", "") or "").strip()
+        if not assigned_bag_code or assigned_bag_code == source_batch_code:
+            return None
+
+        assigned_bag = (
+            BagCreationMaster.objects.select_for_update()
+            .filter(code__iexact=assigned_bag_code)
+            .first()
+        )
+        if assigned_bag is None:
+            return None
+
+        assigned_bag.current_status = BagCreationMaster.BagStatus.FREE
+        assigned_bag.save(update_fields=["current_status", "updated_at"])
+        return assigned_bag
+
     def post(self, request, order_pk, pk, *args, **kwargs):
         batch = get_object_or_404(
-            ProductionBatch.objects.prefetch_related("weight_entries"),
+            ProductionBatch.objects.select_related("output_capture").prefetch_related("weight_entries"),
             pk=pk, production_order_id=order_pk
         )
         if batch.status != ProductionBatch.BatchStatus.IN_PROGRESS:
             return success_response(message="Only IN_PROGRESS batches can be confirmed.", data={}, status_code=400)
 
-        entries = list(batch.weight_entries.all())
-        missing = [e for e in entries if e.entered_weight_grams is None]
-        invalid = [e for e in entries if e.is_valid is False]
+        if batch.stage in {ProductionBatch.Stage.BL, ProductionBatch.Stage.GL}:
+            if getattr(batch, "output_capture", None) is None:
+                return success_response(
+                    message=(
+                        "Create the BL captured output list before confirming this batch."
+                        if batch.stage == ProductionBatch.Stage.BL
+                        else "Create the GL captured output list before confirming this batch."
+                    ),
+                    data={},
+                    status_code=400,
+                )
+        else:
+            entries = list(batch.weight_entries.all())
+            missing = [e for e in entries if e.entered_weight_grams is None]
+            invalid = [e for e in entries if e.is_valid is False]
 
-        if missing:
-            return success_response(message=f"{len(missing)} component(s) have no weight entered yet.", data={"missing_count": len(missing)}, status_code=400)
-        if invalid:
-            return success_response(message=f"{len(invalid)} weight entry(ies) are out of valid range.", data={"invalid_count": len(invalid)}, status_code=400)
+            if missing:
+                return success_response(message=f"{len(missing)} component(s) have no weight entered yet.", data={"missing_count": len(missing)}, status_code=400)
+            if invalid:
+                return success_response(message=f"{len(invalid)} weight entry(ies) are out of valid range.", data={"invalid_count": len(invalid)}, status_code=400)
 
-        batch.status = ProductionBatch.BatchStatus.COMPLETED
-        batch.completed_at = timezone.now()
-        batch.save()
+        with transaction.atomic():
+            transitioned_at = timezone.now()
+            bl_capture = None
+            gl_capture = None
+            if batch.stage == ProductionBatch.Stage.BL:
+                bl_capture = (
+                    ProductionOutputCapture.objects.select_for_update()
+                    .filter(source_batch=batch)
+                    .first()
+                )
+                bl_capture = ProductionOutputCaptureListAPIView._ensure_bl_capture_bin_assignment(bl_capture, batch)
+                if bl_capture is None:
+                    return success_response(
+                        message="No free bin is available for assignment.",
+                        data={},
+                        status_code=400,
+                    )
+            elif batch.stage == ProductionBatch.Stage.GL:
+                gl_capture = (
+                    ProductionOutputCapture.objects.select_for_update()
+                    .filter(source_batch=batch)
+                    .first()
+                )
+                gl_capture = ProductionOutputCaptureListAPIView._ensure_gl_capture_bag_assignment(gl_capture, batch)
+                if gl_capture is None:
+                    return success_response(
+                        message="No free bag is available for assignment.",
+                        data={},
+                        status_code=400,
+                    )
+            batch.status = ProductionBatch.BatchStatus.COMPLETED
+            batch.completed_at = transitioned_at
+            batch.save(update_fields=["status", "completed_at", "updated_at"])
+            self._create_output_capture(batch)
+            next_stage = self.NEXT_STAGE_BY_STAGE.get(batch.stage)
+            if next_stage:
+                self._create_stage_handoff_batch(batch, next_stage=next_stage, transitioned_at=transitioned_at)
+            if batch.stage == ProductionBatch.Stage.BL:
+                self._release_assigned_bin(bl_capture)
+            elif batch.stage == ProductionBatch.Stage.GL:
+                self._release_assigned_bag(gl_capture)
+
         return success_response(message="Batch confirmed and completed.", data=ProductionBatchSerializer(batch).data)
+
+
+class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _get_capture_queryset(order_pk, *, source_batch_id=None):
+        queryset = (
+            ProductionOutputCapture.objects.filter(production_order_id=order_pk)
+            .select_related("production_order", "source_batch", "source_batch__bom_variant")
+            .prefetch_related(
+                Prefetch(
+                    "source_batch__weight_entries",
+                    queryset=BatchWeightEntry.objects.select_related(
+                        "bom_component__item",
+                        "bom_component__product_subtype__category",
+                    ).order_by("bom_component__sequence", "id"),
+                )
+            )
+            .order_by("-captured_at", "-id")
+        )
+        if source_batch_id is not None:
+            queryset = queryset.filter(source_batch_id=source_batch_id)
+        return queryset
+
+    @staticmethod
+    def _build_manual_output_session_key(batch: ProductionBatch, weight_kg: Decimal, captured_at):
+        return f"{batch.stage}:{batch.id}:{weight_kg:.3f}:{captured_at.strftime('%Y%m%d%H%M%S')}"
+
+    @staticmethod
+    def _sanitize_scancode_token(value: str) -> str:
+        token = re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+        return token or "NA"
+
+    @staticmethod
+    def _resolve_workflow_batch_suffix(batch: ProductionBatch) -> str:
+        workflow_batch_no = resolve_workflow_batch_no(batch) or str(batch.batch_no or "")
+        match = re.search(r"(\d+)(?!.*\d)", workflow_batch_no)
+        if match:
+            return match.group(1)[-2:].zfill(2)
+        return "00"
+
+    @classmethod
+    def _build_stage_output_scancode(cls, batch: ProductionBatch, _sequence: int, captured_at):
+        production_token = cls._sanitize_scancode_token(batch.production_order.production_id or "PRD")
+        stage_token = cls._sanitize_scancode_token(batch.stage or "ST")
+        scancode_timezone = get_production_scancode_timezone()
+        localized_captured_at = (
+            timezone.localtime(captured_at, scancode_timezone) if timezone.is_aware(captured_at) else captured_at
+        )
+        batch_suffix = cls._resolve_workflow_batch_suffix(batch)
+        return f"{production_token}{stage_token}{localized_captured_at.strftime('%d%m%Y%H%M')}{batch_suffix}"
+
+    @classmethod
+    def _ensure_capture_scancode_format(cls, capture: ProductionOutputCapture):
+        source_batch = getattr(capture, "source_batch", None)
+        if source_batch is None:
+            return capture
+
+        expected_scancode = cls._build_stage_output_scancode(
+            source_batch,
+            capture.sequence,
+            capture.captured_at,
+        )
+        if capture.scancode_id != expected_scancode:
+            capture.scancode_id = expected_scancode
+            capture.save(update_fields=["scancode_id", "updated_at"])
+        return capture
+
+    @staticmethod
+    def _reserve_free_bin():
+        reserved_bin = (
+            BinCreationMaster.objects.select_for_update()
+            .filter(
+                is_active=True,
+                current_status=BinCreationMaster.BinStatus.FREE,
+            )
+            .order_by("created_at", "id")
+            .first()
+        )
+        if reserved_bin is None:
+            return None
+
+        reserved_bin.current_status = BinCreationMaster.BinStatus.OCCUPIED
+        reserved_bin.save(update_fields=["current_status", "updated_at"])
+        return reserved_bin
+
+    @staticmethod
+    def _reserve_free_bag():
+        reserved_bag = (
+            BagCreationMaster.objects.select_for_update()
+            .filter(
+                is_active=True,
+                current_status=BagCreationMaster.BagStatus.FREE,
+            )
+            .order_by("created_at", "id")
+            .first()
+        )
+        if reserved_bag is None:
+            return None
+
+        reserved_bag.current_status = BagCreationMaster.BagStatus.OCCUPIED
+        reserved_bag.save(update_fields=["current_status", "updated_at"])
+        return reserved_bag
+
+    @staticmethod
+    def _ensure_bl_capture_bin_assignment(capture: ProductionOutputCapture, batch: ProductionBatch):
+        if batch.stage != ProductionBatch.Stage.BL:
+            return capture
+
+        current_binlot = str(capture.binlot or "").strip()
+        matched_bin = None
+        if current_binlot:
+            matched_bin = (
+                BinCreationMaster.objects.select_for_update()
+                .filter(
+                    is_active=True,
+                    code__iexact=current_binlot,
+                )
+                .first()
+            )
+
+        if matched_bin is not None and matched_bin.current_status != BinCreationMaster.BinStatus.HOLD:
+            if matched_bin.current_status == BinCreationMaster.BinStatus.FREE:
+                matched_bin.current_status = BinCreationMaster.BinStatus.OCCUPIED
+                matched_bin.save(update_fields=["current_status", "updated_at"])
+            return capture
+
+        reserved_bin = ProductionOutputCaptureListAPIView._reserve_free_bin()
+        if reserved_bin is None:
+            return None
+
+        capture.binlot = str(reserved_bin.code or "")
+        capture.save(update_fields=["binlot", "updated_at"])
+        return capture
+
+    @staticmethod
+    def _ensure_gl_capture_bag_assignment(capture: ProductionOutputCapture, batch: ProductionBatch):
+        if batch.stage != ProductionBatch.Stage.GL:
+            return capture
+
+        current_baglot = str(capture.binlot or "").strip()
+        matched_bag = None
+        if current_baglot:
+            matched_bag = (
+                BagCreationMaster.objects.select_for_update()
+                .filter(
+                    is_active=True,
+                    code__iexact=current_baglot,
+                )
+                .first()
+            )
+
+        if matched_bag is not None and matched_bag.current_status != BagCreationMaster.BagStatus.USED:
+            if matched_bag.current_status == BagCreationMaster.BagStatus.FREE:
+                matched_bag.current_status = BagCreationMaster.BagStatus.OCCUPIED
+                matched_bag.save(update_fields=["current_status", "updated_at"])
+            return capture
+
+        reserved_bag = ProductionOutputCaptureListAPIView._reserve_free_bag()
+        if reserved_bag is None:
+            return None
+
+        capture.binlot = str(reserved_bag.code or "")
+        capture.save(update_fields=["binlot", "updated_at"])
+        return capture
+
+    @staticmethod
+    def _parse_source_batch_id(value):
+        if value in (None, ""):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return "invalid"
+        return parsed if parsed > 0 else "invalid"
+
+    def get(self, request, order_pk, *args, **kwargs):
+        get_object_or_404(ProductionOrder, pk=order_pk)
+        source_batch_id = self._parse_source_batch_id(request.query_params.get("source_batch"))
+        if source_batch_id == "invalid":
+            return success_response(message="source_batch must be a valid batch identifier.", data={}, status_code=400)
+
+        captures = list(self._get_capture_queryset(order_pk, source_batch_id=source_batch_id))
+        for capture in captures:
+            self._ensure_capture_scancode_format(capture)
+        return success_response(
+            message="Output captures fetched.",
+            data=list(ProductionOutputCaptureSerializer(captures, many=True).data),
+        )
+
+    def post(self, request, order_pk, *args, **kwargs):
+        order = get_object_or_404(ProductionOrder, pk=order_pk)
+        source_batch_id = self._parse_source_batch_id(request.data.get("source_batch"))
+        if source_batch_id is None:
+            return success_response(message="source_batch is required.", data={}, status_code=400)
+        if source_batch_id == "invalid":
+            return success_response(message="source_batch must be a valid batch identifier.", data={}, status_code=400)
+
+        batch = get_object_or_404(
+            ProductionBatch.objects.select_related("production_order", "bom_variant"),
+            pk=source_batch_id,
+            production_order_id=order_pk,
+        )
+        if batch.stage == ProductionBatch.Stage.AD:
+            return success_response(message="AD output captures are created from final capture only.", data={}, status_code=400)
+        if batch.status == ProductionBatch.BatchStatus.FAILED:
+            return success_response(message="Cannot capture output for a failed batch.", data={}, status_code=400)
+
+        raw_weight = request.data.get("weight_kg")
+        if raw_weight in (None, ""):
+            return success_response(message="weight_kg is required.", data={}, status_code=400)
+
+        try:
+            weight_kg = Decimal(str(raw_weight)).quantize(Decimal("0.001"))
+        except Exception:
+            return success_response(message="weight_kg must be a valid decimal value.", data={}, status_code=400)
+
+        if weight_kg <= 0:
+            return success_response(message="weight_kg must be greater than zero.", data={}, status_code=400)
+
+        captured_at = timezone.now()
+
+        with transaction.atomic():
+            existing_capture = (
+                ProductionOutputCapture.objects.select_for_update()
+                .filter(source_batch=batch)
+                .first()
+            )
+            if existing_capture is None:
+                if batch.status == ProductionBatch.BatchStatus.COMPLETED:
+                    return success_response(
+                        message="Cannot create a captured output list for a completed batch.",
+                        data={},
+                        status_code=400,
+                    )
+                assigned_binlot = str(batch.batch_no or "")
+                if batch.stage == ProductionBatch.Stage.BL:
+                    assigned_bin = self._reserve_free_bin()
+                    if assigned_bin is None:
+                        return success_response(
+                            message="No free bin is available for assignment.",
+                            data={},
+                            status_code=400,
+                        )
+                    assigned_binlot = str(assigned_bin.code or "")
+                elif batch.stage == ProductionBatch.Stage.GL:
+                    assigned_bag = self._reserve_free_bag()
+                    if assigned_bag is None:
+                        return success_response(
+                            message="No free bag is available for assignment.",
+                            data={},
+                            status_code=400,
+                        )
+                    assigned_binlot = str(assigned_bag.code or "")
+                existing_sequences = ProductionOutputCapture.objects.select_for_update().filter(
+                    production_order=order
+                ).values_list("sequence", flat=True)
+                sequence = max(existing_sequences, default=0) + 1
+                capture = ProductionOutputCapture.objects.create(
+                    production_order=order,
+                    source_batch=batch,
+                    sequence=sequence,
+                    scancode_id=self._build_stage_output_scancode(batch, sequence, captured_at),
+                    recipe_no=str(getattr(batch.bom_variant, "variant_code", "") or order.production_id or ""),
+                    quantity_kg=weight_kg,
+                    weight_kg=weight_kg,
+                    binlot=assigned_binlot,
+                    session_key=self._build_manual_output_session_key(batch, weight_kg, captured_at),
+                    captured_at=captured_at,
+                )
+                created = True
+            else:
+                capture = existing_capture
+                created = False
+                if batch.stage == ProductionBatch.Stage.BL:
+                    capture = self._ensure_bl_capture_bin_assignment(capture, batch)
+                    if capture is None:
+                        return success_response(
+                            message="No free bin is available for assignment.",
+                            data={},
+                            status_code=400,
+                        )
+                elif batch.stage == ProductionBatch.Stage.GL:
+                    capture = self._ensure_gl_capture_bag_assignment(capture, batch)
+                    if capture is None:
+                        return success_response(
+                            message="No free bag is available for assignment.",
+                            data={},
+                            status_code=400,
+                        )
+                capture = self._ensure_capture_scancode_format(capture)
+
+        capture = self._get_capture_queryset(order_pk, source_batch_id=source_batch_id).get(pk=capture.pk)
+        return success_response(
+            message="Output capture saved." if created else "Output capture already exists for this batch.",
+            data=ProductionOutputCaptureSerializer(capture).data,
+            status_code=201 if created else 200,
+        )
 
 
 class BatchWeightEntryUpdateAPIView(generics.GenericAPIView):

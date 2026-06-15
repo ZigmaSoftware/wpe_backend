@@ -18,7 +18,7 @@ class StoreWorkflowTests(APITestCase):
     def create_role_user(self, *, username: str, role_name: str):
         user = get_user_model().objects.create_user(username=username, password="test-pass-123")
         staff = Staff.objects.create(name=f"{username} Staff")
-        user_type = UserType.objects.create(name=role_name)
+        user_type, _ = UserType.objects.get_or_create(name=role_name)
         UserCreation.objects.create(user=user, staff=staff, user_type=user_type)
         return user
 
@@ -31,10 +31,19 @@ class StoreWorkflowTests(APITestCase):
     def setUp(self):
         self.store_user = self.create_role_user(username="store-user", role_name="Store User")
         self.blending_user = self.create_role_user(username="blending-user", role_name="Blending User")
+        self.blending_head = self.create_role_user(username="blending-head", role_name="Blending Head")
         self.store_client = self.make_auth_client(self.store_user)
         self.blending_client = self.make_auth_client(self.blending_user)
+        self.blending_head_client = self.make_auth_client(self.blending_head)
         self.store_warehouse = get_store_warehouse()
         self.blending_warehouse = get_blending_warehouse()
+
+    def approve_by_blending_head(self, request_id: int):
+        return self.blending_head_client.post(
+            f"/api/blending/head-approvals/{request_id}/approve/",
+            {"remarks": "Approved by Blending Head"},
+            format="json",
+        )
 
     def test_approve_request_transfers_stock_between_warehouses(self):
         item = Item.objects.create(
@@ -63,6 +72,7 @@ class StoreWorkflowTests(APITestCase):
             format="json",
         )
         request_id = request_response.data["data"]["id"]
+        self.assertEqual(self.approve_by_blending_head(request_id).status_code, 200)
 
         approve_response = self.store_client.post(
             f"/api/store/requests/{request_id}/approve/",
@@ -80,6 +90,79 @@ class StoreWorkflowTests(APITestCase):
         self.assertEqual(request_item.approved_qty, Decimal("50.000"))
         self.assertEqual(request_item.issued_qty, Decimal("50.000"))
 
+    def test_partial_approval_allows_per_item_quantities(self):
+        first_item = Item.objects.create(
+            category="Raw Material",
+            group="polymer",
+            sub_group="ldpe",
+            item_name="LDPE Granules",
+            unit="kg",
+        )
+        second_item = Item.objects.create(
+            category="Raw Material",
+            group="polymer",
+            sub_group="hdpe",
+            item_name="HDPE Granules",
+            unit="kg",
+        )
+        apply_inward_stock(
+            item=first_item,
+            warehouse=self.store_warehouse,
+            quantity="20.000",
+            transaction_type=StoreTransaction.TransactionType.OPENING_STOCK,
+            reference_type=StoreTransaction.ReferenceType.OPENING_STOCK,
+            reference_id="OPEN-3",
+            created_by=self.store_user,
+        )
+        apply_inward_stock(
+            item=second_item,
+            warehouse=self.store_warehouse,
+            quantity="20.000",
+            transaction_type=StoreTransaction.TransactionType.OPENING_STOCK,
+            reference_type=StoreTransaction.ReferenceType.OPENING_STOCK,
+            reference_id="OPEN-4",
+            created_by=self.store_user,
+        )
+
+        request_response = self.blending_client.post(
+            "/api/blending/store-requests/",
+            {
+                "remarks": "Partial approval check",
+                "items": [
+                    {"item_id": first_item.id, "quantity": "10.000"},
+                    {"item_id": second_item.id, "quantity": "6.000"},
+                ],
+            },
+            format="json",
+        )
+        request_id = request_response.data["data"]["id"]
+        self.assertEqual(self.approve_by_blending_head(request_id).status_code, 200)
+
+        approve_response = self.store_client.post(
+            f"/api/store/requests/{request_id}/approve/",
+            {
+                "items": [
+                    {"item": first_item.id, "provided_qty": "4.000", "remarks": "Only partial stock released"},
+                    {"item": second_item.id, "provided_qty": "0.000", "remarks": "No stock released"},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(approve_response.status_code, 200)
+        stock_request = StockRequest.objects.prefetch_related("items").get(pk=request_id)
+        first_request_item = stock_request.items.get(item=first_item)
+        second_request_item = stock_request.items.get(item=second_item)
+
+        self.assertEqual(stock_request.status, StockRequest.Status.PARTIALLY_APPROVED)
+        self.assertEqual(first_request_item.approved_qty, Decimal("4.000"))
+        self.assertEqual(first_request_item.issued_qty, Decimal("4.000"))
+        self.assertEqual(first_request_item.remarks, "Only partial stock released")
+        self.assertEqual(second_request_item.approved_qty, Decimal("0.000"))
+        self.assertEqual(second_request_item.issued_qty, Decimal("0.000"))
+        self.assertEqual(approve_response.data["data"]["issue_transactions"][0]["quantity"], "4.000")
+        self.assertEqual(approve_response.data["data"]["receipt_transactions"][0]["quantity"], "4.000")
+
     def test_legacy_request_stock_endpoint_sets_additive_metadata(self):
         item = Item.objects.create(
             category="Additive",
@@ -96,6 +179,9 @@ class StoreWorkflowTests(APITestCase):
                 "quantity": "5.000",
                 "request_type": "ADDITIVE",
                 "department": "BLENDING",
+                "request_date": "2026-05-24",
+                "require_date": "2026-05-25",
+                "require_time": "10:45:00",
                 "requested_for_name": "Shift Lead",
                 "request_reason": "Batch replenishment",
             },
@@ -106,6 +192,9 @@ class StoreWorkflowTests(APITestCase):
         stock_request = StockRequest.objects.prefetch_related("items").get(pk=response.data["request"]["id"])
         self.assertEqual(stock_request.request_type, StockRequest.RequestType.ADDITIVE)
         self.assertEqual(stock_request.department, "BLENDING")
+        self.assertEqual(str(stock_request.request_date), "2026-05-24")
+        self.assertEqual(str(stock_request.require_date), "2026-05-25")
+        self.assertEqual(str(stock_request.require_time), "10:45:00")
         self.assertEqual(stock_request.requested_for_name, "Shift Lead")
         self.assertEqual(stock_request.request_reason, "Batch replenishment")
         self.assertEqual(stock_request.items.first().requested_qty, Decimal("5.000"))
@@ -118,18 +207,22 @@ class StoreWorkflowTests(APITestCase):
             item_name="Mixer Additive",
             unit="kg",
         )
-        self.blending_client.post(
+        request_response = self.blending_client.post(
             "/api/store/request-stock/",
             {
                 "item_id": item.id,
                 "quantity": "2.500",
                 "request_type": "ADDITIVE",
                 "department": "BLENDING",
+                "request_date": "2026-05-26",
+                "require_date": "2026-05-27",
+                "require_time": "09:30:00",
                 "requested_for_name": "Mixer Operator",
                 "request_reason": "Line refill",
             },
             format="json",
         )
+        self.assertEqual(self.approve_by_blending_head(request_response.data["request"]["id"]).status_code, 200)
 
         response = self.store_client.get("/api/store/requests/")
 
@@ -138,7 +231,33 @@ class StoreWorkflowTests(APITestCase):
         self.assertEqual(row["item"], item.id)
         self.assertEqual(row["quantity"], "2.500")
         self.assertEqual(row["request_type"], "ADDITIVE")
+        self.assertEqual(row["request_date"], "2026-05-26")
+        self.assertEqual(row["require_date"], "2026-05-27")
+        self.assertEqual(row["require_time"], "09:30:00")
         self.assertEqual(row["requested_for_name"], "Mixer Operator")
+
+    def test_store_cannot_approve_request_pending_blending_head_approval(self):
+        item = Item.objects.create(
+            category="Raw Material",
+            group="polymer",
+            sub_group="lldpe",
+            item_name="Pending Head Resin",
+            unit="kg",
+        )
+        request_response = self.blending_client.post(
+            "/api/blending/store-requests/",
+            {"items": [{"item_id": item.id, "quantity": "2.000"}]},
+            format="json",
+        )
+
+        approve_response = self.store_client.post(
+            f"/api/store/requests/{request_response.data['data']['id']}/approve/",
+            {"approval_remarks": "Should be blocked"},
+            format="json",
+        )
+
+        self.assertEqual(approve_response.status_code, 400)
+        self.assertEqual(approve_response.data["status"], "This request is pending Blending Head approval.")
 
     def test_store_stock_list_is_readable_by_blending_user(self):
         item = Item.objects.create(

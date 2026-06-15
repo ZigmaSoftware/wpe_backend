@@ -28,7 +28,6 @@ from apps.blending.models import BlendingInward, BlendingOutward, BlendingStock
 from apps.contacts.models import Contact
 from apps.items.models import Item, ItemStockTransaction
 from apps.login_home.models import Department
-from apps.presales.models import PreSales, PresalesAuditLog, PresalesRequest, PresalesRequestItem
 from apps.production.models import (
     BOMVariant,
     BOMVariantComponent,
@@ -155,7 +154,6 @@ class Command(BaseCommand):
             self.items = self._seed_items()
             self._seed_inventory()
             self._seed_contacts()
-            self._seed_presales()
             self._seed_production()
 
         if not options["skip_grn"]:
@@ -221,31 +219,57 @@ class Command(BaseCommand):
         store_role, _ = first_or_create(Role, {"name": "Store Manager"})
         operator_role, _ = first_or_create(Role, {"name": "Production Operator"})
 
+        wpe_admin_role, _ = RoleMaster.objects.update_or_create(
+            name="Administrator",
+            defaults={"is_active": True},
+        )
+        wpe_operator_role, _ = RoleMaster.objects.update_or_create(
+            name="Operator",
+            defaults={"is_active": True},
+        )
+        wpe_admin_department, _ = DepartmentMaster.objects.update_or_create(
+            name="Administration",
+            defaults={"is_active": True},
+        )
+        wpe_production_department, _ = DepartmentMaster.objects.update_or_create(
+            name="Production",
+            defaults={"is_active": True},
+        )
+
         ticket_admin, _ = first_or_create(TicketUserType, {"name": "Internal Admin"})
         ticket_operator, _ = first_or_create(TicketUserType, {"name": "Plant Operator"})
 
-        full_access_type, _ = UserType.objects.update_or_create(
-            name="Full Access",
-            defaults={
-                "code": "full-access",
-                "is_active": True,
-                "under_users": "All Users",
-                "company_wise": True,
-                "project_wise": True,
-                "department_wise": True,
-                "user_wise": True,
-            },
+        full_access_type = (
+            UserType.objects.filter(department=wpe_admin_department, role=wpe_admin_role).first()
+            or UserType.objects.filter(name__in=["Full Access", "Administration - Administrator"]).first()
         )
-        production_type, _ = UserType.objects.update_or_create(
-            name="Production User",
-            defaults={
-                "code": "production-user",
-                "is_active": True,
-                "under_users": "Production",
-                "department_wise": True,
-                "user_wise": True,
-            },
+        if full_access_type is None:
+            full_access_type = UserType.objects.create(
+                department=wpe_admin_department,
+                role=wpe_admin_role,
+                is_active=True,
+            )
+        else:
+            full_access_type.department = wpe_admin_department
+            full_access_type.role = wpe_admin_role
+            full_access_type.is_active = True
+            full_access_type.save()
+
+        production_type = (
+            UserType.objects.filter(department=wpe_production_department, role=wpe_operator_role).first()
+            or UserType.objects.filter(name__in=["Production User", "Production - Operator"]).first()
         )
+        if production_type is None:
+            production_type = UserType.objects.create(
+                department=wpe_production_department,
+                role=wpe_operator_role,
+                is_active=True,
+            )
+        else:
+            production_type.department = wpe_production_department
+            production_type.role = wpe_operator_role
+            production_type.is_active = True
+            production_type.save()
 
         staff_admin, _ = Staff.objects.update_or_create(
             staff_code="9001",
@@ -342,21 +366,26 @@ class Command(BaseCommand):
             "Masters": {
                 "order": 1,
                 "sections": {
-                    "Admin Master": ["Main Screen Master", "Screen Section Master", "User Screen Master"],
+                    "Admin Master": [
+                        "Main Screen Master",
+                        "Screen Section Master",
+                        "User Screen Master",
+                        "User Creation Master",
+                        "User Screen Permission Master",
+                    ],
                     "Common Master": ["Customer Master", "Supplier Master", "Company Master", "Project Master"],
-                    "HR Master": ["Staff Master", "User Account Master", "User Permission Master"],
                 },
             },
             "Sales": {
                 "order": 2,
                 "sections": {
-                    "CRM": ["Contacts", "Presales Request"],
+                    "CRM": ["Contacts"],
                 },
             },
             "Inventory": {
                 "order": 3,
                 "sections": {
-                    "Store": ["Item Master", "Store Stock", "Store Request"],
+                    "Store": ["Item Master", "Store Stock", "Request Approval's"],
                     "Blending": ["Blending Stock"],
                     "GRN/QCR": ["GRN", "QCR"],
                 },
@@ -1061,7 +1090,7 @@ class Command(BaseCommand):
         pending_request, _ = StockRequest.objects.update_or_create(
             request_no="SR-SEED-0001",
             defaults={
-                "status": StockRequest.Status.PENDING,
+                "status": StockRequest.Status.PENDING_HEAD_APPROVAL,
                 "requesting_warehouse": blending_warehouse,
                 "issuing_warehouse": store_warehouse,
                 "request_type": StockRequest.RequestType.GENERAL,
@@ -1142,91 +1171,6 @@ class Command(BaseCommand):
         ]
         for payload in contacts:
             Contact.objects.update_or_create(phone=payload["phone"], defaults=payload)
-
-    def _seed_presales(self):
-        PreSales.objects.update_or_create(
-            order_code="PS-DEMO-0001",
-            defaults={
-                "stage": "Proposal",
-                "sale_type": "Project",
-                "sale_category": "Primary",
-                "project_name": "Metro Decking Package",
-                "version_no": "V1",
-                "description": "Seed presales enquiry for decking package.",
-                "lead_source": "Expo",
-                "sale_contact": "Aarav Buildtech",
-                "gp_percent": money("18.50"),
-                "gp_value": money("185000.00"),
-                "line_of_business": "Decking",
-                "sub_segment": "Infrastructure",
-                "segment_keyword": "premium",
-                "required_date": timezone.localdate() + timedelta(days=30),
-                "request_person_id": 9001,
-                "request_department": "Sales",
-                "required_time_start": time(10, 0),
-                "required_time_end": time(18, 0),
-                "required_reason": "Budgetary estimate.",
-                "internal_ref_id": 5001,
-                "invoice_ref_id": 9001,
-                "tolerance": "2%",
-                "profile_type": "Deck Board",
-                "capex": "No",
-                "tl_code": "TL-01",
-                "delivery_challan_type": "Standard",
-                "indent_number": "IND-DEMO-001",
-                "indent_date": aware(-3, 10, 30),
-                "indent_receiving_datetime": aware(-3, 11, 0),
-                "movement_description": "Seed movement description.",
-                "customer_po": "PO-DEMO-1001",
-                "customer_po_date": timezone.localdate(),
-                "destination": "Pune Site",
-                "document_contact": "Aarav Procurement Team",
-                "previous_document_contact": "Legacy Contact",
-                "base_order_id": 301,
-                "base_customer_id": self.parties["customer"].id,
-                "base_customer_name": self.parties["customer"].customer_name,
-                "base_order_date": aware(-5, 9, 30),
-                "activity_id": 701,
-            },
-        )
-
-        request, _ = PresalesRequest.objects.update_or_create(
-            request_no="PSR-SEED-0001",
-            defaults={
-                "request_date": timezone.localdate(),
-                "category": PresalesRequest.Category.STORE,
-                "request_person": "Admin User",
-                "department": "Sales",
-                "required_reason": "Seed store availability check.",
-                "customer_type": "ADDITIVE_MO",
-                "customer_name": self.parties["customer"].customer_name,
-                "remarks": "Seed presales request.",
-                "status": PresalesRequest.Status.APPROVED,
-                "submitted_by": self.users[ADMIN_USERNAME],
-                "submitted_at": timezone.now(),
-                "approved_by": self.users[ADMIN_USERNAME],
-                "approved_at": timezone.now(),
-                "approval_remarks": "Approved by seed command.",
-                "created_by": self.users[ADMIN_USERNAME],
-            },
-        )
-        for item in [self.items["SEED-FG-001"], self.items["SEED-HDPE-001"]]:
-            PresalesRequestItem.objects.update_or_create(
-                presales_request=request,
-                item=item,
-                defaults={
-                    "quantity": money("25.000") if item.unit == "NOS" else money("100.000"),
-                    "unit": item.unit,
-                    "remarks": "Seed request line.",
-                },
-            )
-        if not PresalesAuditLog.objects.filter(presales_request=request, action="APPROVED").exists():
-            PresalesAuditLog.objects.create(
-                presales_request=request,
-                action="APPROVED",
-                performed_by=self.users[ADMIN_USERNAME],
-                notes="Seed approval log.",
-            )
 
     def _seed_production(self):
         machines = {
