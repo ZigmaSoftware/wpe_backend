@@ -12,6 +12,7 @@ from apps.store.services import (
     get_blending_warehouse,
     get_store_warehouse,
     normalize_text,
+    quantize_stock,
     update_store_request,
 )
 
@@ -119,6 +120,7 @@ def _review_blending_store_request(
     head_user,
     target_status: str,
     remarks: str | None = None,
+    approval_lines=None,
 ):
     with transaction.atomic():
         try:
@@ -134,6 +136,68 @@ def _review_blending_store_request(
         if stock_request.status != StockRequest.Status.PENDING_HEAD_APPROVAL:
             raise ValidationError({"status": "Only requests pending Blending Head approval can be reviewed."})
 
+        request_items = list(stock_request.items.select_related("item").all())
+        if approval_lines is not None:
+            approval_line_map = {line["item"].id: line for line in approval_lines}
+            request_item_ids = {request_item.item_id for request_item in request_items}
+            line_item_ids = set(approval_line_map)
+            missing_item_ids = request_item_ids - line_item_ids
+            extra_item_ids = line_item_ids - request_item_ids
+            if missing_item_ids or extra_item_ids:
+                raise ValidationError({"items": "Each request item must have exactly one head approval line."})
+
+            accepted_count = 0
+            for request_item in request_items:
+                line = approval_line_map[request_item.item_id]
+                accepted_qty = quantize_stock(line["accepted_qty"])
+                line_reason = normalize_text(line.get("remarks"))
+
+                if accepted_qty < 0:
+                    raise ValidationError(
+                        {
+                            "items": [
+                                {
+                                    "item_id": request_item.item_id,
+                                    "accepted_qty": "Accepted Qty cannot be negative.",
+                                }
+                            ]
+                        }
+                    )
+                if accepted_qty > request_item.requested_qty:
+                    raise ValidationError(
+                        {
+                            "items": [
+                                {
+                                    "item_id": request_item.item_id,
+                                    "accepted_qty": "Accepted Qty cannot exceed Requested Qty.",
+                                }
+                            ]
+                        }
+                    )
+                if accepted_qty != request_item.requested_qty and not line_reason:
+                    raise ValidationError(
+                        {
+                            "items": [
+                                {
+                                    "item_id": request_item.item_id,
+                                    "remarks": "Reason is required when Accepted Qty is different from Requested Qty.",
+                                }
+                            ]
+                        }
+                    )
+
+                if accepted_qty <= 0:
+                    request_item.delete()
+                    continue
+
+                request_item.requested_qty = accepted_qty
+                request_item.remarks = line_reason or None
+                request_item.save(update_fields=["requested_qty", "remarks", "updated_at"])
+                accepted_count += 1
+
+            if accepted_count <= 0:
+                raise ValidationError({"items": "At least one item must have Accepted Qty greater than zero."})
+
         stock_request.status = target_status
         stock_request.head_action_by = head_user
         stock_request.head_action_at = timezone.now()
@@ -146,16 +210,18 @@ def _review_blending_store_request(
                 "head_approval_remarks",
             ]
         )
+        stock_request._prefetched_objects_cache = {}
 
     return stock_request
 
 
-def approve_blending_store_request_by_head(request_id: int, *, head_user, remarks: str | None = None):
+def approve_blending_store_request_by_head(request_id: int, *, head_user, remarks: str | None = None, approval_lines=None):
     return _review_blending_store_request(
         request_id,
         head_user=head_user,
         target_status=StockRequest.Status.PENDING_STORE_ISSUE,
         remarks=remarks,
+        approval_lines=approval_lines,
     )
 
 

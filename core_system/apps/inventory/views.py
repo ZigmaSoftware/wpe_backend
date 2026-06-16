@@ -19,6 +19,8 @@ class ProductionInventoryListAPIView(generics.ListAPIView):
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = [
         "batch_code",
+        "production_id",
+        "production_type",
         "item_code",
         "item_name",
         "item__item_code",
@@ -42,7 +44,13 @@ class ProductionInventoryListAPIView(generics.ListAPIView):
             raise ValidationError({"stage": f"Invalid stage. Valid choices: {', '.join(sorted(VALID_STAGES))}"})
 
         queryset = (
-            ProductionInventoryTransaction.objects.select_related("item", "created_by")
+            ProductionInventoryTransaction.objects.select_related(
+                "item",
+                "created_by",
+                "production_order",
+                "source_batch",
+                "output_capture",
+            ).prefetch_related("source_batch__child_batches")
             .filter(stage=stage)
             .order_by("-created_at", "-id")
         )

@@ -120,6 +120,55 @@ class BlendingStoreRequestTests(APITestCase):
         self.assertEqual(after_store_queue.data["data"]["count"], 1)
         self.assertEqual(StoreTransaction.objects.count(), transaction_count)
 
+    def test_head_approval_limits_store_queue_to_head_accepted_quantities(self):
+        first_item = Item.objects.create(
+            category="Raw Material",
+            group="blend",
+            sub_group="approval",
+            item_name="Head Accepted Material",
+            unit="kg",
+        )
+        second_item = Item.objects.create(
+            category="Raw Material",
+            group="blend",
+            sub_group="approval",
+            item_name="Head Rejected Material",
+            unit="kg",
+        )
+        create_response = self.client.post(
+            "/api/blending/store-requests/",
+            {
+                "items": [
+                    {"item_id": first_item.id, "quantity": "10.000"},
+                    {"item_id": second_item.id, "quantity": "5.000"},
+                ],
+            },
+            format="json",
+        )
+        request_id = create_response.data["data"]["id"]
+
+        approval_response = self.blending_head_client.post(
+            f"/api/blending/head-approvals/{request_id}/approve/",
+            {
+                "remarks": "Head reviewed line quantities",
+                "items": [
+                    {"item": first_item.id, "accepted_qty": "4.000", "remarks": "Only four needed"},
+                    {"item": second_item.id, "accepted_qty": "0.000", "remarks": "Not required"},
+                ],
+            },
+            format="json",
+        )
+        store_queue_response = self.store_user_client.get("/api/store/requests/")
+
+        self.assertEqual(approval_response.status_code, 200)
+        self.assertEqual(approval_response.data["data"]["status"], StockRequest.Status.PENDING_STORE_ISSUE)
+        self.assertEqual(len(approval_response.data["data"]["items"]), 1)
+        self.assertEqual(approval_response.data["data"]["items"][0]["item"], first_item.id)
+        self.assertEqual(Decimal(approval_response.data["data"]["items"][0]["requested_qty"]), Decimal("4.000"))
+        self.assertEqual(store_queue_response.data["data"]["count"], 1)
+        self.assertEqual(len(store_queue_response.data["data"]["results"][0]["items"]), 1)
+        self.assertEqual(Decimal(store_queue_response.data["data"]["results"][0]["items"][0]["requested_qty"]), Decimal("4.000"))
+
     def test_head_rejection_does_not_change_inventory(self):
         item = Item.objects.create(
             category="Raw Material",

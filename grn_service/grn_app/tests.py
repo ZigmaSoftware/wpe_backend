@@ -1043,11 +1043,19 @@ class GRNQCRFlowTests(TestCase):
 
         self.assertEqual(update_response.status_code, 200)
 
+        qcr.refresh_from_db()
+        self.assertEqual(qcr.generated_grn_no, "GRN - WPE - 0001")
+
         item = Item.objects.get(external_item_id="ITEM-MOVE-001")
         stock_row = StoreStock.objects.get(item=item)
+        store_transaction = StoreTransaction.objects.get(transaction_type=StoreTransaction.TransactionType.GRN_INWARD)
 
         self.assertEqual(item.item_name, "QCR Move Item")
         self.assertEqual(str(stock_row.quantity), "12.500")
+        self.assertEqual(store_transaction.reference_id, "GRN - WPE - 0001:1")
+        self.assertEqual(store_transaction.metadata["grn_no"], "GRN - WPE - 0001")
+        self.assertEqual(store_transaction.metadata["generated_grn_no"], "GRN - WPE - 0001")
+        self.assertEqual(store_transaction.metadata["grn_reference_no"], "GRN-107")
         self.assertEqual(
             StoreTransaction.objects.filter(
                 transaction_type=StoreTransaction.TransactionType.GRN_INWARD,
@@ -1076,6 +1084,7 @@ class GRNQCRFlowTests(TestCase):
         qcr.refresh_from_db()
 
         self.assertEqual(grn.process_status, GRN.PROCESS_STATUS_APPROVED)
+        self.assertEqual(qcr.generated_grn_no, "GRN - WPE - 0001")
         self.assertEqual(grn.qc_status, "Partial")
         self.assertTrue(grn.status)
         self.assertEqual(str(grn.accepted_qty), "12.00")
@@ -1097,6 +1106,15 @@ class GRNQCRFlowTests(TestCase):
 
         self.assertEqual(str(first_stock.quantity), "7.000")
         self.assertEqual(str(second_stock.quantity), "5.000")
+        self.assertEqual(
+            set(
+                StoreTransaction.objects.filter(
+                    transaction_type=StoreTransaction.TransactionType.GRN_INWARD,
+                    reference_type=StoreTransaction.ReferenceType.GRN,
+                ).values_list("reference_id", flat=True)
+            ),
+            {"GRN - WPE - 0001:1", "GRN - WPE - 0001:2"},
+        )
         self.assertEqual(
             StoreTransaction.objects.filter(
                 transaction_type=StoreTransaction.TransactionType.GRN_INWARD,

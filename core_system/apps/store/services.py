@@ -862,12 +862,31 @@ def reject_stock_request(request_id: int, approver, approval_remarks: str | None
 def resolve_grn_identifier(grn_payload: dict[str, Any]) -> str:
     document_details = grn_payload.get("document_details", {}) if isinstance(grn_payload, dict) else {}
     return str(
-        grn_payload.get("unique_id")
+        grn_payload.get("generated_grn_no")
+        or document_details.get("generated_grn_no")
+        or grn_payload.get("unique_id")
         or grn_payload.get("id")
         or document_details.get("grn_no")
         or grn_payload.get("grn_no")
         or ""
     ).strip()
+
+
+def resolve_grn_reference_no(grn_payload: dict[str, Any]) -> str:
+    document_details = grn_payload.get("document_details", {}) if isinstance(grn_payload, dict) else {}
+    return normalize_text(
+        grn_payload.get("grn_reference_no")
+        or document_details.get("grn_reference_no")
+        or document_details.get("source_grn_no")
+    )
+
+
+def resolve_generated_grn_no(grn_payload: dict[str, Any]) -> str:
+    document_details = grn_payload.get("document_details", {}) if isinstance(grn_payload, dict) else {}
+    return normalize_text(
+        grn_payload.get("generated_grn_no")
+        or document_details.get("generated_grn_no")
+    )
 
 
 def resolve_grn_process_status(grn_payload: dict[str, Any]) -> str:
@@ -1004,6 +1023,8 @@ def add_stock_from_grn(grn_payload: dict[str, Any], *, created_by=None) -> dict[
         raise ValidationError({"reference_id": "GRN payload must include a stable grn_no, id, or unique_id."})
 
     document_details = grn_payload.get("document_details", {}) if isinstance(grn_payload, dict) else {}
+    grn_reference_no = resolve_grn_reference_no(grn_payload)
+    generated_grn_no = resolve_generated_grn_no(grn_payload)
     grn_date = document_details.get("grn_date") or grn_payload.get("grn_date") or timezone.localdate()
     supplier_name = (
         (grn_payload.get("supplier_details") or {}).get("trade_name")
@@ -1081,7 +1102,9 @@ def add_stock_from_grn(grn_payload: dict[str, Any], *, created_by=None) -> dict[
                 reference_id=reference_id,
                 remarks=remarks,
                 metadata={
-                    "grn_no": document_details.get("grn_no") or grn_payload.get("grn_no"),
+                    "grn_no": generated_grn_no or document_details.get("grn_no") or grn_payload.get("grn_no"),
+                    "generated_grn_no": generated_grn_no,
+                    "grn_reference_no": grn_reference_no,
                     "grn_identifier": grn_identifier,
                     "supplier": supplier_name,
                     "line_number": line_number,
