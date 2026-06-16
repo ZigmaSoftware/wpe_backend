@@ -37,6 +37,14 @@ def env_list(name: str, default: list[str] | None = None) -> list[str]:
 SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-change-me")
 DEBUG = env_bool("DEBUG", True)
 
+LIVE_SERVER_HOST = "115.245.93.26"
+LIVE_FRONTEND_ORIGIN = f"http://{LIVE_SERVER_HOST}:8973"
+
+
+def ensure_list_values(values: list[str], required_values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values + required_values))
+
+
 ALLOWED_HOSTS = env_list("ALLOWED_HOSTS", ["127.0.0.1", "localhost"])
 CORS_ALLOWED_ORIGINS = env_list(
     "CORS_ALLOWED_ORIGINS",
@@ -49,9 +57,14 @@ CORS_ALLOWED_ORIGINS = env_list(
         "http://127.0.0.1:5173",
         "http://localhost:8080",
         "http://127.0.0.1:8080",
+        LIVE_FRONTEND_ORIGIN,
     ],
 )
 CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS", CORS_ALLOWED_ORIGINS)
+
+ALLOWED_HOSTS = ensure_list_values(ALLOWED_HOSTS, [LIVE_SERVER_HOST])
+CORS_ALLOWED_ORIGINS = ensure_list_values(CORS_ALLOWED_ORIGINS, [LIVE_FRONTEND_ORIGIN])
+CSRF_TRUSTED_ORIGINS = ensure_list_values(CSRF_TRUSTED_ORIGINS, [LIVE_FRONTEND_ORIGIN])
 
 INSTALLED_APPS = [
     "django.contrib.admin",
