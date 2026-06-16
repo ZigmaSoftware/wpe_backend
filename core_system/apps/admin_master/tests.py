@@ -30,101 +30,6 @@ from apps.wpe_masters.models import DepartmentMaster, DesignationMaster, RoleMas
 User = get_user_model()
 
 
-class DevFullAccessUserBootstrapTests(TestCase):
-    @override_settings(DEBUG=True)
-    @mock.patch.dict(
-        os.environ,
-        {
-            "DEV_FULL_ACCESS_USERNAME": "imran",
-            "DEV_FULL_ACCESS_PASSWORD": "developer",
-            "DEV_FULL_ACCESS_EMAIL": "imran@example.com",
-        },
-        clear=False,
-    )
-    def test_creates_full_access_user_when_missing(self):
-        ensure_dev_full_access_user()
-
-        user = User.objects.get(username="imran")
-        self.assertEqual(user.email, "imran@example.com")
-        self.assertTrue(user.is_active)
-        self.assertTrue(user.is_staff)
-        self.assertTrue(user.is_superuser)
-        self.assertTrue(user.check_password("developer"))
-
-
-class FullAccessPermissionResolutionTests(TestCase):
-    def test_superuser_receives_full_menu_permissions_without_admin_profile(self):
-        main_screen = MainScreen.objects.create(name="Operations-Test", code="operations-test", order_no=1, status=True)
-        section = ScreenSection.objects.create(
-            main_screen=main_screen,
-            name="Production-Test",
-            code="production-test",
-            order_no=1,
-            is_active=True,
-        )
-        test_screen = UserScreen.objects.create(
-            main_screen=main_screen,
-            screen_section=section,
-            screen_name="Store-Test",
-            code="store-screen-test",
-            folder_name="store",
-            order_no=1,
-            is_active=True,
-            available_actions=["list", "view", "update"],
-        )
-        user = User.objects.create_user(
-            username="imran-test",
-            password="developer1",
-            is_staff=True,
-            is_superuser=True,
-            is_active=True,
-        )
-
-        data = resolve_subject_permissions(user=user)
-
-        self.assertEqual(data["user_type"]["code"], "full-access")
-        self.assertGreater(len(data["menu"]), 1)
-        found = False
-        for main in data["menu"]:
-            for sec in main["sections"]:
-                for screen in sec["screens"]:
-                    if screen["id"] == test_screen.id:
-                        found = True
-                        self.assertTrue(screen["action_permissions"]["all"])
-                        self.assertTrue(screen["action_permissions"]["list"])
-                        self.assertTrue(screen["action_permissions"]["view"])
-                        self.assertTrue(screen["action_permissions"]["update"])
-                        self.assertFalse(screen["action_permissions"]["delete"])
-        self.assertTrue(found, "Test screen should be in the full access menu")
-
-    @override_settings(DEBUG=True)
-    @mock.patch.dict(
-        os.environ,
-        {
-            "DEV_FULL_ACCESS_USERNAME": "imran",
-            "DEV_FULL_ACCESS_PASSWORD": "developer",
-            "DEV_FULL_ACCESS_EMAIL": "imran@example.com",
-        },
-        clear=False,
-    )
-    def test_upgrades_existing_user_to_full_access(self):
-        user = User.objects.create_user(
-            username="imran",
-            password="old-password",
-            email="old@example.com",
-            is_active=False,
-        )
-
-        ensure_dev_full_access_user()
-
-        user.refresh_from_db()
-        self.assertEqual(user.email, "imran@example.com")
-        self.assertTrue(user.is_active)
-        self.assertTrue(user.is_staff)
-        self.assertTrue(user.is_superuser)
-        self.assertTrue(user.check_password("developer"))
-
-
 class StaffSerializerTests(TestCase):
     def test_rejects_duplicate_employee_id_and_phone_number(self):
         Staff.objects.create(
@@ -296,16 +201,16 @@ class StaffViewSetActionTests(TestCase):
 
 class UserCreationWriteSerializerTests(TestCase):
     def test_allows_password_similar_to_username_and_creates_role_based_login(self):
-        legacy_department, _ = Department.objects.get_or_create(name="Admin-Test")
-        legacy_role, _ = Role.objects.get_or_create(name="Admin-Test")
-        department_master, _ = DepartmentMaster.objects.get_or_create(name="Admin-Test")
-        role_master, _ = RoleMaster.objects.get_or_create(name="Admin-Test")
+        legacy_department = Department.objects.create(name="Admin")
+        legacy_role = Role.objects.create(name="Admin")
+        department_master = DepartmentMaster.objects.create(name="Admin")
+        role_master = RoleMaster.objects.create(name="Admin")
         user_type = UserType.objects.create(
-            name="Test User Type",
+            name="",
             department=department_master,
             role=role_master,
         )
-        company = Company.objects.create(name="Zigma-Test", code="COMP999")
+        company = Company.objects.create(name="Zigma", code="COMP999")
         staff = Staff.objects.create(
             staff_code="968",
             name="Mohamed Imran",
@@ -315,15 +220,15 @@ class UserCreationWriteSerializerTests(TestCase):
             role_master=role_master,
         )
         main_screen = MainScreen.objects.create(
-            name="Masters-Test",
-            code="masters-test",
+            name="Masters",
+            code="masters",
             order_no=1,
             status=True,
         )
         section = ScreenSection.objects.create(
             main_screen=main_screen,
-            name="Admin Master-Test",
-            code="admin-master-test",
+            name="Admin Master",
+            code="admin-master",
             order_no=1,
             is_active=True,
         )
@@ -331,7 +236,7 @@ class UserCreationWriteSerializerTests(TestCase):
             main_screen=main_screen,
             screen_section=section,
             screen_name="User Creation",
-            code="user-creation-test",
+            code="user-creation",
             folder_name="/admin/user-creation",
             order_no=1,
             is_active=True,

@@ -346,6 +346,8 @@ GRN_LEGACY_VALUE_FIELDS = (
 ACTIVE_QCR_SCOPES = {"", "active", "qcr", "pending", "open"}
 CANCELLED_QCR_SCOPES = {"cancelled", "canceled", "cancel", "rejected", "reject"}
 MOVED_TO_GRN_SCOPES = {"moved to grn", "moved_to_grn", "moved-grn", "grn", "approved", "grn approved", "grn_approved"}
+GENERATED_GRN_PREFIX = "GRN - WPE - "
+GENERATED_GRN_PATTERN = re.compile(r"^GRN\s*-\s*WPE\s*-\s*(\d+)$", re.IGNORECASE)
 GRN_PENDING_SCOPES = {"pending", "grn pending", "grn_pending", "pending-grn", "pending_grn"}
 
 
@@ -1005,6 +1007,46 @@ def build_store_sync_payload(*, grn: GRN, qcr_status: str | None = None, accepte
     if grn.total_quantity is not None:
         payload.setdefault("total_quantity", str(grn.total_quantity))
     return payload
+
+
+def build_store_sync_payload_for_qcr(*, qcr_record: QCR, qcr_status: str | None = None, accepted: bool = True) -> dict[str, Any]:
+    grn = qcr_record.source_grn
+    payload = build_store_sync_payload(grn=grn, qcr_status=qcr_status, accepted=accepted)
+    grn_reference_no = qcr_record.grn_reference_no or grn.grn_no
+    final_grn_no = qcr_record.generated_grn_no or grn_reference_no
+
+    document_details = payload.get("document_details")
+    if not isinstance(document_details, dict):
+        document_details = {}
+        payload["document_details"] = document_details
+
+    document_details["grn_reference_no"] = grn_reference_no
+    document_details["grn_no"] = final_grn_no
+    payload["grn_reference_no"] = grn_reference_no
+    payload["generated_grn_no"] = final_grn_no
+    payload["grn_no"] = final_grn_no
+    return payload
+
+
+def generate_next_wpe_grn_no() -> str:
+    max_sequence = 0
+    for value in QCR.objects.exclude(generated_grn_no__isnull=True).exclude(generated_grn_no="").values_list("generated_grn_no", flat=True):
+        match = GENERATED_GRN_PATTERN.match(str(value).strip())
+        if match:
+            max_sequence = max(max_sequence, int(match.group(1)))
+    return f"{GENERATED_GRN_PREFIX}{max_sequence + 1:04d}"
+
+
+def ensure_generated_grn_no(qcr_record: QCR) -> str:
+    if qcr_record.generated_grn_no:
+        return qcr_record.generated_grn_no
+
+    for _attempt in range(100):
+        candidate = generate_next_wpe_grn_no()
+        if not QCR.objects.filter(generated_grn_no=candidate).exclude(pk=qcr_record.pk).exists():
+            qcr_record.generated_grn_no = candidate
+            return candidate
+    raise DRFValidationError({"generated_grn_no": "Unable to generate a unique WPE GRN number."})
 
 
 def is_missing_schema_error(exc: Exception) -> bool:
@@ -1799,11 +1841,14 @@ def build_warehouse_inventory_rows(warehouse_name: str) -> list[dict[str, Any]]:
             or ""
         )
 
+        grn_reference_no = qcr_record.grn_reference_no or grn.grn_no
         rows.append(
             {
                 "grn_id": grn.id,
                 "qcr_id": qcr_record.id,
-                "grn_no": grn.grn_no,
+                "grn_no": grn_reference_no,
+                "grn_reference_no": grn_reference_no,
+                "generated_grn_no": qcr_record.generated_grn_no or "",
                 "supplier": supplier_name,
                 "po_no": po_number,
                 "items": ", ".join(item_names),
@@ -2457,6 +2502,7 @@ class QCRStatusUpdateAPIView(APIView):
                     grn.rejected_qty = total_rejected
 
                     if total_accepted > 0:
+                        ensure_generated_grn_no(qcr_record)
                         qcr_record.status = MOVED_TO_GRN_STATUS
                         grn.process_status = GRN_APPROVED_STATUS
                         grn.qc_status = "Pass" if total_rejected == 0 else "Partial"
@@ -2494,6 +2540,7 @@ class QCRStatusUpdateAPIView(APIView):
                     qcr_record.save(
                         update_fields=[
                             "qcr_items",
+                            "generated_grn_no",
                             "status",
                             "remarks",
                             "qcr_completed_at",
@@ -2514,10 +2561,11 @@ class QCRStatusUpdateAPIView(APIView):
                         ]
                     )
                 elif action == "move_to_grn":
+                    ensure_generated_grn_no(qcr_record)
                     qcr_record.status = MOVED_TO_GRN_STATUS
                     qcr_record.qcr_completed_at = timezone.now()
                     qcr_record.qcr_completed_by = actor
-                    qcr_record.save(update_fields=["status", "qcr_completed_at", "qcr_completed_by", "updated_at"])
+                    qcr_record.save(update_fields=["generated_grn_no", "status", "qcr_completed_at", "qcr_completed_by", "updated_at"])
                     grn.process_status = GRN_APPROVED_STATUS
                     grn.qc_status = "Pass"
                     grn.status = True
@@ -2549,8 +2597,8 @@ class QCRStatusUpdateAPIView(APIView):
                 )
 
                 if action in {"complete", "move_to_grn"} and grn.accepted_qty is not None and grn.accepted_qty > 0:
-                    sync_payload = build_store_sync_payload(
-                        grn=grn,
+                    sync_payload = build_store_sync_payload_for_qcr(
+                        qcr_record=qcr_record,
                         qcr_status=qcr_record.status,
                         accepted=True,
                     )

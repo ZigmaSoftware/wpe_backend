@@ -193,6 +193,7 @@ class GRN(WPEUniqueIDModel):
 class QCR(WPEUniqueIDModel):
     source_grn = models.OneToOneField(GRN, on_delete=models.PROTECT, related_name="qcr_record")
     grn_reference_no = models.CharField(max_length=100, db_index=True)
+    generated_grn_no = models.CharField(max_length=100, unique=True, blank=True, null=True, db_index=True)
     snapshot = models.JSONField(default=dict)
     qcr_items = models.JSONField(default=list, blank=True)
     status = models.CharField(max_length=100, default="Active")
