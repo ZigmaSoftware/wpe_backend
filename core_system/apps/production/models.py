@@ -1239,6 +1239,7 @@ class ProductionBatch(models.Model):
         AD = "AD", "Raw Materials (AD)"
         BL = "BL", "Blending (BL)"
         GL = "GL", "Granulation (GL)"
+        PR = "PR", "Production (PR)"
 
     class BatchStatus(models.TextChoices):
         PENDING = "PENDING", "Pending"
@@ -1248,6 +1249,7 @@ class ProductionBatch(models.Model):
 
     batch_no = models.CharField(max_length=30, unique=True, blank=True)
     workflow_batch_no = models.CharField(max_length=30, blank=True, null=True, db_index=True)
+    parent_batch = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL, related_name="child_batches")
     production_order = models.ForeignKey(ProductionOrder, on_delete=models.CASCADE, related_name="batches")
     bom_variant = models.ForeignKey(BOMVariant, null=True, blank=True, on_delete=models.SET_NULL)
     stage = models.CharField(max_length=10, choices=Stage.choices)
@@ -1265,29 +1267,17 @@ class ProductionBatch(models.Model):
 
     def save(self, *args, **kwargs):
         with transaction.atomic():
-            if (
-                not str(self.batch_no or "").strip()
-                and self.stage == self.Stage.AD
-                and not str(self.workflow_batch_no or "").strip()
-            ):
-                generated_workflow_batch_no = build_workflow_batch_no_for_order(
+            if not str(self.batch_no or "").strip():
+                self.batch_no = build_stage_batch_no_for_order(
                     self.production_order,
+                    self.stage,
                     exclude_batch_id=self.pk,
                 )
-                self.batch_no = generated_workflow_batch_no
-                self.workflow_batch_no = generated_workflow_batch_no
 
-            super().save(*args, **kwargs)
-
-            updates = {}
-            if not str(self.batch_no or "").strip():
-                self.batch_no = f"BATCH-{self.pk:08d}"
-                updates["batch_no"] = self.batch_no
             if not str(self.workflow_batch_no or "").strip():
                 self.workflow_batch_no = self.batch_no
-                updates["workflow_batch_no"] = self.workflow_batch_no
-            if updates:
-                ProductionBatch.objects.filter(pk=self.pk).update(**updates)
+
+            super().save(*args, **kwargs)
 
     def __str__(self):
         return self.batch_no or f"Batch-{self.pk}"
@@ -1313,39 +1303,58 @@ def _normalize_workflow_batch_prefix_token(value: str, *, fallback: str) -> str:
     return token[:20]
 
 
-def build_workflow_batch_no_for_order(order: ProductionOrder, *, exclude_batch_id: int | None = None) -> str:
-    prefix_token = _normalize_workflow_batch_prefix_token(
-        order.production_id,
-        fallback=f"PRD{order.pk or ''}",
-    )
-    sequence_pattern = re.compile(rf"^BATCH{re.escape(prefix_token)}-(\d{{4}})$", re.IGNORECASE)
+STAGE_BATCH_PREFIXES = {
+    ProductionBatch.Stage.AD: "BATCHAD",
+    ProductionBatch.Stage.BL: "BATCHBL",
+    ProductionBatch.Stage.GL: "BATCHGL",
+    ProductionBatch.Stage.PR: "BATCHPR",
+}
+
+
+def _extract_batch_production_token(order: ProductionOrder) -> str:
+    numeric_token = re.sub(r"\D", "", str(order.production_id or "")) or str(order.pk or 0)
+    return numeric_token.zfill(2)[-2:]
+
+
+def build_stage_batch_no_for_order(
+    order: ProductionOrder,
+    stage: str,
+    *,
+    exclude_batch_id: int | None = None,
+) -> str:
+    prefix = STAGE_BATCH_PREFIXES.get(stage, "BATCH")
+    production_token = _extract_batch_production_token(order)
+    base_batch_no = f"{prefix}-{production_token}"
+    sequence_pattern = re.compile(rf"^{re.escape(base_batch_no)}(\d{{2}})$", re.IGNORECASE)
     sibling_queryset = (
         ProductionBatch.objects.select_for_update()
-        .filter(production_order=order)
+        .filter(production_order=order, stage=stage)
         .order_by("-created_at", "-id")
     )
     if exclude_batch_id is not None:
         sibling_queryset = sibling_queryset.exclude(pk=exclude_batch_id)
-    sibling_batches = list(sibling_queryset)
 
-    distinct_workflow_batch_nos: set[str] = set()
     highest_sequence = 0
-    for sibling in sibling_batches:
-        workflow_batch_no = (
-            resolve_workflow_batch_no(sibling, sibling_batches=sibling_batches)
-            or str(getattr(sibling, "batch_no", "") or "").strip()
-        )
-        if not workflow_batch_no:
-            continue
-
-        normalized_workflow_batch_no = workflow_batch_no.upper()
-        distinct_workflow_batch_nos.add(normalized_workflow_batch_no)
-        match = sequence_pattern.match(normalized_workflow_batch_no)
+    for sibling in sibling_queryset:
+        normalized_batch_no = str(getattr(sibling, "batch_no", "") or "").strip().upper()
+        match = sequence_pattern.match(normalized_batch_no)
         if match:
             highest_sequence = max(highest_sequence, int(match.group(1)))
 
-    next_sequence = max(highest_sequence, len(distinct_workflow_batch_nos)) + 1 if distinct_workflow_batch_nos else 1
-    return f"BATCH{prefix_token}-{next_sequence:04d}"
+    next_sequence = highest_sequence + 1
+    return f"{base_batch_no}{next_sequence:02d}"
+
+
+def is_gl_batch_code(value: str | None) -> bool:
+    return str(value or "").strip().upper().startswith("BATCHGL-")
+
+
+def build_workflow_batch_no_for_order(order: ProductionOrder, *, exclude_batch_id: int | None = None) -> str:
+    return build_stage_batch_no_for_order(order, ProductionBatch.Stage.AD, exclude_batch_id=exclude_batch_id)
+
+
+def build_gl_batch_no_for_order(order: ProductionOrder, *, exclude_batch_id: int | None = None) -> str:
+    return build_stage_batch_no_for_order(order, ProductionBatch.Stage.GL, exclude_batch_id=exclude_batch_id)
 
 
 def _resolve_related_batches(batch: ProductionBatch, sibling_batches=None) -> list[ProductionBatch]:
@@ -1367,47 +1376,56 @@ def resolve_workflow_batch_no(batch: ProductionBatch | None, sibling_batches=Non
     if batch is None:
         return ""
 
+    if visited is None:
+        visited = set()
+    batch_id = getattr(batch, "pk", None)
+    if batch_id is not None:
+        if batch_id in visited:
+            return ""
+        visited.add(batch_id)
+
     workflow_batch_no = str(getattr(batch, "workflow_batch_no", "") or "").strip()
     if workflow_batch_no:
         return workflow_batch_no
+    if getattr(batch, "parent_batch_id", None):
+        related_batches = _resolve_related_batches(batch, sibling_batches=sibling_batches)
+        parent_batch = next((candidate for candidate in related_batches if candidate.pk == batch.parent_batch_id), None)
+        inherited_batch_no = resolve_workflow_batch_no(parent_batch, sibling_batches=related_batches, visited=visited)
+        if inherited_batch_no:
+            return inherited_batch_no
+    return str(getattr(batch, "batch_no", "") or "").strip()
 
-    source_batch_no = _extract_workflow_batch_no_from_notes(getattr(batch, "notes", ""))
-    if source_batch_no:
-        return source_batch_no
 
-    batch_no = str(getattr(batch, "batch_no", "") or "").strip()
-    previous_stage_by_stage = {
-        ProductionBatch.Stage.BL: ProductionBatch.Stage.AD,
-        ProductionBatch.Stage.GL: ProductionBatch.Stage.BL,
-    }
-    previous_stage = previous_stage_by_stage.get(getattr(batch, "stage", ""))
-    if not previous_stage:
-        return batch_no
-
-    visited = set(visited or ())
-    batch_key = getattr(batch, "pk", None) or f"unsaved-{id(batch)}"
-    if batch_key in visited:
-        return batch_no
-    visited.add(batch_key)
+def get_connected_lineage_batches(batch: ProductionBatch | None, sibling_batches=None) -> list[ProductionBatch]:
+    if batch is None:
+        return []
 
     related_batches = _resolve_related_batches(batch, sibling_batches=sibling_batches)
-    current_anchor_timestamp = _batch_anchor_timestamp(batch)
-    candidates = [candidate for candidate in related_batches if candidate.pk != batch.pk and candidate.stage == previous_stage]
-    if not candidates:
-        return batch_no
+    by_id = {related.pk: related for related in related_batches if related.pk is not None}
+    children_by_parent_id: dict[int, list[ProductionBatch]] = {}
+    for related in related_batches:
+        if related.parent_batch_id is None:
+            continue
+        children_by_parent_id.setdefault(related.parent_batch_id, []).append(related)
 
-    def sort_key(candidate: ProductionBatch):
-        candidate_anchor = _batch_anchor_timestamp(candidate)
-        is_not_after_current = current_anchor_timestamp == 0.0 or candidate_anchor <= current_anchor_timestamp
-        return (
-            1 if is_not_after_current else 0,
-            candidate_anchor,
-            getattr(candidate, "id", 0) or 0,
-        )
+    visited_ids: set[int] = set()
+    stack: list[ProductionBatch] = [batch]
+    connected: list[ProductionBatch] = []
 
-    source_batch = max(candidates, key=sort_key)
-    resolved_source_batch_no = resolve_workflow_batch_no(source_batch, sibling_batches=related_batches, visited=visited)
-    return resolved_source_batch_no or batch_no
+    while stack:
+        current = stack.pop()
+        current_id = getattr(current, "pk", None)
+        if current_id is None or current_id in visited_ids:
+            continue
+        visited_ids.add(current_id)
+        connected.append(current)
+
+        parent = by_id.get(current.parent_batch_id) if current.parent_batch_id is not None else None
+        if parent is not None:
+            stack.append(parent)
+        stack.extend(children_by_parent_id.get(current_id, []))
+
+    return connected
 
 
 class ProductionOutputCapture(models.Model):

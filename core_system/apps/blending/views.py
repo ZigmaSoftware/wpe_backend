@@ -13,6 +13,7 @@ from apps.store.serializers import (
     StockRequestCancelSerializer,
     StockRequestCreateSerializer,
     StockRequestHeadActionSerializer,
+    StockRequestHeadApproveSerializer,
     StockRequestSerializer,
 )
 from apps.store.services import request_stock
@@ -252,7 +253,7 @@ class BlendingHeadApprovalListAPIView(WrappedBlendingListAPIView):
 
 class ApproveBlendingHeadRequestAPIView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated, IsBlendingHeadUser]
-    serializer_class = StockRequestHeadActionSerializer
+    serializer_class = StockRequestHeadApproveSerializer
 
     def post(self, request, pk: int, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -261,6 +262,7 @@ class ApproveBlendingHeadRequestAPIView(generics.GenericAPIView):
             pk,
             head_user=request.user,
             remarks=serializer.validated_data.get("remarks"),
+            approval_lines=serializer.validated_data.get("items"),
         )
         return success_response(
             message="Blending store request approved by Blending Head.",

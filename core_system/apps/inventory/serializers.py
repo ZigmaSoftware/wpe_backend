@@ -4,6 +4,7 @@ from .models import ProductionInventoryTransaction
 
 
 class ProductionInventoryTransactionSerializer(serializers.ModelSerializer):
+    stage = serializers.CharField()
     item_code = serializers.SerializerMethodField()
     item_name = serializers.SerializerMethodField()
     uom = serializers.SerializerMethodField()
@@ -11,11 +12,21 @@ class ProductionInventoryTransactionSerializer(serializers.ModelSerializer):
     outward_qty = serializers.SerializerMethodField()
     balance_qty = serializers.SerializerMethodField()
     created_by = serializers.SerializerMethodField()
+    production = serializers.SerializerMethodField()
+    batch_no = serializers.SerializerMethodField()
+    source_stage = serializers.SerializerMethodField()
+    destination_stage = serializers.SerializerMethodField()
+    gl_batch_count = serializers.SerializerMethodField()
 
     class Meta:
         model = ProductionInventoryTransaction
         fields = [
             "id",
+            "stage",
+            "production_id",
+            "production_type",
+            "production",
+            "batch_no",
             "batch_code",
             "item_code",
             "item_name",
@@ -23,6 +34,8 @@ class ProductionInventoryTransactionSerializer(serializers.ModelSerializer):
             "outward_qty",
             "balance_qty",
             "uom",
+            "source_stage",
+            "destination_stage",
             "from_stage",
             "to_stage",
             "reference_no",
@@ -30,6 +43,7 @@ class ProductionInventoryTransactionSerializer(serializers.ModelSerializer):
             "work_center",
             "line",
             "status",
+            "gl_batch_count",
             "created_by",
             "created_at",
         ]
@@ -69,3 +83,21 @@ class ProductionInventoryTransactionSerializer(serializers.ModelSerializer):
 
     def get_created_by(self, obj):
         return getattr(obj.created_by, "username", None) or "System"
+
+    def get_production(self, obj):
+        return obj.production_type or ""
+
+    def get_batch_no(self, obj):
+        return obj.batch_code or ""
+
+    def get_source_stage(self, obj):
+        return obj.from_stage or ""
+
+    def get_destination_stage(self, obj):
+        return obj.to_stage or ""
+
+    def get_gl_batch_count(self, obj):
+        production_order = getattr(obj, "production_order", None)
+        if production_order is None:
+            return 0
+        return production_order.batches.filter(stage="GL").exclude(batch_no__exact="").count()

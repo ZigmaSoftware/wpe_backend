@@ -11,9 +11,11 @@ class ProductionInventoryTransaction(models.Model):
         ADDITIVE_WORK_CENTER = "ADDITIVE_WORK_CENTER", "Additive Work Center"
         BLEND_WIP = "BLEND_WIP", "Blend WIP"
         BLENDING_WORK_CENTER = "BLENDING_WORK_CENTER", "Blending Work Center"
+        BLEND_STORE = "BLEND_STORE", "Blend Store"
         GRAN_TOOL_SCAN = "GRAN_TOOL_SCAN", "Gran Tool Scan"
         GRANULATION_WIP = "GRANULATION_WIP", "Granulation WIP"
         GRANULATION_WORK_CENTER = "GRANULATION_WORK_CENTER", "Granulation Work Center"
+        GRANULATION_STORE = "GRANULATION_STORE", "Granulation Store"
         CONNECTION_TO_LINE = "CONNECTION_TO_LINE", "Connection to Line"
         LINE_WORK_CENTER = "LINE_WORK_CENTER", "Line Work Center"
         DISCONNECTION_FROM_LINE = "DISCONNECTION_FROM_LINE", "Disconnection from Line"
@@ -25,7 +27,31 @@ class ProductionInventoryTransaction(models.Model):
         CANCELLED = "CANCELLED", "Cancelled"
 
     stage = models.CharField(max_length=30, choices=Stage.choices, db_index=True)
+    movement_key = models.CharField(max_length=150, unique=True, db_index=True)
     batch_code = models.CharField(max_length=100, db_index=True)
+    production_order = models.ForeignKey(
+        "production.ProductionOrder",
+        on_delete=models.CASCADE,
+        related_name="inventory_transactions",
+        null=True,
+        blank=True,
+    )
+    production_id = models.CharField(max_length=100, blank=True, db_index=True)
+    production_type = models.CharField(max_length=200, blank=True)
+    source_batch = models.ForeignKey(
+        "production.ProductionBatch",
+        on_delete=models.SET_NULL,
+        related_name="inventory_transactions",
+        null=True,
+        blank=True,
+    )
+    output_capture = models.ForeignKey(
+        "production.ProductionOutputCapture",
+        on_delete=models.SET_NULL,
+        related_name="inventory_transactions",
+        null=True,
+        blank=True,
+    )
     item = models.ForeignKey(
         "Items.Item",
         on_delete=models.PROTECT,
