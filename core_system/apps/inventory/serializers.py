@@ -1,4 +1,9 @@
+from decimal import Decimal
+import re
+
 from rest_framework import serializers
+from django.db.models import Sum
+from django.db.models import Q
 
 from .models import ProductionInventoryTransaction
 
@@ -14,6 +19,7 @@ class ProductionInventoryTransactionSerializer(serializers.ModelSerializer):
     created_by = serializers.SerializerMethodField()
     production = serializers.SerializerMethodField()
     batch_no = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
     source_stage = serializers.SerializerMethodField()
     destination_stage = serializers.SerializerMethodField()
     gl_batch_count = serializers.SerializerMethodField()
@@ -57,6 +63,15 @@ class ProductionInventoryTransactionSerializer(serializers.ModelSerializer):
         except Exception:
             return str(value)
 
+    def _extract_workflow_suffix(self, value):
+        text = str(value or "").strip().upper()
+        if not text:
+            return ""
+        match = re.search(r"(-\d+)$", text)
+        if match:
+            return match.group(1)
+        return text
+
     def get_item_code(self, obj):
         if obj.item_id:
             return obj.item.item_code
@@ -88,7 +103,64 @@ class ProductionInventoryTransactionSerializer(serializers.ModelSerializer):
         return obj.production_type or ""
 
     def get_batch_no(self, obj):
-        return obj.batch_code or ""
+        if obj.batch_code:
+            return obj.batch_code
+        if obj.stage == ProductionInventoryTransaction.Stage.BLEND_WIP:
+            source_batch = getattr(obj, "source_batch", None)
+            if source_batch is not None:
+                return str(getattr(source_batch, "batch_no", "") or "").strip()
+        return ""
+
+    def _get_moved_quantity_to_next_stage(self, obj):
+        if obj.stage == ProductionInventoryTransaction.Stage.BLEND_WIP:
+            next_stage = ProductionInventoryTransaction.Stage.BLEND_STORE
+        elif obj.stage == ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER:
+            next_stage = ProductionInventoryTransaction.Stage.GRANULATION_STORE
+        else:
+            return Decimal("0.000")
+
+        source_batch = getattr(obj, "source_batch", None)
+        direct_filter = Q()
+        if source_batch is not None:
+            direct_filter |= Q(source_batch__parent_batch_id=source_batch.id)
+
+        lineage_suffix = self._extract_workflow_suffix(
+            obj.batch_code or obj.reference_no or getattr(source_batch, "batch_no", None)
+        )
+        suffix_filter = Q()
+        if lineage_suffix:
+            suffix_filter |= Q(batch_code__iendswith=lineage_suffix)
+            suffix_filter |= Q(reference_no__iendswith=lineage_suffix)
+
+        if not direct_filter and not suffix_filter:
+            return Decimal("0.000")
+
+        total = ProductionInventoryTransaction.objects.filter(
+            stage=next_stage,
+            production_order=obj.production_order,
+            item_code=obj.item_code,
+            created_at__gte=obj.created_at,
+        ).filter(
+            direct_filter | suffix_filter
+        ).aggregate(total=Sum("inward_qty"))
+        return Decimal(str(total.get("total") or 0))
+
+    def get_status(self, obj):
+        if obj.stage not in {
+            ProductionInventoryTransaction.Stage.BLEND_WIP,
+            ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
+        }:
+            return obj.status
+
+        if Decimal(str(obj.balance_qty or 0)) <= 0:
+            return ProductionInventoryTransaction.Status.COMPLETED
+
+        moved_qty = self._get_moved_quantity_to_next_stage(obj)
+        return (
+            ProductionInventoryTransaction.Status.COMPLETED
+            if moved_qty > 0
+            else obj.status
+        )
 
     def get_source_stage(self, obj):
         return obj.from_stage or ""

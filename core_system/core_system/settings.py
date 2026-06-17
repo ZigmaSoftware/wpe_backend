@@ -128,7 +128,7 @@ ASGI_APPLICATION = "core_system.asgi.application"
 DATABASES = {   
     'default': {
         'ENGINE': os.getenv("DB_ENGINE", "django.db.backends.mysql"),
-        'NAME': os.getenv("DB_NAME", "wpe_db"), 
+        'NAME': os.getenv("DB_NAME", "db_wpe"), 
         'USER': os.getenv("DB_USER", "root"),
         'PASSWORD': os.getenv("DB_PASSWORD", "admin@123"),
         'HOST': os.getenv("DB_HOST", "127.0.0.1"),
