@@ -79,6 +79,11 @@ user_screen_patterns = [
         UserScreenViewSet.as_view({"patch": "toggle_status"}),
         name="user-screen-toggle",
     ),
+    path(
+        "user-screens/table-columns/",
+        UserScreenViewSet.as_view({"get": "table_columns"}),
+        name="user-screen-table-columns",
+    ),
 ]
 
 

@@ -18,6 +18,10 @@ def default_screen_actions() -> list[str]:
     return list(SCREEN_ACTIONS)
 
 
+def default_table_columns() -> list[dict]:
+    return []
+
+
 def default_action_permissions() -> dict[str, bool]:
     return {action: False for action in PERMISSION_ACTIONS}
 
@@ -416,6 +420,7 @@ class UserScreen(UniqueIDMixin):
     description = models.TextField(null=True, blank=True)
     is_active = models.BooleanField(default=True, db_index=True)
     available_actions = models.JSONField(default=default_screen_actions)
+    table_columns = models.JSONField(default=default_table_columns, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
