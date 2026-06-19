@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import re
 from django.db import models
+from django.db.models import Q
 
 from apps.production.models import (
     BatchWeightEntry,
@@ -36,6 +38,63 @@ def _resolve_production_item_fields(order: ProductionOrder) -> tuple[str, str]:
     production_code = str(order.production_id or "").strip()
     production_name = str(order.production_for or "").strip() or str(order.production_type or "").strip() or production_code
     return production_code, production_name
+
+
+def _extract_workflow_suffix(value: str | None) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    match = re.search(r"(-\d+)$", text)
+    if match:
+        return match.group(1)
+    return text
+
+
+def _consume_stage_quantity(
+    *,
+    stage: str,
+    next_stage: str,
+    quantity: Decimal,
+    production_order: ProductionOrder,
+    source_batch: ProductionBatch | None,
+    lineage_batch_code: str | None = None,
+):
+    if quantity <= ZERO:
+        return
+
+    if source_batch is None:
+        source_rows = []
+    else:
+        source_rows = list(
+            ProductionInventoryTransaction.objects.select_for_update().filter(
+                stage=stage,
+                source_batch=source_batch,
+                balance_qty__gt=ZERO,
+            ).order_by("created_at", "id")
+        )
+
+    if not source_rows:
+        lineage_suffix = _extract_workflow_suffix(lineage_batch_code or getattr(source_batch, "batch_no", None))
+        if lineage_suffix:
+            source_rows = list(
+                ProductionInventoryTransaction.objects.select_for_update().filter(
+                    stage=stage,
+                    production_order=production_order,
+                    balance_qty__gt=ZERO,
+                ).filter(
+                    Q(batch_code__iendswith=lineage_suffix) | Q(reference_no__iendswith=lineage_suffix)
+                ).order_by("created_at", "id")
+            )
+
+    if not source_rows:
+        return
+
+    for row in source_rows:
+        row.outward_qty = Decimal(str(row.inward_qty or ZERO))
+        row.balance_qty = ZERO
+        row.to_stage = next_stage
+        row.status = ProductionInventoryTransaction.Status.COMPLETED
+        row.save(update_fields=["outward_qty", "balance_qty", "to_stage", "status", "updated_at"])
 
 
 def get_available_stage_quantity(production_order: ProductionOrder, stage: str) -> Decimal:
@@ -173,7 +232,7 @@ def move_ad_batch_to_blend_wip(ad_batch: ProductionBatch, *, created_by=None) ->
             upsert_inventory_transaction(
                 movement_key=f"ad-final:blend-wip:{entry.id}",
                 stage=ProductionInventoryTransaction.Stage.BLEND_WIP,
-                batch_code="",
+                batch_code=str(ad_batch.batch_no or "").strip(),
                 production_order=ad_batch.production_order,
                 source_batch=ad_batch,
                 item=item,
@@ -194,6 +253,17 @@ def move_ad_batch_to_blend_wip(ad_batch: ProductionBatch, *, created_by=None) ->
 def record_bl_final_capture(bl_batch: ProductionBatch, output_capture: ProductionOutputCapture, *, created_by=None) -> ProductionInventoryTransaction:
     production_code, production_name = _resolve_production_item_fields(bl_batch.production_order)
     quantity = Decimal(str(output_capture.weight_kg or ZERO))
+
+    source_batch = getattr(bl_batch, "parent_batch", None)
+    _consume_stage_quantity(
+        stage=ProductionInventoryTransaction.Stage.BLEND_WIP,
+        next_stage=ProductionInventoryTransaction.Stage.BLEND_STORE,
+        quantity=quantity,
+        production_order=bl_batch.production_order,
+        source_batch=source_batch,
+        lineage_batch_code=str(bl_batch.batch_no or "").strip() or None,
+    )
+
     return upsert_inventory_transaction(
         movement_key=f"bl-final:blend-store:{output_capture.id}",
         stage=ProductionInventoryTransaction.Stage.BLEND_STORE,
@@ -268,6 +338,16 @@ def move_bl_batch_to_granulation_work_center(
 def record_gl_final_capture(gl_batch: ProductionBatch, output_capture: ProductionOutputCapture, *, created_by=None) -> ProductionInventoryTransaction:
     production_code, production_name = _resolve_production_item_fields(gl_batch.production_order)
     quantity = Decimal(str(output_capture.weight_kg or ZERO))
+
+    _consume_stage_quantity(
+        stage=ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
+        next_stage=ProductionInventoryTransaction.Stage.GRANULATION_STORE,
+        quantity=quantity,
+        production_order=gl_batch.production_order,
+        source_batch=getattr(gl_batch, "parent_batch", None),
+        lineage_batch_code=str(gl_batch.batch_no or "").strip() or None,
+    )
+
     return upsert_inventory_transaction(
         movement_key=f"gl-final:granulation-store:{output_capture.id}",
         stage=ProductionInventoryTransaction.Stage.GRANULATION_STORE,

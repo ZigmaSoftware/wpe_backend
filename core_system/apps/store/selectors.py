@@ -17,6 +17,7 @@ def store_request_queryset():
         "action_by",
         "head_action_by",
         "cancelled_by",
+        "release_action_by",
     ).prefetch_related("items__item")
 
 

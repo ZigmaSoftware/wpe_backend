@@ -12,3 +12,4 @@ wheels/
 .vscode
 pyproject.toml
 uv.lock
+.env.example

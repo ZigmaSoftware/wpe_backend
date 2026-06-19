@@ -248,6 +248,16 @@ class UserScreenViewSet(StandardizedModelViewSet):
         )
         return Response(list(queryset))
 
+    @action(detail=False, methods=["get"], url_path="table-columns")
+    def table_columns(self, request):
+        screen_code = request.query_params.get("code")
+        if not screen_code:
+            return Response({"detail": "code query param is required."}, status=400)
+        screen = self.get_queryset().filter(code=screen_code).first()
+        if not screen:
+            return Response({"detail": "Screen not found."}, status=404)
+        return Response(screen.table_columns or [])
+
 
 class UserTypeViewSet(StandardizedModelViewSet):
     queryset = UserType.objects.select_related("department", "role").all().order_by(

@@ -89,6 +89,7 @@ class UserScreenSerializer(serializers.ModelSerializer):
             "description",
             "is_active",
             "available_actions",
+            "table_columns",
             "created_at",
             "updated_at",
         )
