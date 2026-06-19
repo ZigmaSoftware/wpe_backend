@@ -282,6 +282,22 @@ class RoleLookupApiTests(APITestCase):
         self.assertEqual(matched["department_id"], department.id)
         self.assertEqual(matched["department_name"], "Administration")
 
+    def test_create_role_without_designation(self):
+        response = self.client.post(
+            "/api/wpe-masters/roles/",
+            {
+                "name": "Standalone Role",
+                "description": "Role without designation mapping",
+                "is_active": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["name"], "Standalone Role")
+        self.assertIsNone(response.data.get("designation_name"))
+        self.assertTrue(RoleMaster.objects.filter(name="Standalone Role", designation__isnull=True).exists())
+
 
 class ItemVariantApiTests(APITestCase):
     def setUp(self):
