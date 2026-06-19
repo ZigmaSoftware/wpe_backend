@@ -112,22 +112,10 @@ class DesignationMasterSerializer(CodeTrackedMasterSerializer):
 
 class RoleMasterSerializer(CodeTrackedMasterSerializer):
     designation_name = serializers.CharField(source="designation.name", read_only=True, allow_null=True)
-    designation = serializers.PrimaryKeyRelatedField(
-        queryset=DesignationMaster.objects.filter(is_active=True),
-        required=False,
-        allow_null=True,
-    )
 
     class Meta(CodeTrackedMasterSerializer.Meta):
         model = RoleMaster
-        fields = CodeTrackedMasterSerializer.Meta.fields + ("designation", "designation_name")
-
-    def validate(self, attrs):
-        attrs = super().validate(attrs)
-        designation = attrs.get("designation", getattr(self.instance, "designation", None))
-        if designation is None:
-            raise serializers.ValidationError({"designation": "Designation is required."})
-        return attrs
+        fields = CodeTrackedMasterSerializer.Meta.fields + ("designation_name",)
 
 
 class UnitMasterSerializer(serializers.ModelSerializer):
