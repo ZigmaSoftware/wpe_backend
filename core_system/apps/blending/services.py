@@ -134,7 +134,7 @@ def _review_blending_store_request(
             raise ValidationError({"detail": "Blending store request was not found."}) from exc
 
         if stock_request.status != StockRequest.Status.PENDING_HEAD_APPROVAL:
-            raise ValidationError({"status": "Only requests pending Blending Head approval can be reviewed."})
+            raise ValidationError({"status": "Only requests pending Head approval can be reviewed."})
 
         request_items = list(stock_request.items.select_related("item").all())
         if approval_lines is not None:
@@ -219,7 +219,7 @@ def approve_blending_store_request_by_head(request_id: int, *, head_user, remark
     return _review_blending_store_request(
         request_id,
         head_user=head_user,
-        target_status=StockRequest.Status.PENDING_STORE_ISSUE,
+        target_status=StockRequest.Status.PENDING_REQUEST_PROCESS,
         remarks=remarks,
         approval_lines=approval_lines,
     )

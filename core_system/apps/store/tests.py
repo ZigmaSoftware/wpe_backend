@@ -45,7 +45,21 @@ class StoreWorkflowTests(APITestCase):
             format="json",
         )
 
-    def test_approve_request_transfers_stock_between_warehouses(self):
+    def process_by_store(self, request_id: int, payload: dict | None = None):
+        return self.store_client.post(
+            f"/api/store/requests/{request_id}/approve/",
+            payload or {"approval_remarks": "Processed by Store"},
+            format="json",
+        )
+
+    def release_by_store(self, request_id: int, payload: dict | None = None):
+        return self.store_client.post(
+            f"/api/store/requests/{request_id}/release/",
+            payload or {"release_remarks": "Released by Store"},
+            format="json",
+        )
+
+    def test_release_request_transfers_stock_between_warehouses(self):
         item = Item.objects.create(
             category="Raw Material",
             group="polymer",
@@ -73,14 +87,20 @@ class StoreWorkflowTests(APITestCase):
         )
         request_id = request_response.data["data"]["id"]
         self.assertEqual(self.approve_by_blending_head(request_id).status_code, 200)
-
-        approve_response = self.store_client.post(
-            f"/api/store/requests/{request_id}/approve/",
-            {"approval_remarks": "Approved for production"},
-            format="json",
+        process_response = self.process_by_store(
+            request_id,
+            {"approval_remarks": "Processed for release"},
         )
 
-        self.assertEqual(approve_response.status_code, 200)
+        self.assertEqual(process_response.status_code, 200)
+        self.assertEqual(StoreStock.objects.get(item=item, warehouse=self.store_warehouse).available_qty, Decimal("100.000"))
+
+        release_response = self.release_by_store(
+            request_id,
+            {"release_remarks": "Released for production"},
+        )
+
+        self.assertEqual(release_response.status_code, 200)
         source_stock = StoreStock.objects.get(item=item, warehouse=self.store_warehouse)
         destination_stock = StoreStock.objects.get(item=item, warehouse=self.blending_warehouse)
         request_item = StockRequest.objects.prefetch_related("items").get(pk=request_id).items.get(item=item)
@@ -90,7 +110,7 @@ class StoreWorkflowTests(APITestCase):
         self.assertEqual(request_item.approved_qty, Decimal("50.000"))
         self.assertEqual(request_item.issued_qty, Decimal("50.000"))
 
-    def test_partial_approval_allows_per_item_quantities(self):
+    def test_request_process_and_release_allow_per_item_quantities(self):
         first_item = Item.objects.create(
             category="Raw Material",
             group="polymer",
@@ -138,30 +158,40 @@ class StoreWorkflowTests(APITestCase):
         request_id = request_response.data["data"]["id"]
         self.assertEqual(self.approve_by_blending_head(request_id).status_code, 200)
 
-        approve_response = self.store_client.post(
-            f"/api/store/requests/{request_id}/approve/",
+        process_response = self.process_by_store(
+            request_id,
             {
                 "items": [
                     {"item": first_item.id, "provided_qty": "4.000", "remarks": "Only partial stock released"},
                     {"item": second_item.id, "provided_qty": "0.000", "remarks": "No stock released"},
                 ],
             },
-            format="json",
         )
 
-        self.assertEqual(approve_response.status_code, 200)
+        self.assertEqual(process_response.status_code, 200)
         stock_request = StockRequest.objects.prefetch_related("items").get(pk=request_id)
         first_request_item = stock_request.items.get(item=first_item)
         second_request_item = stock_request.items.get(item=second_item)
 
-        self.assertEqual(stock_request.status, StockRequest.Status.PARTIALLY_APPROVED)
+        self.assertEqual(stock_request.status, StockRequest.Status.PENDING_STOCK_RELEASE)
         self.assertEqual(first_request_item.approved_qty, Decimal("4.000"))
-        self.assertEqual(first_request_item.issued_qty, Decimal("4.000"))
+        self.assertEqual(first_request_item.issued_qty, Decimal("0.000"))
         self.assertEqual(first_request_item.remarks, "Only partial stock released")
         self.assertEqual(second_request_item.approved_qty, Decimal("0.000"))
         self.assertEqual(second_request_item.issued_qty, Decimal("0.000"))
-        self.assertEqual(approve_response.data["data"]["issue_transactions"][0]["quantity"], "4.000")
-        self.assertEqual(approve_response.data["data"]["receipt_transactions"][0]["quantity"], "4.000")
+        self.assertEqual(process_response.data["data"]["issue_transactions"], [])
+        self.assertEqual(process_response.data["data"]["receipt_transactions"], [])
+
+        release_response = self.release_by_store(request_id)
+
+        self.assertEqual(release_response.status_code, 200)
+        stock_request.refresh_from_db()
+        first_request_item.refresh_from_db()
+        second_request_item.refresh_from_db()
+        self.assertEqual(stock_request.status, StockRequest.Status.CLOSED_WON)
+        self.assertEqual(first_request_item.issued_qty, Decimal("4.000"))
+        self.assertEqual(release_response.data["data"]["issue_transactions"][0]["quantity"], "4.000")
+        self.assertEqual(release_response.data["data"]["receipt_transactions"][0]["quantity"], "4.000")
 
     def test_legacy_request_stock_endpoint_sets_additive_metadata(self):
         item = Item.objects.create(
@@ -257,7 +287,7 @@ class StoreWorkflowTests(APITestCase):
         )
 
         self.assertEqual(approve_response.status_code, 400)
-        self.assertEqual(approve_response.data["status"], "This request is pending Blending Head approval.")
+        self.assertEqual(approve_response.data["status"], "This request is pending Head approval.")
 
     def test_store_stock_list_is_readable_by_blending_user(self):
         item = Item.objects.create(

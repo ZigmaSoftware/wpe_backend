@@ -246,6 +246,7 @@ class StockRequestSerializer(serializers.ModelSerializer):
     action_by_username = serializers.CharField(source="action_by.username", read_only=True)
     head_action_by_username = serializers.CharField(source="head_action_by.username", read_only=True)
     cancelled_by_username = serializers.CharField(source="cancelled_by.username", read_only=True)
+    release_action_by_username = serializers.CharField(source="release_action_by.username", read_only=True)
     requesting_warehouse_code = serializers.CharField(source="requesting_warehouse.code", read_only=True)
     requesting_warehouse_name = serializers.CharField(source="requesting_warehouse.name", read_only=True)
     issuing_warehouse_code = serializers.CharField(source="issuing_warehouse.code", read_only=True)
@@ -253,6 +254,12 @@ class StockRequestSerializer(serializers.ModelSerializer):
     approved_by = serializers.SerializerMethodField()
     approved_by_username = serializers.SerializerMethodField()
     approved_at = serializers.SerializerMethodField()
+    processed_by = serializers.SerializerMethodField()
+    processed_by_username = serializers.SerializerMethodField()
+    processed_at = serializers.SerializerMethodField()
+    released_by = serializers.SerializerMethodField()
+    released_by_username = serializers.SerializerMethodField()
+    released_at = serializers.SerializerMethodField()
     total_requested_qty = serializers.SerializerMethodField()
     total_approved_qty = serializers.SerializerMethodField()
     total_issued_qty = serializers.SerializerMethodField()
@@ -296,17 +303,27 @@ class StockRequestSerializer(serializers.ModelSerializer):
             "head_action_by_username",
             "approved_by",
             "approved_by_username",
+            "processed_by",
+            "processed_by_username",
+            "released_by",
+            "released_by_username",
+            "release_action_by",
+            "release_action_by_username",
             "cancelled_by",
             "cancelled_by_username",
             "requested_at",
             "action_at",
             "head_action_at",
             "approved_at",
+            "processed_at",
             "cancelled_at",
+            "release_action_at",
+            "released_at",
             "total_requested_qty",
             "total_approved_qty",
             "total_issued_qty",
             "items",
+            "release_remarks",
         )
         read_only_fields = fields
 
@@ -352,13 +369,31 @@ class StockRequestSerializer(serializers.ModelSerializer):
         return serialize_quantity(first_item.requested_qty if first_item else STOCK_ZERO)
 
     def get_approved_by(self, obj):
-        return obj.action_by_id
+        return obj.head_action_by_id
 
     def get_approved_by_username(self, obj):
-        return getattr(obj.action_by, "username", None)
+        return getattr(obj.head_action_by, "username", None)
 
     def get_approved_at(self, obj):
+        return obj.head_action_at
+
+    def get_processed_by(self, obj):
+        return obj.action_by_id
+
+    def get_processed_by_username(self, obj):
+        return getattr(obj.action_by, "username", None)
+
+    def get_processed_at(self, obj):
         return obj.action_at
+
+    def get_released_by(self, obj):
+        return obj.release_action_by_id
+
+    def get_released_by_username(self, obj):
+        return getattr(obj.release_action_by, "username", None)
+
+    def get_released_at(self, obj):
+        return obj.release_action_at
 
     def get_total_requested_qty(self, obj):
         return serialize_quantity(sum((line.requested_qty for line in obj.items.all()), start=Decimal("0.000")))
@@ -379,7 +414,7 @@ class StockRequestApproveSerializer(serializers.Serializer):
             return value
 
         if not value:
-            raise serializers.ValidationError("At least one approval line is required when items are provided.")
+            raise serializers.ValidationError("At least one process line is required when items are provided.")
 
         item_ids: list[int] = []
         for row in value:
@@ -387,7 +422,7 @@ class StockRequestApproveSerializer(serializers.Serializer):
             item_id = getattr(item, "id", None)
 
             if item_id in item_ids:
-                raise serializers.ValidationError("Duplicate items are not allowed in a store request review.")
+                raise serializers.ValidationError("Duplicate items are not allowed in a store request process review.")
             item_ids.append(item_id)
 
             if item_id in (None, ""):
@@ -398,6 +433,10 @@ class StockRequestApproveSerializer(serializers.Serializer):
 
 class StockRequestRejectSerializer(serializers.Serializer):
     approval_remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
+class StockRequestReleaseSerializer(serializers.Serializer):
+    release_remarks = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
 class StockRequestHeadActionSerializer(serializers.Serializer):

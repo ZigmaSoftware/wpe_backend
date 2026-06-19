@@ -235,14 +235,11 @@ class BlendingHeadApprovalListAPIView(WrappedBlendingListAPIView):
     list_message = "Blending Head approval queue fetched successfully."
 
     def get_queryset(self):
-        return (
-            store_request_queryset()
-            .filter(
-                status=StockRequest.Status.PENDING_HEAD_APPROVAL,
-                department__iexact=BLENDING_DEPARTMENT,
-            )
-            .distinct()
-        )
+        queryset = store_request_queryset().filter(status=StockRequest.Status.PENDING_HEAD_APPROVAL)
+        department = resolve_blending_request_department(self.request.user, fallback="")
+        if department:
+            queryset = queryset.filter(department__iexact=department)
+        return queryset.distinct()
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -265,7 +262,7 @@ class ApproveBlendingHeadRequestAPIView(generics.GenericAPIView):
             approval_lines=serializer.validated_data.get("items"),
         )
         return success_response(
-            message="Blending store request approved by Blending Head.",
+            message="Store request approved by Head.",
             data=StockRequestSerializer(
                 stock_request,
                 context={"availability_map": availability_map_for_requests([stock_request])},
@@ -286,7 +283,7 @@ class RejectBlendingHeadRequestAPIView(generics.GenericAPIView):
             remarks=serializer.validated_data.get("remarks"),
         )
         return success_response(
-            message="Blending store request rejected by Blending Head.",
+            message="Store request rejected by Head.",
             data=StockRequestSerializer(
                 stock_request,
                 context={"availability_map": availability_map_for_requests([stock_request])},

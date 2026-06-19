@@ -21,6 +21,7 @@ from .serializers import (
     LegacyStockRequestCreateSerializer,
     StockMovementSerializer,
     StockRequestApproveSerializer,
+    StockRequestReleaseSerializer,
     StockRequestRejectSerializer,
     StockRequestSerializer,
     StoreStockSerializer,
@@ -32,7 +33,9 @@ from .services import (
     apply_outward_stock,
     approve_stock_request,
     get_store_warehouse,
+    release_stock_request,
     reject_stock_request,
+    reject_stock_release_request,
     request_stock,
 )
 
@@ -109,8 +112,23 @@ class StoreRequestApprovalListAPIView(WrappedListAPIView):
     }
     list_message = "Store request queue fetched successfully."
 
+    queue_status_map = {
+        "request_process": [StockRequest.Status.PENDING_REQUEST_PROCESS],
+        "release_stock": [StockRequest.Status.PENDING_STOCK_RELEASE],
+        "closed_won": [StockRequest.Status.CLOSED_WON],
+        "all": [
+            StockRequest.Status.PENDING_REQUEST_PROCESS,
+            StockRequest.Status.PENDING_STOCK_RELEASE,
+            StockRequest.Status.CLOSED_WON,
+            StockRequest.Status.REQUEST_REJECTED,
+            StockRequest.Status.RELEASE_REJECTED,
+        ],
+    }
+
     def get_queryset(self):
-        queryset = store_request_queryset().filter(status=StockRequest.Status.PENDING_STORE_ISSUE)
+        queue = (self.request.query_params.get("queue") or "request_process").strip().lower()
+        allowed_statuses = self.queue_status_map.get(queue, self.queue_status_map["request_process"])
+        queryset = store_request_queryset().filter(status__in=allowed_statuses)
         request_no = self.request.query_params.get("request_no")
         date_from = self.request.query_params.get("date_from")
         date_to = self.request.query_params.get("date_to")
@@ -139,7 +157,15 @@ class StoreRequestDetailAPIView(generics.RetrieveAPIView):
     lookup_field = "pk"
 
     def get_queryset(self):
-        return store_request_queryset().filter(status=StockRequest.Status.PENDING_STORE_ISSUE)
+        return store_request_queryset().filter(
+            status__in=[
+                StockRequest.Status.PENDING_REQUEST_PROCESS,
+                StockRequest.Status.PENDING_STOCK_RELEASE,
+                StockRequest.Status.CLOSED_WON,
+                StockRequest.Status.REQUEST_REJECTED,
+                StockRequest.Status.RELEASE_REJECTED,
+            ]
+        )
 
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -174,7 +200,7 @@ class ApproveStockRequestAPIView(generics.GenericAPIView):
         availability_map = availability_map_for_requests([stock_request])
 
         return success_response(
-            message="Store request reviewed successfully",
+            message="Store request processed successfully",
             data={
                 "request": StockRequestSerializer(
                     stock_request,
@@ -209,6 +235,67 @@ class RejectStockRequestAPIView(generics.GenericAPIView):
         )
         return success_response(
             message="Store request rejected successfully",
+            data={
+                "request": StockRequestSerializer(
+                    stock_request,
+                    context={"availability_map": availability_map_for_requests([stock_request])},
+                ).data
+            },
+        )
+
+
+class ReleaseStockRequestAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated, IsStoreUser]
+    serializer_class = StockRequestReleaseSerializer
+
+    def post(self, request, pk: int, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        release_result = release_stock_request(
+            pk,
+            request.user,
+            release_remarks=serializer.validated_data.get("release_remarks"),
+        )
+        stock_request = release_result["stock_request"]
+        availability_map = availability_map_for_requests([stock_request])
+
+        return success_response(
+            message="Store request released successfully",
+            data={
+                "request": StockRequestSerializer(
+                    stock_request,
+                    context={"availability_map": availability_map},
+                ).data,
+                "source_stocks": StoreStockSerializer(release_result["source_stocks"], many=True).data,
+                "destination_stocks": StoreStockSerializer(release_result["destination_stocks"], many=True).data,
+                "issue_transactions": StoreTransactionSerializer(
+                    release_result["issue_transactions"],
+                    many=True,
+                ).data,
+                "receipt_transactions": StoreTransactionSerializer(
+                    release_result["receipt_transactions"],
+                    many=True,
+                ).data,
+            },
+        )
+
+
+class RejectReleaseStockRequestAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated, IsStoreUser]
+    serializer_class = StockRequestReleaseSerializer
+
+    def post(self, request, pk: int, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        stock_request = reject_stock_release_request(
+            pk,
+            request.user,
+            release_remarks=serializer.validated_data.get("release_remarks"),
+        )
+        return success_response(
+            message="Store request rejected at release stage successfully",
             data={
                 "request": StockRequestSerializer(
                     stock_request,
@@ -305,8 +392,13 @@ class StockDashboardAPIView(generics.GenericAPIView):
     def get(self, request, *args, **kwargs):
         data = {
             "warehouse_summary": stock_dashboard_summary(),
-            "pending_store_requests": StockRequest.objects.filter(status=StockRequest.Status.PENDING_STORE_ISSUE).count(),
-            "approved_store_requests": StockRequest.objects.filter(status=StockRequest.Status.APPROVED).count(),
+            "pending_store_requests": StockRequest.objects.filter(
+                status__in=[
+                    StockRequest.Status.PENDING_REQUEST_PROCESS,
+                    StockRequest.Status.PENDING_STOCK_RELEASE,
+                ]
+            ).count(),
+            "approved_store_requests": StockRequest.objects.filter(status=StockRequest.Status.CLOSED_WON).count(),
             "stock_ledger_entries": StoreTransaction.objects.count(),
             "warehouses": StoreStock.objects.values("warehouse_id").distinct().count(),
         }

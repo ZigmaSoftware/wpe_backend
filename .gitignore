@@ -8,26 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
-
-# Environment variables - NEVER commit real .env files
 .env
-.env.*
-!.env.example
-
-# Django sensitive files
-db.sqlite3
-*.sqlite3
-media/
-staticfiles/
-
-# Logs
-*.log
-logs/
-
-# Editor
 .vscode
-.idea
-
-# Dependency lock files (optional: remove if you want to commit these)
 pyproject.toml
 uv.lock
+.env.example
