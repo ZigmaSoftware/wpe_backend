@@ -1701,7 +1701,7 @@ def validate_move_to_grn_pending(grn: GRN) -> dict[str, str]:
     for field_name, label in MOVE_TO_QCR_REQUIRED_FIELDS.items():
         value = getattr(grn, field_name, None)
         if is_blank(value):
-            errors[field_name] = f"{label} is required before moving to GRN Pending."
+            errors[field_name] = f"{label} is required before moving to QCR."
 
     raw_payload = grn.raw_payload if isinstance(grn.raw_payload, dict) else {}
     document_details = raw_payload.get("document_details")
@@ -1709,7 +1709,7 @@ def validate_move_to_grn_pending(grn: GRN) -> dict[str, str]:
     if not has_manual_gate_entry:
         for field_name, label in GRN_EDIT_REQUIRED_DOCUMENT_FIELDS.items():
             if field_name not in errors:
-                errors[field_name] = f"{label} must be entered manually before moving to GRN Pending."
+                errors[field_name] = f"{label} must be entered manually before moving to QCR."
     return errors
 
 
@@ -2107,8 +2107,6 @@ def normalize_qcr_completion_items(
 
         accepted_qty = received_qty - rejected_qty
         reason_text = str(item_payload.get("reason") or item_payload.get("rejection_reason") or "").strip()
-        if rejected_qty > 0 and not reason_text:
-            raise DRFValidationError({f"items[{index}].reason": "Reason is required when Rejected Qty is greater than zero."})
 
         sent_qty = resolve_sent_qty(item_line)
         pending_rejected_qty = Decimal("0")
@@ -2178,32 +2176,38 @@ def normalize_pending_to_qcr_items(grn: GRN, payload_items: Any) -> tuple[list[d
         raise DRFValidationError({"items": "All GRN item rows must be completed before moving to QCR."})
 
     total_received = Decimal("0")
-    total_rejected = Decimal("0")
+    total_pending_short = Decimal("0")
     normalized_items: list[dict[str, Any]] = []
+    default_store_name = grn.grn_warehouse or "QC Pending Warehouse - CBE"
 
     for index, item_line in enumerate(item_lines):
         item_payload = payload_items[index] if isinstance(payload_items[index], dict) else {}
         sent_qty = resolve_sent_qty(item_line)
         received_qty = parse_decimal_value(item_payload.get("received_qty"), field_label=f"items[{index}].received_qty")
-        store_in_id = item_payload.get("store_in_id") or item_payload.get("store_in")
-        store_in_name = item_payload.get("store_in_name") or item_payload.get("store_in_name_label") or item_payload.get("store_in")
-
-        if is_blank(store_in_id) and is_blank(store_in_name):
-            raise DRFValidationError({f"items[{index}].store_in": "Store In is required."})
+        store_in_id = item_payload.get("store_in_id") or item_payload.get("store_in") or item_line.get("store_in_id") or item_line.get("store_in")
+        store_in_name = (
+            item_payload.get("store_in_name")
+            or item_payload.get("store_in_name_label")
+            or item_payload.get("store_in")
+            or item_line.get("store_in_name")
+            or item_line.get("store_in")
+            or default_store_name
+        )
 
         if sent_qty is not None and received_qty > sent_qty:
             raise DRFValidationError({f"items[{index}].received_qty": "Received Qty cannot exceed Sent Qty."})
 
-        rejected_qty = Decimal("0") if sent_qty is None else sent_qty - received_qty
+        pending_short_qty = Decimal("0") if sent_qty is None else sent_qty - received_qty
         total_received += received_qty
-        total_rejected += rejected_qty
+        total_pending_short += pending_short_qty
 
         item_line["received_qty"] = decimal_to_string(received_qty)
         item_line["accepted_qty"] = decimal_to_string(received_qty)
-        item_line["rejected_qty"] = decimal_to_string(rejected_qty)
+        item_line["rejected_qty"] = decimal_to_string(Decimal("0"))
         item_line["store_in_id"] = store_in_id
         item_line["store_in_name"] = store_in_name or str(store_in_id)
         item_line["store_in"] = store_in_name or str(store_in_id)
+        item_line["pending_rejected_qty"] = decimal_to_string(pending_short_qty)
 
         normalized_items.append(
             {
@@ -2213,14 +2217,83 @@ def normalize_pending_to_qcr_items(grn: GRN, payload_items: Any) -> tuple[list[d
                 "unit": item_line.get("unit"),
                 "sent_qty": decimal_to_string(sent_qty) if sent_qty is not None else item_line.get("quantity") or item_line.get("total_quantity"),
                 "received_qty": decimal_to_string(received_qty),
-                "rejected_qty": decimal_to_string(rejected_qty),
+                "accepted_qty": decimal_to_string(received_qty),
+                "rejected_qty": decimal_to_string(Decimal("0")),
                 "store_in_id": store_in_id,
                 "store_in_name": store_in_name or str(store_in_id),
+                "pending_rejected_qty": decimal_to_string(pending_short_qty),
             }
         )
 
     raw_payload["items"] = item_lines
-    return normalized_items, raw_payload, total_received, total_rejected
+    return normalized_items, raw_payload, total_received, total_pending_short
+
+
+def create_qcr_record_from_gate_entry(
+    *,
+    grn: GRN,
+    payload_items: Any,
+    actor: str | None,
+    created_by=None,
+) -> tuple[GRN, QCR]:
+    if QCR.objects.filter(source_grn=grn).exists():
+        raise DRFValidationError({"message": "This GRN record has already been moved to QCR."})
+
+    normalized_items, raw_payload, total_received, total_pending_short = normalize_pending_to_qcr_items(grn, payload_items)
+    moved_at = timezone.now()
+
+    grn.raw_payload = raw_payload
+    grn.grn_pending_items = normalized_items
+    grn.accepted_qty = total_received
+    grn.rejected_qty = Decimal("0")
+    grn.process_status = MOVED_TO_QCR_STATUS
+    grn.qc_status = "Pending"
+    grn.status = False
+    grn.moved_to_qcr_at = moved_at
+    grn.moved_to_qcr_by = actor
+    grn.save(
+        update_fields=[
+            "raw_payload",
+            "grn_pending_items",
+            "accepted_qty",
+            "rejected_qty",
+            "process_status",
+            "qc_status",
+            "status",
+            "moved_to_qcr_at",
+            "moved_to_qcr_by",
+            "updated_at",
+        ]
+    )
+
+    snapshot = serialize_grn_snapshot(grn)
+    qcr_record = QCR.objects.create(
+        source_grn=grn,
+        grn_reference_no=grn.grn_no,
+        snapshot=snapshot,
+        status="Active",
+        moved_to_qcr_at=moved_at,
+        moved_to_qcr_by=actor,
+    )
+    ensure_generated_grn_no(qcr_record)
+    qcr_record.save(update_fields=["generated_grn_no", "updated_at"])
+
+    sync_payload = build_store_sync_payload_for_qcr(qcr_record=qcr_record, qcr_status=qcr_record.status, accepted=True)
+    sync_payload["target_warehouse"] = grn.grn_warehouse or "QC Pending Warehouse - CBE"
+    sync_payload["allow_pre_qcr_store_sync"] = True
+    add_stock_from_grn(sync_payload, created_by=created_by)
+
+    GRNAuditLog.objects.create(
+        grn=grn,
+        stage=GRNAuditLog.STAGE_MOVED_TO_QCR,
+        actor=actor,
+        notes=(
+            f"Moved to QCR. Received quantity stored in {grn.grn_warehouse or 'QC Pending Warehouse - CBE'}. "
+            f"Generated GRN No: {qcr_record.generated_grn_no}. Pending short quantity: {decimal_to_string(total_pending_short)}."
+        ),
+    )
+
+    return grn, qcr_record
 
 
 class GRNMoveToQCRAPIView(APIView):
@@ -2243,7 +2316,7 @@ class GRNMoveToQCRAPIView(APIView):
                     return Response(
                         {
                             "status": "error",
-                            "message": "Only Gate Entry records can be moved to GRN Pending.",
+                            "message": "Only Gate Entry records can be moved to QCR.",
                         },
                         status=status.HTTP_409_CONFLICT,
                     )
@@ -2253,34 +2326,37 @@ class GRNMoveToQCRAPIView(APIView):
                     return Response(
                         {
                             "status": "error",
-                            "message": "Mandatory fields are missing. Please complete all required fields before moving to GRN Pending.",
+                            "message": "Mandatory fields are missing. Please complete all required fields before moving to QCR.",
                             "errors": validation_errors,
                         },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
-                item_lines = ensure_grn_payload_item_lines(grn)[1]
                 moved_by = get_actor_name(request)
-                grn.process_status = GRN_PENDING_STATUS
-                grn.qc_status = "Pending"
-                grn.status = True
-                grn.grn_pending_items = build_grn_pending_items(grn, item_lines)
-                grn.save(update_fields=["process_status", "qc_status", "status", "grn_pending_items", "updated_at"])
-
-                GRNAuditLog.objects.create(
+                grn, qcr_record = create_qcr_record_from_gate_entry(
                     grn=grn,
-                    stage=GRNAuditLog.STAGE_MOVED_TO_GRN_PENDING,
+                    payload_items=request.data.get("items") if hasattr(request.data, "get") else None,
                     actor=moved_by,
-                    notes="Moved from Gate Entry to GRN Pending.",
+                    created_by=getattr(request, "user", None),
                 )
 
             return Response(
                 {
                     "status": "success",
-                    "message": "GRN record moved to GRN Pending successfully.",
+                    "message": "GRN record moved to QCR successfully.",
                     "grn": GRNSerializer(grn).data,
+                    "qcr": QCRSerializer(qcr_record).data,
                 },
-                status=status.HTTP_200_OK,
+                status=status.HTTP_201_CREATED,
+            )
+        except DRFValidationError as exc:
+            return Response(
+                {
+                    "status": "error",
+                    "message": "Validation failed",
+                    "errors": exc.detail,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
             )
         except (ProgrammingError, OperationalError) as exc:
             if is_missing_schema_error(exc):
@@ -2319,62 +2395,12 @@ class GRNPendingToQCRAPIView(APIView):
                         status=status.HTTP_409_CONFLICT,
                     )
 
-                if QCR.objects.filter(source_grn=grn).exists():
-                    return Response(
-                        {
-                            "status": "error",
-                            "message": "This GRN record has already been moved to QCR.",
-                        },
-                        status=status.HTTP_409_CONFLICT,
-                    )
-
-                normalized_items, raw_payload, total_received, total_rejected = normalize_pending_to_qcr_items(
-                    grn,
-                    request.data.get("items") if hasattr(request.data, "get") else None,
-                )
-
-                moved_at = timezone.now()
                 moved_by = get_actor_name(request)
-
-                grn.raw_payload = raw_payload
-                grn.grn_pending_items = normalized_items
-                grn.accepted_qty = total_received
-                grn.rejected_qty = total_rejected
-                grn.process_status = MOVED_TO_QCR_STATUS
-                grn.qc_status = "Pending"
-                grn.status = False
-                grn.moved_to_qcr_at = moved_at
-                grn.moved_to_qcr_by = moved_by
-                grn.save(
-                    update_fields=[
-                        "raw_payload",
-                        "grn_pending_items",
-                        "accepted_qty",
-                        "rejected_qty",
-                        "process_status",
-                        "qc_status",
-                        "status",
-                        "moved_to_qcr_at",
-                        "moved_to_qcr_by",
-                        "updated_at",
-                    ]
-                )
-
-                snapshot = serialize_grn_snapshot(grn)
-                qcr_record = QCR.objects.create(
-                    source_grn=grn,
-                    grn_reference_no=grn.grn_no,
-                    snapshot=snapshot,
-                    status="Active",
-                    moved_to_qcr_at=moved_at,
-                    moved_to_qcr_by=moved_by,
-                )
-
-                GRNAuditLog.objects.create(
+                grn, qcr_record = create_qcr_record_from_gate_entry(
                     grn=grn,
-                    stage=GRNAuditLog.STAGE_MOVED_TO_QCR,
+                    payload_items=request.data.get("items") if hasattr(request.data, "get") else None,
                     actor=moved_by,
-                    notes=f"Moved to QCR from GRN Pending. QCR ID: {qcr_record.unique_id}",
+                    created_by=getattr(request, "user", None),
                 )
 
             return Response(
@@ -2508,14 +2534,13 @@ class QCRStatusUpdateAPIView(APIView):
                         grn.qc_status = "Pass" if total_rejected == 0 else "Partial"
                         grn.status = True
                         message = (
-                            "QCR completed. Accepted quantity moved to store."
+                            "QCR completed."
                             if total_rejected == 0
-                            else "QCR completed. Only accepted quantity moved to store."
+                            else "QCR completed with partial rejection."
                         )
                         audit_stage = GRNAuditLog.STAGE_QCR_ACCEPTED
                         audit_notes = (
-                            f"QC completed with accepted quantity {decimal_to_string(total_accepted)} moved to "
-                            f"{grn.accepted_warehouse or 'Stores'}."
+                            f"QC completed with accepted quantity {decimal_to_string(total_accepted)}."
                         )
                         if total_rejected > 0:
                             audit_notes = (
@@ -2529,7 +2554,7 @@ class QCRStatusUpdateAPIView(APIView):
                         grn.status = False
                         if not qcr_record.remarks:
                             qcr_record.remarks = "All received quantity was rejected during QCR."
-                        message = "QCR completed. No accepted quantity was moved to store."
+                        message = "QCR completed. All received quantity was rejected."
                         audit_stage = GRNAuditLog.STAGE_QCR_REJECTED
                         audit_notes = (
                             "QC completed with zero accepted quantity. "
@@ -2596,7 +2621,7 @@ class QCRStatusUpdateAPIView(APIView):
                     notes=audit_notes,
                 )
 
-                if action in {"complete", "move_to_grn"} and grn.accepted_qty is not None and grn.accepted_qty > 0:
+                if action == "move_to_grn" and grn.accepted_qty is not None and grn.accepted_qty > 0:
                     sync_payload = build_store_sync_payload_for_qcr(
                         qcr_record=qcr_record,
                         qcr_status=qcr_record.status,

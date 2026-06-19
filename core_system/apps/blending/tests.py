@@ -113,7 +113,7 @@ class BlendingStoreRequestTests(APITestCase):
         self.assertEqual(head_queue.data["data"]["count"], 1)
         self.assertEqual(before_store_queue.data["data"]["count"], 0)
         self.assertEqual(approval_response.status_code, 200)
-        self.assertEqual(approval_response.data["data"]["status"], StockRequest.Status.PENDING_STORE_ISSUE)
+        self.assertEqual(approval_response.data["data"]["status"], StockRequest.Status.PENDING_REQUEST_PROCESS)
         self.assertEqual(approval_response.data["data"]["head_action_by"], self.blending_head.id)
         self.assertEqual(approval_response.data["data"]["head_approval_remarks"], "Approved for batch BL-104")
         self.assertIsNotNone(approval_response.data["data"]["head_action_at"])
@@ -161,7 +161,7 @@ class BlendingStoreRequestTests(APITestCase):
         store_queue_response = self.store_user_client.get("/api/store/requests/")
 
         self.assertEqual(approval_response.status_code, 200)
-        self.assertEqual(approval_response.data["data"]["status"], StockRequest.Status.PENDING_STORE_ISSUE)
+        self.assertEqual(approval_response.data["data"]["status"], StockRequest.Status.PENDING_REQUEST_PROCESS)
         self.assertEqual(len(approval_response.data["data"]["items"]), 1)
         self.assertEqual(approval_response.data["data"]["items"][0]["item"], first_item.id)
         self.assertEqual(Decimal(approval_response.data["data"]["items"][0]["requested_qty"]), Decimal("4.000"))

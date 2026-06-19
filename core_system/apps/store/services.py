@@ -58,6 +58,46 @@ def ensure_item_unit(item: Item) -> None:
         raise ValidationError({"item_id": "Item unit is required for inventory transactions."})
 
 
+def find_item_by_name_and_unit(*, product_description: str, unit: str) -> Item | None:
+    normalized_name = normalize_text(product_description)
+    normalized_unit = normalize_unit(unit)
+    if not normalized_name or not normalized_unit:
+        return None
+
+    unit_matches = [
+        item
+        for item in Item.objects.filter(item_name__iexact=normalized_name).order_by("id")
+        if normalize_unit(item.unit) == normalized_unit
+    ]
+    if not unit_matches:
+        return None
+    if len(unit_matches) > 1:
+        raise ValidationError(
+            {
+                "product_description": (
+                    "Multiple items with this product name and unit already exist. "
+                    "Use a unique sender item_id to identify the correct product."
+                )
+            }
+        )
+    return unit_matches[0]
+
+
+def can_adopt_source_unit(item: Item, source_unit: str) -> bool:
+    normalized_source_unit = normalize_text(source_unit)
+    if not normalized_source_unit:
+        return False
+    if normalize_unit(item.unit) == normalize_unit(normalized_source_unit):
+        return False
+    if item.opening_stock > STOCK_ZERO or item.current_stock > STOCK_ZERO:
+        return False
+    if StoreStock.objects.filter(item=item).exists():
+        return False
+    if StoreTransaction.objects.filter(item=item).exists():
+        return False
+    return True
+
+
 def require_persisted_user(user, *, field_name: str) -> None:
     if getattr(user, "pk", None) is None and getattr(user, "id", None) is None:
         raise ValidationError({field_name: "A persisted authenticated user is required for this action."})
@@ -452,7 +492,9 @@ def create_store_request(
             "issuing_warehouse",
             "requested_by",
             "action_by",
+            "head_action_by",
             "cancelled_by",
+            "release_action_by",
         )
         .prefetch_related("items__item")
         .get(pk=stock_request.pk)
@@ -513,7 +555,7 @@ def update_store_request(
             .get(pk=request_id)
         )
         if stock_request.status != StockRequest.Status.PENDING_HEAD_APPROVAL:
-            raise ValidationError({"status": "Only requests pending Blending Head approval can be edited."})
+            raise ValidationError({"status": "Only requests pending Head approval can be edited."})
 
         if stock_request.requested_by_id != getattr(requested_by, "id", None) and not user_has_role(
             requested_by,
@@ -567,7 +609,9 @@ def update_store_request(
             "issuing_warehouse",
             "requested_by",
             "action_by",
+            "head_action_by",
             "cancelled_by",
+            "release_action_by",
         )
         .prefetch_related("items__item")
         .get(pk=request_id)
@@ -585,7 +629,7 @@ def cancel_store_request(request_id: int, cancelled_by, remarks: str | None = No
             .get(pk=request_id)
         )
         if stock_request.status != StockRequest.Status.PENDING_HEAD_APPROVAL:
-            raise ValidationError({"status": "Only requests pending Blending Head approval can be cancelled."})
+            raise ValidationError({"status": "Only requests pending Head approval can be cancelled."})
 
         if stock_request.requested_by_id != getattr(cancelled_by, "id", None) and not user_has_role(
             cancelled_by,
@@ -626,12 +670,10 @@ def approve_stock_request(
             .get(pk=request_id)
         )
         if stock_request.status == StockRequest.Status.PENDING_HEAD_APPROVAL:
-            raise ValidationError({"status": "This request is pending Blending Head approval."})
-        if stock_request.status != StockRequest.Status.PENDING_STORE_ISSUE:
-            raise ValidationError({"status": "Only requests pending Store issue can be approved."})
+            raise ValidationError({"status": "This request is pending Head approval."})
+        if stock_request.status != StockRequest.Status.PENDING_REQUEST_PROCESS:
+            raise ValidationError({"status": "Only requests pending Request Process can be processed."})
 
-        issuing_warehouse = stock_request.issuing_warehouse or get_store_warehouse()
-        requesting_warehouse = stock_request.requesting_warehouse or get_blending_warehouse()
         request_items = list(stock_request.items.select_related("item").all())
 
         approval_line_map: dict[int, dict[str, Any]] = {}
@@ -646,12 +688,10 @@ def approve_stock_request(
             if missing_item_ids or extra_item_ids:
                 raise ValidationError(
                     {
-                        "items": "Each request item must have exactly one approval line.",
+                        "items": "Each request item must have exactly one process line.",
                     }
                 )
 
-        shortages = []
-        locked_source_stocks: dict[int, StoreStock] = {}
         approval_plan: list[dict[str, Any]] = []
         for request_item in request_items:
             provided_qty = request_item.requested_qty
@@ -665,7 +705,7 @@ def approve_stock_request(
                             "items": [
                                 {
                                     "item_id": request_item.item_id,
-                                    "provided_qty": "Provide Qty cannot be negative.",
+                                    "provided_qty": "Process Qty cannot be negative.",
                                 }
                             ]
                         }
@@ -676,18 +716,7 @@ def approve_stock_request(
                             "items": [
                                 {
                                     "item_id": request_item.item_id,
-                                    "provided_qty": "Provide Qty cannot exceed Requested Qty.",
-                                }
-                            ]
-                        }
-                    )
-                if provided_qty != request_item.requested_qty and not line_reason:
-                    raise ValidationError(
-                        {
-                            "items": [
-                                {
-                                    "item_id": request_item.item_id,
-                                    "remarks": "Reason is required when Provide Qty is entered.",
+                                    "provided_qty": "Process Qty cannot exceed Requested Qty.",
                                 }
                             ]
                         }
@@ -701,9 +730,94 @@ def approve_stock_request(
                 }
             )
 
-            if provided_qty <= STOCK_ZERO:
-                continue
+        if not any(plan["provided_qty"] > STOCK_ZERO for plan in approval_plan):
+            raise ValidationError({"items": "At least one item must have Process Qty greater than zero."})
 
+        for plan in approval_plan:
+            request_item = plan["request_item"]
+            provided_qty = plan["provided_qty"]
+            line_reason = plan["line_reason"]
+
+            request_item.approved_qty = provided_qty
+            request_item.issued_qty = STOCK_ZERO
+            if approval_lines is not None:
+                request_item.remarks = line_reason or None
+            request_item.save(update_fields=["approved_qty", "issued_qty", "remarks", "updated_at"])
+
+        stock_request.status = StockRequest.Status.PENDING_STOCK_RELEASE
+        stock_request.approval_remarks = normalize_text(approval_remarks) or None
+        stock_request.action_by = approver
+        stock_request.action_at = timezone.now()
+        stock_request.save(update_fields=["status", "approval_remarks", "action_by", "action_at"])
+
+    return {
+        "stock_request": (
+            StockRequest.objects.select_related(
+                "requesting_warehouse",
+                "issuing_warehouse",
+                "requested_by",
+                "action_by",
+                "head_action_by",
+                "cancelled_by",
+                "release_action_by",
+            )
+            .prefetch_related("items__item")
+            .get(pk=stock_request.pk)
+        ),
+        "source_stocks": [],
+        "destination_stocks": [],
+        "issue_transactions": [],
+        "receipt_transactions": [],
+    }
+
+
+def reject_stock_request(request_id: int, approver, approval_remarks: str | None = None) -> StockRequest:
+    require_persisted_user(approver, field_name="action_by")
+
+    with transaction.atomic():
+        stock_request = (
+            StockRequest.objects.prefetch_related("items__item")
+            .select_for_update()
+            .get(pk=request_id)
+        )
+        if stock_request.status == StockRequest.Status.PENDING_HEAD_APPROVAL:
+            raise ValidationError({"status": "This request is pending Head approval."})
+        if stock_request.status != StockRequest.Status.PENDING_REQUEST_PROCESS:
+            raise ValidationError({"status": "Only requests pending Request Process can be rejected."})
+
+        stock_request.status = StockRequest.Status.REQUEST_REJECTED
+        stock_request.approval_remarks = normalize_text(approval_remarks) or None
+        stock_request.action_by = approver
+        stock_request.action_at = timezone.now()
+        stock_request.save(update_fields=["status", "approval_remarks", "action_by", "action_at"])
+
+    return stock_request
+
+
+def release_stock_request(request_id: int, released_by, release_remarks: str | None = None) -> dict[str, Any]:
+    require_persisted_user(released_by, field_name="release_action_by")
+
+    with transaction.atomic():
+        stock_request = (
+            StockRequest.objects.select_related("requesting_warehouse", "issuing_warehouse", "requested_by")
+            .prefetch_related("items__item")
+            .select_for_update()
+            .get(pk=request_id)
+        )
+        if stock_request.status != StockRequest.Status.PENDING_STOCK_RELEASE:
+            raise ValidationError({"status": "Only requests pending Stock Release can be released."})
+
+        issuing_warehouse = stock_request.issuing_warehouse or get_store_warehouse()
+        requesting_warehouse = stock_request.requesting_warehouse or get_blending_warehouse()
+        request_items = list(stock_request.items.select_related("item").all())
+
+        release_items = [request_item for request_item in request_items if request_item.approved_qty > STOCK_ZERO]
+        if not release_items:
+            raise ValidationError({"items": "At least one processed item is required before stock release."})
+
+        shortages = []
+        locked_source_stocks: dict[int, StoreStock] = {}
+        for request_item in release_items:
             source_stock = get_current_stock(
                 item=request_item.item,
                 warehouse=issuing_warehouse,
@@ -711,15 +825,15 @@ def approve_stock_request(
             )
             locked_source_stocks[request_item.item_id] = source_stock
             available_qty = quantize_stock(source_stock.available_qty)
-            if available_qty < provided_qty:
+            if available_qty < request_item.approved_qty:
                 shortages.append(
                     {
                         "item_id": request_item.item_id,
                         "item_code": request_item.item.item_code,
                         "item_name": request_item.item.item_name,
-                        "requested_qty": provided_qty,
+                        "requested_qty": request_item.approved_qty,
                         "available_qty": available_qty,
-                        "shortage_qty": provided_qty - available_qty,
+                        "shortage_qty": request_item.approved_qty - available_qty,
                     }
                 )
 
@@ -736,20 +850,7 @@ def approve_stock_request(
         source_stocks: list[StoreStock] = []
         destination_stocks: list[StoreStock] = []
 
-        for plan in approval_plan:
-            request_item = plan["request_item"]
-            provided_qty = plan["provided_qty"]
-            line_reason = plan["line_reason"]
-
-            request_item.approved_qty = provided_qty
-            request_item.issued_qty = provided_qty
-            if approval_lines is not None:
-                request_item.remarks = line_reason or None
-            request_item.save(update_fields=["approved_qty", "issued_qty", "remarks", "updated_at"])
-
-            if provided_qty <= STOCK_ZERO:
-                continue
-
+        for request_item in release_items:
             destination_stock = get_current_stock(
                 item=request_item.item,
                 warehouse=requesting_warehouse,
@@ -760,62 +861,62 @@ def approve_stock_request(
             source_stock, issue_transaction = _apply_stock_movement(
                 item=request_item.item,
                 warehouse=issuing_warehouse,
-                quantity=provided_qty,
+                quantity=request_item.approved_qty,
                 movement_type="outward",
                 transaction_type=StoreTransaction.TransactionType.SR_ISSUE,
                 reference_type=StoreTransaction.ReferenceType.STORE_REQUEST,
                 reference_id=reference_id,
-                remarks=approval_remarks,
+                remarks=release_remarks,
                 metadata={
                     "stock_request_id": stock_request.id,
                     "stock_request_item_id": request_item.id,
+                    "department": stock_request.department,
                     "destination_warehouse": requesting_warehouse.code,
                 },
-                created_by=approver,
+                created_by=released_by,
                 transaction_date=timezone.localdate(),
                 locked_stock=locked_source_stocks[request_item.item_id],
             )
             destination_stock, receipt_transaction = _apply_stock_movement(
                 item=request_item.item,
                 warehouse=requesting_warehouse,
-                quantity=provided_qty,
+                quantity=request_item.approved_qty,
                 movement_type="inward",
                 transaction_type=StoreTransaction.TransactionType.SR_RECEIPT,
                 reference_type=StoreTransaction.ReferenceType.STORE_REQUEST,
                 reference_id=reference_id,
-                remarks=approval_remarks,
+                remarks=release_remarks,
                 metadata={
                     "stock_request_id": stock_request.id,
                     "stock_request_item_id": request_item.id,
+                    "department": stock_request.department,
                     "source_warehouse": issuing_warehouse.code,
                 },
-                created_by=approver,
+                created_by=released_by,
                 transaction_date=timezone.localdate(),
                 locked_stock=destination_stock,
             )
+
+            request_item.issued_qty = request_item.approved_qty
+            request_item.save(update_fields=["issued_qty", "updated_at"])
 
             source_stocks.append(source_stock)
             destination_stocks.append(destination_stock)
             issue_transactions.append(issue_transaction)
             receipt_transactions.append(receipt_transaction)
 
-        if approval_lines is None:
-            stock_request.status = StockRequest.Status.APPROVED
-        else:
-            approved_quantities = [plan["provided_qty"] for plan in approval_plan]
-            if all(quantity <= STOCK_ZERO for quantity in approved_quantities):
-                stock_request.status = StockRequest.Status.REJECTED
-            elif all(
-                plan["provided_qty"] == plan["request_item"].requested_qty
-                for plan in approval_plan
-            ):
-                stock_request.status = StockRequest.Status.APPROVED
-            else:
-                stock_request.status = StockRequest.Status.PARTIALLY_APPROVED
-        stock_request.approval_remarks = normalize_text(approval_remarks) or None
-        stock_request.action_by = approver
-        stock_request.action_at = timezone.now()
-        stock_request.save(update_fields=["status", "approval_remarks", "action_by", "action_at"])
+        stock_request.status = StockRequest.Status.CLOSED_WON
+        stock_request.release_remarks = normalize_text(release_remarks) or None
+        stock_request.release_action_by = released_by
+        stock_request.release_action_at = timezone.now()
+        stock_request.save(
+            update_fields=[
+                "status",
+                "release_remarks",
+                "release_action_by",
+                "release_action_at",
+            ]
+        )
 
     return {
         "stock_request": (
@@ -824,7 +925,9 @@ def approve_stock_request(
                 "issuing_warehouse",
                 "requested_by",
                 "action_by",
+                "head_action_by",
                 "cancelled_by",
+                "release_action_by",
             )
             .prefetch_related("items__item")
             .get(pk=stock_request.pk)
@@ -836,8 +939,8 @@ def approve_stock_request(
     }
 
 
-def reject_stock_request(request_id: int, approver, approval_remarks: str | None = None) -> StockRequest:
-    require_persisted_user(approver, field_name="action_by")
+def reject_stock_release_request(request_id: int, released_by, release_remarks: str | None = None) -> StockRequest:
+    require_persisted_user(released_by, field_name="release_action_by")
 
     with transaction.atomic():
         stock_request = (
@@ -845,16 +948,21 @@ def reject_stock_request(request_id: int, approver, approval_remarks: str | None
             .select_for_update()
             .get(pk=request_id)
         )
-        if stock_request.status == StockRequest.Status.PENDING_HEAD_APPROVAL:
-            raise ValidationError({"status": "This request is pending Blending Head approval."})
-        if stock_request.status != StockRequest.Status.PENDING_STORE_ISSUE:
-            raise ValidationError({"status": "Only requests pending Store issue can be rejected."})
+        if stock_request.status != StockRequest.Status.PENDING_STOCK_RELEASE:
+            raise ValidationError({"status": "Only requests pending Stock Release can be rejected."})
 
-        stock_request.status = StockRequest.Status.REJECTED
-        stock_request.approval_remarks = normalize_text(approval_remarks) or None
-        stock_request.action_by = approver
-        stock_request.action_at = timezone.now()
-        stock_request.save(update_fields=["status", "approval_remarks", "action_by", "action_at"])
+        stock_request.status = StockRequest.Status.RELEASE_REJECTED
+        stock_request.release_remarks = normalize_text(release_remarks) or None
+        stock_request.release_action_by = released_by
+        stock_request.release_action_at = timezone.now()
+        stock_request.save(
+            update_fields=[
+                "status",
+                "release_remarks",
+                "release_action_by",
+                "release_action_at",
+            ]
+        )
 
     return stock_request
 
@@ -911,6 +1019,9 @@ def resolve_grn_process_status(grn_payload: dict[str, Any]) -> str:
 
 
 def ensure_grn_ready_for_store_sync(grn_payload: dict[str, Any]) -> None:
+    if grn_payload.get("allow_pre_qcr_store_sync"):
+        return
+
     process_status = resolve_grn_process_status(grn_payload)
     if process_status not in MOVED_TO_GRN_SCOPES:
         raise ValidationError(
@@ -1055,14 +1166,19 @@ def add_stock_from_grn(grn_payload: dict[str, Any], *, created_by=None) -> dict[
 
             source_unit = line_payload.get("unit") or grn_payload.get("unit")
             if source_unit and normalize_unit(source_unit) != normalize_unit(item.unit):
-                raise ValidationError(
-                    {
-                        "unit": (
-                            f"GRN unit '{source_unit}' does not match item unit '{item.unit}' "
-                            f"for item {item.item_code}."
-                        )
-                    }
+                fallback_item = find_item_by_name_and_unit(
+                    product_description=normalize_text(
+                        line_payload.get("product_description")
+                        or line_payload.get("item_name")
+                        or grn_payload.get("product_description")
+                    ),
+                    unit=normalize_text(source_unit),
                 )
+                if fallback_item is not None and fallback_item.pk != item.pk:
+                    item = fallback_item
+                else:
+                    item.unit = normalize_text(source_unit)
+                    item.save(update_fields=["unit", "updated_at"])
 
             if use_rejected_qty:
                 raw_quantity = (
