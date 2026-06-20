@@ -43,8 +43,12 @@ _latest_weight = {
     "unit":          "kg",
     "status":        "disconnected",
     "timestamp":     None,
+    "last_seen_at":  None,
     "error":         None,
     "detected_port": None,
+    "device_id":     None,
+    "workstation_id": None,
+    "source":        "server_serial",
     "platform":      sys.platform,
 }
 _reader_thread = None
@@ -61,15 +65,23 @@ def build_scale_state(
     status: str = "disconnected",
     error: str | None = None,
     detected_port: str | None = None,
+    device_id: str | None = None,
+    workstation_id: str | None = None,
+    source: str = "server_serial",
 ) -> dict:
+    captured_at = django_timezone.localtime().isoformat()
     return {
         "raw_data": raw_data,
         "weight": weight,
         "unit": unit,
         "status": status,
-        "timestamp": django_timezone.localtime().isoformat(),
+        "timestamp": captured_at,
+        "last_seen_at": captured_at,
         "error": error,
         "detected_port": detected_port,
+        "device_id": device_id,
+        "workstation_id": workstation_id,
+        "source": source,
         "platform": sys.platform,
     }
 
@@ -416,4 +428,7 @@ def _read_loop(port: str, baud_rate: int) -> None:
 def _update_state(**kwargs) -> None:
     with _lock:
         _latest_weight.update(kwargs)
-        _latest_weight["timestamp"] = django_timezone.localtime().isoformat()
+        captured_at = django_timezone.localtime().isoformat()
+        _latest_weight["timestamp"] = captured_at
+        _latest_weight["last_seen_at"] = captured_at
+        _latest_weight["source"] = _latest_weight.get("source") or "server_serial"
