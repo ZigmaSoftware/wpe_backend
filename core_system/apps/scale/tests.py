@@ -1,7 +1,12 @@
 from types import SimpleNamespace
+from datetime import timedelta
 from unittest import TestCase
 from unittest.mock import patch
 
+from django.test import TestCase as DjangoTestCase, override_settings
+from django.utils import timezone
+
+from .models import ScaleBridgeReading
 from . import serial_reader
 
 
@@ -77,3 +82,75 @@ class ScaleDisabledStateTests(TestCase):
         self.assertEqual(payload["error"], serial_reader.SCALE_DISABLED_ERROR)
         self.assertIsNone(payload["detected_port"])
         self.assertTrue(payload["timestamp"])
+        self.assertEqual(payload["source"], "server_serial")
+
+
+@override_settings(SCALE_BRIDGE_API_KEY="bridge-secret", SCALE_BRIDGE_STALE_AFTER_SECONDS=5)
+class ScaleBridgeApiTests(DjangoTestCase):
+    def test_bridge_ingest_rejects_missing_api_key(self):
+        response = self.client.post(
+            "/api/scale/bridge/readings/",
+            data='{"device_id":"AD-WEIGH-01","workstation_id":"PC-01","status":"connected","weight":12.345}',
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(ScaleBridgeReading.objects.count(), 0)
+
+    def test_bridge_ingest_upserts_latest_reading(self):
+        response = self.client.post(
+            "/api/scale/bridge/readings/",
+            data='{"device_id":"AD-WEIGH-01","workstation_id":"PC-01","status":"connected","weight":12.345,"unit":"kg","raw_value":"ST,GS,+12.345kg","source":"local_bridge"}',
+            content_type="application/json",
+            headers={"X-Bridge-Api-Key": "bridge-secret"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        reading = ScaleBridgeReading.objects.get(device_id="AD-WEIGH-01")
+        self.assertEqual(reading.workstation_id, "PC-01")
+        self.assertEqual(str(reading.weight), "12.345")
+        self.assertEqual(reading.status, ScaleBridgeReading.Status.CONNECTED)
+
+    def test_latest_weight_returns_bridge_payload_for_selected_device(self):
+        captured_at = timezone.now()
+        last_seen_at = captured_at
+        ScaleBridgeReading.objects.create(
+            device_id="AD-WEIGH-01",
+            workstation_id="PC-01",
+            weight="25.450",
+            unit="kg",
+            status=ScaleBridgeReading.Status.CONNECTED,
+            raw_value="ST,GS,+25.450kg",
+            source="local_bridge",
+            captured_at=captured_at,
+            last_seen_at=last_seen_at,
+        )
+
+        response = self.client.get("/api/scale/weight/latest/", {"device_id": "AD-WEIGH-01"})
+        payload = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "connected")
+        self.assertEqual(payload["device_id"], "AD-WEIGH-01")
+        self.assertEqual(payload["workstation_id"], "PC-01")
+        self.assertEqual(payload["source"], "local_bridge")
+
+    def test_latest_weight_reports_bridge_not_reporting_when_stale(self):
+        captured_at = timezone.now() - timedelta(seconds=30)
+        ScaleBridgeReading.objects.create(
+            device_id="AD-WEIGH-01",
+            workstation_id="PC-01",
+            weight="25.450",
+            unit="kg",
+            status=ScaleBridgeReading.Status.CONNECTED,
+            source="local_bridge",
+            captured_at=captured_at,
+            last_seen_at=captured_at,
+        )
+
+        response = self.client.get("/api/scale/weight/latest/", {"device_id": "AD-WEIGH-01"})
+        payload = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "bridge_not_reporting")
+        self.assertEqual(payload["device_id"], "AD-WEIGH-01")

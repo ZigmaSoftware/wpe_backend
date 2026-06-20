@@ -579,6 +579,19 @@ def get_production_scancode_timezone():
         return ZoneInfo("Asia/Kolkata")
 
 
+def extract_weight_capture_metadata(request):
+    device_id = str(request.data.get("device_id") or "").strip()
+    workstation_id = str(request.data.get("workstation_id") or "").strip()
+    weight_source = str(request.data.get("source") or request.data.get("weight_source") or "").strip()
+    if not weight_source:
+        weight_source = "local_bridge" if device_id or workstation_id else "server_serial"
+    return {
+        "device_id": device_id,
+        "workstation_id": workstation_id,
+        "weight_source": weight_source,
+    }
+
+
 def _bom_component_source_key_from_payload(payload):
     if payload["product_subtype"] is not None:
         return ("product_subtype", payload["product_subtype"].pk)
@@ -1570,6 +1583,7 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
             production_order=batch.production_order
         ).values_list("sequence", flat=True)
         next_sequence = max(existing_sequences, default=0) + 1
+        metadata = extract_weight_capture_metadata(self.request)
 
         capture, _ = ProductionOutputCapture.objects.get_or_create(
             source_batch=batch,
@@ -1582,6 +1596,9 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
                 "weight_kg": total_weight,
                 "binlot": str(batch.batch_no or ""),
                 "session_key": self._build_output_session_key(entries),
+                "device_id": metadata["device_id"],
+                "workstation_id": metadata["workstation_id"],
+                "weight_source": metadata["weight_source"],
                 "captured_at": captured_at,
             },
         )
@@ -1968,6 +1985,7 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
                 .filter(source_batch=batch)
                 .first()
             )
+            metadata = extract_weight_capture_metadata(request)
             if existing_capture is None:
                 if batch.status == ProductionBatch.BatchStatus.COMPLETED:
                     return success_response(
@@ -2008,6 +2026,9 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
                     weight_kg=weight_kg,
                     binlot=assigned_binlot,
                     session_key=self._build_manual_output_session_key(batch, weight_kg, captured_at),
+                    device_id=metadata["device_id"],
+                    workstation_id=metadata["workstation_id"],
+                    weight_source=metadata["weight_source"],
                     captured_at=captured_at,
                 )
                 created = True
