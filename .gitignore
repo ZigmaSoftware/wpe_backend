@@ -8,8 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
-.env
+# .env
 .vscode
 pyproject.toml
 uv.lock
-.env.example
+# .env.example

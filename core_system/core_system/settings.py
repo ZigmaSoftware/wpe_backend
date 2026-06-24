@@ -67,6 +67,7 @@ CORS_ALLOWED_ORIGINS = ensure_list_values(CORS_ALLOWED_ORIGINS, [LIVE_FRONTEND_O
 CSRF_TRUSTED_ORIGINS = ensure_list_values(CSRF_TRUSTED_ORIGINS, [LIVE_FRONTEND_ORIGIN])
 
 INSTALLED_APPS = [
+    "daphne",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -75,6 +76,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
     "corsheaders",
+    "channels",
     "rest_framework_simplejwt.token_blacklist",
     "django_filters",
     "apps.login_home.apps.LoginHomeConfig",
@@ -90,6 +92,7 @@ INSTALLED_APPS = [
     "apps.scale.apps.ScaleConfig",
     "apps.inventory.apps.InventoryConfig",
     "grn_app.apps.PurchasesIwardsConfig",
+    "apps.weighscale.apps.WeighscaleConfig",
 ]
 
 MIDDLEWARE = [
@@ -214,4 +217,9 @@ SERIAL_PORT      = os.getenv("SERIAL_PORT", "AUTO")
 SERIAL_BAUD_RATE = int(os.getenv("SERIAL_BAUD_RATE", "9600"))
 SCALE_BRIDGE_API_KEY = os.getenv("SCALE_BRIDGE_API_KEY", "").strip()
 SCALE_BRIDGE_STALE_AFTER_SECONDS = int(os.getenv("SCALE_BRIDGE_STALE_AFTER_SECONDS", "5"))
-SCALE_BRIDGE_DEMAND_TIMEOUT_SECONDS = int(os.getenv("SCALE_BRIDGE_DEMAND_TIMEOUT_SECONDS", "6"))
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels.layers.InMemoryChannelLayer",
+    }
+}
