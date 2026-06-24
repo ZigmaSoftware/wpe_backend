@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import re
 import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -20,6 +22,7 @@ CH340_VID = 0x1A86
 CH340_PID = 0x7523
 CONNECTED_STATUSES = {"connected"}
 RETRY_DELAY_SECONDS = 3
+BACKEND_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 
 
 @dataclass
@@ -46,10 +49,10 @@ class BridgeState:
 
 
 def load_config() -> BridgeConfig:
-    load_dotenv()
+    load_dotenv(BACKEND_ENV_PATH)
     config = BridgeConfig(
         server_url=os.getenv("WPE_SERVER_URL", "").strip().rstrip("/"),
-        bridge_api_key=os.getenv("BRIDGE_API_KEY", "").strip(),
+        bridge_api_key=os.getenv("SCALE_BRIDGE_API_KEY", os.getenv("BRIDGE_API_KEY", "")).strip(),
         device_id=os.getenv("DEVICE_ID", "").strip(),
         workstation_id=os.getenv("WORKSTATION_ID", "").strip(),
         serial_port=os.getenv("SERIAL_PORT", "AUTO").strip() or "AUTO",
@@ -61,7 +64,7 @@ def load_config() -> BridgeConfig:
         name
         for name, value in (
             ("WPE_SERVER_URL", config.server_url),
-            ("BRIDGE_API_KEY", config.bridge_api_key),
+            ("SCALE_BRIDGE_API_KEY", config.bridge_api_key),
             ("DEVICE_ID", config.device_id),
             ("WORKSTATION_ID", config.workstation_id),
         )
@@ -119,6 +122,18 @@ def find_auto_port() -> str | None:
 
     candidates = [port for port in ports if is_candidate_port(port)]
     return candidates[0].device if candidates else None
+
+
+def describe_available_ports() -> str:
+    ports = list_available_ports()
+    if not ports:
+        return "none detected"
+
+    return ", ".join(
+        f"{port.device} ({port.description or 'no description'}, "
+        f"VID={hex(port.vid) if port.vid else '-'}, PID={hex(port.pid) if port.pid else '-'})"
+        for port in ports
+    )
 
 
 def parse_weight_data(raw_line: str) -> dict[str, str] | None:
@@ -240,11 +255,15 @@ def main() -> None:
     last_valid_read_at = 0.0
 
     logging.info(
-        "Scale bridge started for device=%s workstation=%s server=%s port=%s",
+        "Scale bridge started: os=%s platform=%s device=%s workstation=%s server=%s port=%s baud_rate=%s visible_ports=%s",
+        platform.platform(),
+        sys.platform,
         config.device_id,
         config.workstation_id,
         config.server_url,
         config.serial_port,
+        config.serial_baud_rate,
+        describe_available_ports(),
     )
 
     while True:
