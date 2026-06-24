@@ -1,4 +1,3 @@
-import hmac
 import json
 import sys
 from datetime import timedelta
@@ -12,17 +11,9 @@ from django.utils.dateparse import parse_datetime
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
+import hmac
 
 from .models import ScaleBridgeReading
-from .serial_reader import (
-    _reader_thread,
-    find_auto_port,
-    get_disabled_weight,
-    get_latest_weight,
-    list_available_ports,
-    start_serial_reader,
-    stop_serial_reader,
-)
 
 BRIDGE_STATUSES = {
     ScaleBridgeReading.Status.CONNECTED,
@@ -32,14 +23,12 @@ BRIDGE_STATUSES = {
     ScaleBridgeReading.Status.INVALID_READING,
     ScaleBridgeReading.Status.BRIDGE_NOT_REPORTING,
 }
-SERVER_CONNECTED_STATUSES = {"connected", "stable", "unstable", "overload"}
 
 
 def _bridge_api_key_is_valid(request) -> bool:
     configured_key = getattr(settings, "SCALE_BRIDGE_API_KEY", "").strip()
     if not configured_key:
         return False
-
     provided_key = request.headers.get("X-Bridge-API-Key", "").strip()
     return bool(provided_key) and hmac.compare_digest(provided_key, configured_key)
 
@@ -73,11 +62,7 @@ def _parse_captured_at(value: Any):
     return parsed
 
 
-def _build_bridge_payload(
-    reading: ScaleBridgeReading,
-    *,
-    stale: bool,
-) -> dict[str, Any]:
+def _build_bridge_payload(reading: ScaleBridgeReading, *, stale: bool) -> dict[str, Any]:
     if stale:
         return {
             "status": ScaleBridgeReading.Status.BRIDGE_NOT_REPORTING,
@@ -121,7 +106,7 @@ def _get_bridge_reading(*, device_id: str | None, workstation_id: str | None) ->
 
 
 class LatestWeightView(View):
-    """GET /api/scale/weight/latest/ — returns latest bridge or server-side serial reading."""
+    """GET /api/scale/weight/latest/ — returns latest bridge reading."""
 
     http_method_names = ["get"]
 
@@ -129,78 +114,43 @@ class LatestWeightView(View):
         device_id = str(request.GET.get("device_id") or "").strip() or None
         workstation_id = str(request.GET.get("workstation_id") or "").strip() or None
 
-        if device_id or workstation_id:
-            reading = _get_bridge_reading(device_id=device_id, workstation_id=workstation_id)
-            if reading is None:
-                return JsonResponse({
-                    "status": ScaleBridgeReading.Status.BRIDGE_NOT_REPORTING,
-                    "error": "No latest reading received from local bridge",
-                    "device_id": device_id,
-                    "workstation_id": workstation_id,
-                    "weight": "0.000",
-                    "unit": "kg",
-                    "source": "local_bridge",
-                    "last_seen_at": None,
-                    "platform": sys.platform,
-                })
+        reading = _get_bridge_reading(device_id=device_id, workstation_id=workstation_id)
+        if reading is None:
+            return JsonResponse({
+                "status": ScaleBridgeReading.Status.BRIDGE_NOT_REPORTING,
+                "error": "No reading received from local bridge",
+                "device_id": device_id,
+                "workstation_id": workstation_id,
+                "weight": "0.000",
+                "unit": "kg",
+                "source": "local_bridge",
+                "last_seen_at": None,
+                "platform": sys.platform,
+            })
 
-            stale_after_seconds = int(getattr(settings, "SCALE_BRIDGE_STALE_AFTER_SECONDS", 5))
-            stale = timezone.now() - reading.last_seen_at > timedelta(seconds=stale_after_seconds)
-            return JsonResponse(_build_bridge_payload(reading, stale=stale))
-
-        if not getattr(settings, "SCALE_ENABLED", True):
-            return JsonResponse(get_disabled_weight())
-
-        port = getattr(settings, "SERIAL_PORT", "AUTO")
-        baud = getattr(settings, "SERIAL_BAUD_RATE", 9600)
-
-        if port == "AUTO":
-            detected = find_auto_port()
-            if detected:
-                if not (_reader_thread and _reader_thread.is_alive()):
-                    start_serial_reader(port=port, baud_rate=baud)
-            else:
-                if _reader_thread and _reader_thread.is_alive():
-                    stop_serial_reader()
-                captured_at = timezone.localtime().isoformat()
-                return JsonResponse({
-                    "status": "disconnected",
-                    "weight": "0.000",
-                    "unit": "kg",
-                    "error": "No USB-to-Serial device connected.",
-                    "timestamp": captured_at,
-                    "last_seen_at": captured_at,
-                    "source": "server_serial",
-                    "device_id": None,
-                    "workstation_id": None,
-                    "platform": sys.platform,
-                })
-        else:
-            if not (_reader_thread and _reader_thread.is_alive()):
-                start_serial_reader(port=port, baud_rate=baud)
-
-        data = get_latest_weight()
-        if not data.get("timestamp"):
-            captured_at = timezone.localtime().isoformat()
-            data["timestamp"] = captured_at
-            data["last_seen_at"] = captured_at
-        data.setdefault("source", "server_serial")
-        data.setdefault("device_id", None)
-        data.setdefault("workstation_id", None)
-        return JsonResponse(data)
+        stale_after_seconds = int(getattr(settings, "SCALE_BRIDGE_STALE_AFTER_SECONDS", 5))
+        stale = timezone.now() - reading.last_seen_at > timedelta(seconds=stale_after_seconds)
+        return JsonResponse(_build_bridge_payload(reading, stale=stale))
 
 
 class ListPortsView(View):
-    """GET /api/scale/ports/ — lists serial ports visible to the OS (debug helper)."""
+    """GET /api/scale/ports/ — lists serial ports visible to the OS."""
 
     http_method_names = ["get"]
 
     def get(self, request, *args, **kwargs):
-        return JsonResponse({
-            "scale_enabled": getattr(settings, "SCALE_ENABLED", True),
-            "platform": sys.platform,
-            "ports": list_available_ports(),
-        })
+        import serial.tools.list_ports
+        ports = [
+            {
+                "device": p.device,
+                "description": p.description or "",
+                "vid": hex(p.vid) if p.vid else None,
+                "pid": hex(p.pid) if p.pid else None,
+                "serial_no": p.serial_number or "",
+            }
+            for p in serial.tools.list_ports.comports()
+        ]
+        return JsonResponse({"platform": sys.platform, "ports": ports})
 
 
 class ScaleBridgeDevicesView(View):
