@@ -128,6 +128,60 @@ def list_available_ports() -> list[dict]:
     ]
 
 
+def get_scale_port_decision(port) -> tuple[bool, str]:
+    if port.vid == CH340_VID and port.pid == CH340_PID:
+        return True, "CH340 USB-to-Serial adapter matched"
+
+    device = str(getattr(port, "device", "") or "").strip()
+    metadata = _port_metadata(port)
+
+    if sys.platform.startswith("linux"):
+        if device.startswith("/dev/ttyUSB") or device.startswith("/dev/ttyACM") or "/dev/serial/" in device:
+            return True, "Linux USB/ACM serial adapter accepted"
+        if device.startswith("/dev/ttyS"):
+            return False, "Linux built-in serial port ignored; connect USB scale adapter or set SERIAL_PORT explicitly"
+        return False, "Linux port does not look like an external USB scale adapter"
+
+    if sys.platform == "darwin":
+        accepted = (
+            device.startswith("/dev/tty.usb")
+            or device.startswith("/dev/cu.usb")
+            or "wch" in metadata
+            or "usbserial" in metadata
+        )
+        return (
+            accepted,
+            "macOS USB serial adapter accepted" if accepted else "macOS port does not look like a USB serial adapter",
+        )
+
+    if sys.platform == "win32":
+        accepted = device.upper().startswith("COM")
+        return accepted, "Windows COM port accepted" if accepted else "Windows port is not a COM port"
+
+    accepted = any(keyword in metadata for keyword in ("usb", "serial", "uart", "ch340", "ftdi", "cp210", "pl2303"))
+    return accepted, "serial metadata accepted" if accepted else "serial metadata did not match known adapter keywords"
+
+
+def describe_port_decision(port) -> str:
+    accepted, reason = get_scale_port_decision(port)
+    return (
+        f"{getattr(port, 'device', '')} "
+        f"(description={getattr(port, 'description', '') or 'no description'}, "
+        f"VID={hex(port.vid) if getattr(port, 'vid', None) else '-'}, "
+        f"PID={hex(port.pid) if getattr(port, 'pid', None) else '-'}, "
+        f"candidate={'yes' if accepted else 'no'}, reason={reason})"
+    )
+
+
+def get_port_diagnostics() -> list[str]:
+    return [describe_port_decision(port) for port in serial.tools.list_ports.comports()]
+
+
+def format_port_diagnostics() -> str:
+    diagnostics = get_port_diagnostics()
+    return "; ".join(diagnostics) if diagnostics else "none detected"
+
+
 def get_platform_default_port() -> str:
     return _PLATFORM_FALLBACKS.get(sys.platform, "/dev/ttyUSB0")
 
@@ -148,27 +202,7 @@ def _port_metadata(port) -> str:
 
 
 def is_candidate_scale_port(port) -> bool:
-    if port.vid == CH340_VID and port.pid == CH340_PID:
-        return True
-
-    device = str(getattr(port, "device", "") or "").strip()
-    metadata = _port_metadata(port)
-
-    if sys.platform.startswith("linux"):
-        return device.startswith("/dev/ttyUSB") or device.startswith("/dev/ttyACM") or "/dev/serial/" in device
-
-    if sys.platform == "darwin":
-        return (
-            device.startswith("/dev/tty.usb")
-            or device.startswith("/dev/cu.usb")
-            or "wch" in metadata
-            or "usbserial" in metadata
-        )
-
-    if sys.platform == "win32":
-        return device.upper().startswith("COM")
-
-    return any(keyword in metadata for keyword in ("usb", "serial", "uart", "ch340", "ftdi", "cp210", "pl2303"))
+    return get_scale_port_decision(port)[0]
 
 
 def _prune_failed_ports() -> None:
@@ -226,28 +260,30 @@ def find_auto_port() -> str | None:
     for port in preferred_ports:
         if _is_port_in_cooldown(port.device):
             continue
-        logger.info("AUTO: Using CH340 port %s (%s).", port.device, port.description or "no description")
+        logger.warning(
+            "AUTO: Scale indicator candidate selected: %s",
+            describe_port_decision(port),
+        )
         return port.device
 
     candidates = [port for port in available if is_candidate_scale_port(port) and not _is_port_in_cooldown(port.device)]
     if not candidates:
         _warn_no_ports_once(
-            "AUTO: No suitable external serial ports available on %s. Visible ports: %s",
+            "AUTO: No scale indicator port selected on %s. Port diagnostics: %s",
             sys.platform,
-            [port.device for port in available] or ["none"],
+            format_port_diagnostics(),
         )
         return None
 
     chosen = candidates[0].device
-    logger.info(
-        "AUTO: CH340 not found. Using candidate port: %s (%s).",
-        chosen,
-        candidates[0].description or "no description",
+    logger.warning(
+        "AUTO: CH340 not found. Scale indicator candidate selected: %s",
+        describe_port_decision(candidates[0]),
     )
     if len(candidates) > 1:
-        logger.debug(
+        logger.warning(
             "AUTO: Other candidate ports (not selected): %s",
-            [p.device for p in candidates[1:]],
+            "; ".join(describe_port_decision(port) for port in candidates[1:]),
         )
     return chosen
 
@@ -267,7 +303,7 @@ def start_serial_reader(port: str = "AUTO", baud_rate: int = 9600) -> None:
         daemon=True,
     )
     _reader_thread.start()
-    logger.info("Serial reader started. port=%r baud=%d platform=%s", port, baud_rate, sys.platform)
+    logger.warning("Serial reader started. configured_port=%r baud=%d platform=%s", port, baud_rate, sys.platform)
 
 
 def stop_serial_reader() -> None:
@@ -350,7 +386,7 @@ def _read_loop(port: str, baud_rate: int) -> None:
                         retry_delay = min(retry_delay * 2, 60)
                         continue
 
-                logger.info("Opening %s at %d baud…", active_port, baud_rate)
+                logger.warning("Opening scale indicator serial port: port=%s baud_rate=%d", active_port, baud_rate)
                 ser = serial.Serial(
                     port=active_port,
                     baudrate=baud_rate,
@@ -359,7 +395,7 @@ def _read_loop(port: str, baud_rate: int) -> None:
                     stopbits=serial.STOPBITS_ONE,
                     timeout=1,
                 )
-                logger.info("Opened %s successfully.", active_port)
+                logger.warning("Scale indicator serial port connected: port=%s baud_rate=%d", active_port, baud_rate)
                 retry_delay = 3
                 _update_state(status="connected", error=None, detected_port=active_port)
 
