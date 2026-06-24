@@ -12,7 +12,7 @@ from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
 from apps.items.models import Item
-from apps.store.models import StoreStock, StoreTransaction
+from apps.store.models import StoreStock, StoreTransaction, Warehouse
 from .models import GRN, QCR
 
 
@@ -622,7 +622,38 @@ class GRNQCRFlowTests(TestCase):
         self.client = APIClient()
         self.client.credentials(HTTP_X_API_KEY="test-internal-key")
 
+    def ensure_qcr_workflow_warehouses(self):
+        qc_pending, _ = Warehouse.objects.get_or_create(
+            code="QC_PENDING_CBE",
+            defaults={
+                "name": "QC Pending Warehouse - CBE",
+                "warehouse_type": Warehouse.WarehouseType.QC_PENDING,
+                "is_active": True,
+                "is_system": True,
+            },
+        )
+        store, _ = Warehouse.objects.get_or_create(
+            code="STORE",
+            defaults={
+                "name": "Main Store",
+                "warehouse_type": Warehouse.WarehouseType.STORE,
+                "is_active": True,
+                "is_system": True,
+            },
+        )
+        rejected, _ = Warehouse.objects.get_or_create(
+            code="REJECTED_CBE",
+            defaults={
+                "name": "Rejected Warehouse - CBE",
+                "warehouse_type": Warehouse.WarehouseType.REJECTED,
+                "is_active": True,
+                "is_system": True,
+            },
+        )
+        return qc_pending, store, rejected
+
     def create_active_qcr_record(self, *, grn_no="GRN-QCR-001"):
+        qc_pending, _store, _rejected = self.ensure_qcr_workflow_warehouses()
         raw_payload = {
             "document_details": {
                 "grn_no": grn_no,
@@ -640,8 +671,8 @@ class GRNQCRFlowTests(TestCase):
                     "accepted_qty": "9",
                     "rejected_qty": "1",
                     "unit": "kg",
-                    "store_in_id": "1",
-                    "store_in_name": "Main Store",
+                    "store_in_id": str(qc_pending.id),
+                    "store_in_name": qc_pending.name,
                 },
                 {
                     "item_id": f"{grn_no}-ITEM-2",
@@ -651,8 +682,8 @@ class GRNQCRFlowTests(TestCase):
                     "accepted_qty": "5",
                     "rejected_qty": "0",
                     "unit": "kg",
-                    "store_in_id": "2",
-                    "store_in_name": "QC Rack",
+                    "store_in_id": str(qc_pending.id),
+                    "store_in_name": qc_pending.name,
                 },
             ],
         }
@@ -664,8 +695,8 @@ class GRNQCRFlowTests(TestCase):
                 "unit": "kg",
                 "sent_qty": "10.000",
                 "received_qty": "9",
-                "store_in_id": "1",
-                "store_in_name": "Main Store",
+                "store_in_id": str(qc_pending.id),
+                "store_in_name": qc_pending.name,
             },
             {
                 "line_index": 1,
@@ -674,10 +705,32 @@ class GRNQCRFlowTests(TestCase):
                 "unit": "kg",
                 "sent_qty": "5.000",
                 "received_qty": "5",
-                "store_in_id": "2",
-                "store_in_name": "QC Rack",
+                "store_in_id": str(qc_pending.id),
+                "store_in_name": qc_pending.name,
             },
         ]
+        first_item = Item.objects.create(
+            category="GRN Imported",
+            group="Inbound GRN",
+            sub_group="Auto Created",
+            item_name="QCR Line Item 1",
+            external_item_id=f"{grn_no}-ITEM-1",
+            unit="kg",
+            opening_stock="0.000",
+            current_stock="0.000",
+        )
+        second_item = Item.objects.create(
+            category="GRN Imported",
+            group="Inbound GRN",
+            sub_group="Auto Created",
+            item_name="QCR Line Item 2",
+            external_item_id=f"{grn_no}-ITEM-2",
+            unit="kg",
+            opening_stock="0.000",
+            current_stock="0.000",
+        )
+        StoreStock.objects.create(item=first_item, warehouse=qc_pending, available_qty="9.000", reserved_qty="0.000")
+        StoreStock.objects.create(item=second_item, warehouse=qc_pending, available_qty="5.000", reserved_qty="0.000")
         grn = GRN.objects.create(
             grn_no=grn_no,
             grn_date=date(2026, 5, 5),
@@ -1119,7 +1172,7 @@ class GRNQCRFlowTests(TestCase):
             1,
         )
 
-    def test_qcr_complete_saves_item_results_without_posting_store_stock(self):
+    def test_qcr_complete_posts_accepted_and_rejected_stock_for_every_item(self):
         grn, qcr = self.create_active_qcr_record(grn_no="GRN-108")
 
         response = self.client.post(
@@ -1155,17 +1208,36 @@ class GRNQCRFlowTests(TestCase):
         self.assertEqual(grn.raw_payload["items"][0]["rejected_qty"], "2")
         self.assertEqual(grn.raw_payload["items"][0]["rejection_reason"], "Damaged during inspection")
 
-        self.assertEqual(StoreStock.objects.count(), 0)
-        self.assertEqual(StoreTransaction.objects.count(), 0)
+        qc_pending = Warehouse.objects.get(code="QC_PENDING_CBE")
+        store = Warehouse.objects.get(code="STORE")
+        rejected = Warehouse.objects.get(code="REJECTED_CBE")
+        first_item = Item.objects.get(external_item_id="GRN-108-ITEM-1")
+        second_item = Item.objects.get(external_item_id="GRN-108-ITEM-2")
+
+        self.assertEqual(str(StoreStock.objects.get(item=first_item, warehouse=qc_pending).quantity), "0.000")
+        self.assertEqual(str(StoreStock.objects.get(item=second_item, warehouse=qc_pending).quantity), "0.000")
+        self.assertEqual(str(StoreStock.objects.get(item=first_item, warehouse=store).quantity), "7.000")
+        self.assertEqual(str(StoreStock.objects.get(item=second_item, warehouse=store).quantity), "5.000")
+        self.assertEqual(str(StoreStock.objects.get(item=first_item, warehouse=rejected).quantity), "2.000")
+        self.assertEqual(StoreStock.objects.filter(warehouse=store).count(), 2)
+        self.assertEqual(StoreStock.objects.filter(warehouse=rejected).count(), 1)
         self.assertEqual(
             StoreTransaction.objects.filter(
-                transaction_type=StoreTransaction.TransactionType.GRN_INWARD,
+                transaction_type=StoreTransaction.TransactionType.SR_ISSUE,
                 reference_type=StoreTransaction.ReferenceType.GRN,
             ).count(),
-            0,
+            3,
+        )
+        self.assertEqual(
+            StoreTransaction.objects.filter(
+                transaction_type=StoreTransaction.TransactionType.SR_RECEIPT,
+                reference_type=StoreTransaction.ReferenceType.GRN,
+            ).count(),
+            3,
         )
 
     def test_qcr_complete_uses_product_name_when_external_item_id_points_to_different_item(self):
+        qc_pending, _store, _rejected = self.ensure_qcr_workflow_warehouses()
         Item.objects.create(
             category="GRN Imported",
             group="Inbound GRN",
@@ -1176,6 +1248,16 @@ class GRNQCRFlowTests(TestCase):
             opening_stock="0.000",
             current_stock="0.000",
         )
+        resolved_item = Item.objects.create(
+            category="GRN Imported",
+            group="Inbound GRN",
+            sub_group="Auto Created",
+            item_name="Dell Server Rack",
+            unit="NOS",
+            opening_stock="0.000",
+            current_stock="0.000",
+        )
+        StoreStock.objects.create(item=resolved_item, warehouse=qc_pending, available_qty="10.000", reserved_qty="0.000")
         raw_payload = {
             "document_details": {
                 "grn_no": "GRN-108-CONFLICT",
@@ -1193,8 +1275,8 @@ class GRNQCRFlowTests(TestCase):
                     "accepted_qty": "10",
                     "rejected_qty": "0",
                     "unit": "NOS",
-                    "store_in_id": "1",
-                    "store_in_name": "Main Store",
+                    "store_in_id": str(qc_pending.id),
+                    "store_in_name": qc_pending.name,
                 }
             ],
         }
@@ -1206,8 +1288,8 @@ class GRNQCRFlowTests(TestCase):
                 "unit": "NOS",
                 "sent_qty": "10.000",
                 "received_qty": "10",
-                "store_in_id": "1",
-                "store_in_name": "Main Store",
+                "store_in_id": str(qc_pending.id),
+                "store_in_name": qc_pending.name,
             }
         ]
         grn = GRN.objects.create(
@@ -1251,12 +1333,12 @@ class GRNQCRFlowTests(TestCase):
 
         conflicting_item = Item.objects.get(external_item_id="ITEM001")
         resolved_item = Item.objects.get(item_name="Dell Server Rack")
-        stock_row = StoreStock.objects.get(item=resolved_item)
+        stock_row = StoreStock.objects.get(item=resolved_item, warehouse=Warehouse.objects.get(code="STORE"))
 
         self.assertEqual(conflicting_item.item_name, "Test Product Description")
         self.assertIsNone(resolved_item.external_item_id)
         self.assertEqual(str(stock_row.quantity), "8.000")
-        self.assertFalse(StoreStock.objects.filter(item=conflicting_item).exists())
+        self.assertFalse(StoreStock.objects.filter(item=conflicting_item, warehouse=Warehouse.objects.get(code="STORE")).exists())
 
     def test_qcr_complete_allows_blank_reason_when_rejected_qty_is_positive(self):
         _grn, qcr = self.create_active_qcr_record(grn_no="GRN-109")
@@ -1330,6 +1412,37 @@ class GRNQCRFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json()), 1)
         self.assertEqual(response.json()[0]["id"], active_qcr.id)
+
+    def test_completed_qcr_endpoint_returns_one_record_with_all_item_lines(self):
+        _grn, qcr = self.create_active_qcr_record(grn_no="GRN-111")
+
+        update_response = self.client.post(
+            f"/api/qcr/{qcr.id}/status/",
+            {
+                "action": "complete",
+                "items": [
+                    {"line_index": 0, "rejected_qty": "2", "reason": "Damaged during inspection"},
+                    {"line_index": 1, "rejected_qty": "0", "reason": ""},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+
+        completed_response = self.client.get("/api/qcr/completed/")
+
+        self.assertEqual(completed_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(completed_response.json()), 1)
+        row = completed_response.json()[0]
+        self.assertEqual(row["generated_grn_no"], "GRN - WPE - 0001")
+        self.assertEqual(len(row["items"]), 2)
+        self.assertEqual(row["items"][0]["item_name"], "QCR Line Item 1")
+        self.assertEqual(row["items"][0]["accepted_qty"], "7")
+        self.assertEqual(row["items"][0]["rejected_qty"], "2")
+        self.assertEqual(row["items"][1]["item_name"], "QCR Line Item 2")
+        self.assertEqual(row["items"][1]["accepted_qty"], "5")
+        self.assertEqual(row["source_grn_data"]["items"][1]["product_description"], "QCR Line Item 2")
 
     def test_rejected_qcr_records_are_listed_in_cancelled_tab_view(self):
         grn = GRN.objects.create(grn_no="GRN-106", status=False, process_status="Moved to QCR")

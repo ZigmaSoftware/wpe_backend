@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -10,6 +11,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.items.models import Item
 from apps.production.models import BagCreationMaster, BatchWeightEntry, BinCreationMaster, BOMVariant, BOMVariantComponent, ProductionBatch, ProductionOutputCapture, ProductionOrder, ProductionOrderMaterialPlan
+from apps.inventory.models import ProductionInventoryTransaction
 from apps.wpe_masters.models import ProductTypeCategory, ProductTypeSubtype, ProductionTypeMaster
 
 
@@ -530,6 +532,136 @@ class ProductionBatchStageTransitionTests(APITestCase):
         self.assertEqual(second_order_first_batch.data["data"]["batch_no"], "BATCH02-0001")
         self.assertEqual(second_order_first_batch.data["data"]["display_batch_no"], "BATCH02-0001")
 
+    def test_next_code_returns_stage_specific_prefixed_sequence(self):
+        ProductionOrder.objects.create(
+            production_id="AD01",
+            production_type="WPE Additive Production",
+            production_date=date.today(),
+            extra_form_data={"stage": "AD", "next_workflow_stage": "-"},
+        )
+        ProductionOrder.objects.create(
+            production_id="AD02",
+            production_type="WPE Additive Production",
+            production_date=date.today(),
+            extra_form_data={"stage": "AD", "next_workflow_stage": "-"},
+        )
+        ProductionOrder.objects.create(
+            production_id="BL09",
+            production_type="WPE Blend Production",
+            production_date=date.today(),
+            extra_form_data={"stage": "BL", "next_workflow_stage": "-"},
+        )
+
+        ad_response = self.client.get("/api/production/production/next-code/", {"stage": "AD"})
+        self.assertEqual(ad_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(ad_response.data["code"], "AD03")
+
+        bl_response = self.client.get("/api/production/production/next-code/", {"stage": "BL"})
+        self.assertEqual(bl_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(bl_response.data["code"], "BL10")
+
+    def test_stage_records_show_only_orders_owned_by_requested_stage(self):
+        ad_order = ProductionOrder.objects.create(
+            production_id="AD11",
+            production_type="WPE Additive Production",
+            production_date=date.today(),
+            extra_form_data={"stage": "AD", "next_workflow_stage": "-"},
+        )
+        bl_order = ProductionOrder.objects.create(
+            production_id="BL07",
+            production_type="WPE Blend Production",
+            production_date=date.today(),
+            extra_form_data={"stage": "BL", "next_workflow_stage": "-"},
+        )
+
+        ProductionInventoryTransaction.objects.create(
+            movement_key=f"test-stage-owner-{self.unique_suffix}",
+            stage=ProductionInventoryTransaction.Stage.BLEND_WIP,
+            batch_code="AD-STOCK-01",
+            production_order=ad_order,
+            production_id=ad_order.production_id,
+            production_type=ad_order.production_type,
+            item_code="RM-001",
+            item_name="Legacy AD Stock",
+            inward_qty="10.000",
+            outward_qty="0.000",
+            balance_qty="10.000",
+            status=ProductionInventoryTransaction.Status.IN_PROGRESS,
+        )
+
+        bl_stage_response = self.client.get("/api/production/stage-records/", {"stage": "BL"})
+        self.assertEqual(bl_stage_response.status_code, status.HTTP_200_OK)
+        order_ids = {row["order_id"] for row in bl_stage_response.data["data"]["results"]}
+        self.assertIn(bl_order.id, order_ids)
+        self.assertNotIn(ad_order.id, order_ids)
+
+    def test_confirming_ad_batch_moves_stock_from_additive_to_blend_wip(self):
+        self.order.production_id = "AD01"
+        self.order.extra_form_data = {"stage": "AD", "next_workflow_stage": "-"}
+        self.order.save(update_fields=["production_id", "extra_form_data"])
+
+        create_response = self.client.post(
+            f"/api/production/orders/{self.order.id}/batches/",
+            {
+                "stage": "AD",
+                "bom_variant": self.bom.id,
+            },
+            format="json",
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        batch_id = create_response.data["data"]["id"]
+        weight_entry_id = create_response.data["data"]["weight_entries"][0]["id"]
+
+        self.assertEqual(
+            self.client.post(
+                f"/api/production/orders/{self.order.id}/batches/{batch_id}/start/",
+                format="json",
+            ).status_code,
+            status.HTTP_200_OK,
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/api/production/orders/{self.order.id}/batches/{batch_id}/weights/{weight_entry_id}/",
+                {"entered_weight_grams": "250.000"},
+                format="json",
+            ).status_code,
+            status.HTTP_200_OK,
+        )
+
+        confirm_response = self.client.post(
+            f"/api/production/orders/{self.order.id}/batches/{batch_id}/confirm/",
+            format="json",
+        )
+        self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
+
+        self.assertFalse(
+            ProductionBatch.objects.filter(
+                production_order=self.order,
+                stage=ProductionBatch.Stage.BL,
+            ).exists()
+        )
+
+        additive_rows = ProductionInventoryTransaction.objects.filter(
+            production_order=self.order,
+            stage=ProductionInventoryTransaction.Stage.ADDITIVE_WORK_CENTER,
+        )
+        self.assertEqual(additive_rows.count(), 1)
+        additive_row = additive_rows.get()
+        self.assertEqual(str(additive_row.balance_qty), "0.000")
+        self.assertEqual(str(additive_row.outward_qty), "250.000")
+        self.assertEqual(additive_row.to_stage, ProductionInventoryTransaction.Stage.BLEND_WIP)
+        self.assertEqual(additive_row.status, ProductionInventoryTransaction.Status.COMPLETED)
+        blend_wip_rows = ProductionInventoryTransaction.objects.filter(
+            production_order=self.order,
+            stage=ProductionInventoryTransaction.Stage.BLEND_WIP,
+        )
+        self.assertEqual(blend_wip_rows.count(), 1)
+        blend_wip_row = blend_wip_rows.get()
+        self.assertEqual(str(blend_wip_row.inward_qty), "250.000")
+        self.assertEqual(str(blend_wip_row.balance_qty), "250.000")
+        self.assertEqual(str(blend_wip_row.outward_qty), "0.000")
+        self.assertEqual(blend_wip_row.from_stage, ProductionInventoryTransaction.Stage.ADDITIVE_WORK_CENTER)
+
     def test_ad_batch_with_multiple_small_decimal_components_confirms_successfully(self):
         self.order.production_id = "10"
         self.order.save(update_fields=["production_id"])
@@ -806,6 +938,22 @@ class ProductionBatchStageTransitionTests(APITestCase):
         self.assertEqual(filtered_rows[0]["details"][0]["item_name"], "Bin Weight")
         self.assertFalse(filtered_rows[0]["is_outwarded"])
 
+        blend_wip_row = ProductionInventoryTransaction.objects.get(
+            production_order=self.order,
+            stage=ProductionInventoryTransaction.Stage.BLEND_WIP,
+        )
+        self.assertEqual(str(blend_wip_row.outward_qty), "180.500")
+        self.assertEqual(str(blend_wip_row.balance_qty), "69.500")
+        self.assertEqual(blend_wip_row.to_stage, ProductionInventoryTransaction.Stage.BLEND_STORE)
+
+        blend_store_row = ProductionInventoryTransaction.objects.get(
+            production_order=self.order,
+            stage=ProductionInventoryTransaction.Stage.BLEND_STORE,
+        )
+        self.assertEqual(str(blend_store_row.inward_qty), "180.500")
+        self.assertEqual(str(blend_store_row.balance_qty), "180.500")
+        self.assertEqual(blend_store_row.from_stage, ProductionInventoryTransaction.Stage.BLEND_WIP)
+
         confirm_bl_response = self.client.post(
             f"/api/production/orders/{self.order.id}/batches/{bl_batch.id}/confirm/",
             format="json",
@@ -890,6 +1038,32 @@ class ProductionBatchStageTransitionTests(APITestCase):
         )
         stored_capture.refresh_from_db()
         self.assertEqual(str(stored_capture.weight_kg), "180.500")
+
+        blend_store_row.refresh_from_db()
+        self.assertEqual(str(blend_store_row.outward_qty), "180.500")
+        self.assertEqual(str(blend_store_row.balance_qty), "0.000")
+        self.assertEqual(blend_store_row.to_stage, ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER)
+
+        granulation_work_center_row = ProductionInventoryTransaction.objects.get(
+            production_order=self.order,
+            stage=ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
+        )
+        self.assertEqual(str(granulation_work_center_row.inward_qty), "180.500")
+        self.assertEqual(str(granulation_work_center_row.balance_qty), "180.500")
+        self.assertEqual(granulation_work_center_row.from_stage, ProductionInventoryTransaction.Stage.BLEND_STORE)
+
+        repeat_outward_response = self.client.post(
+            f"/api/production/orders/{self.order.id}/batches/{bl_batch.id}/confirm/",
+            format="json",
+        )
+        self.assertEqual(repeat_outward_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            ProductionInventoryTransaction.objects.filter(
+                production_order=self.order,
+                stage=ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
+            ).count(),
+            1,
+        )
 
     def test_deleting_ad_workflow_batch_removes_related_batches_and_releases_reserved_bin(self):
         create_response = self.client.post(
@@ -1120,6 +1294,30 @@ class ProductionBatchStageTransitionTests(APITestCase):
         self.assertTrue(filtered_rows[0]["is_outwarded"])
         self.assertEqual(filtered_rows[0]["binlot"], self.primary_free_bag.code)
 
+        granulation_work_center_row = ProductionInventoryTransaction.objects.get(
+            production_order=self.order,
+            stage=ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
+        )
+        self.assertEqual(str(granulation_work_center_row.outward_qty), "25.000")
+        self.assertEqual(str(granulation_work_center_row.balance_qty), "155.500")
+        self.assertEqual(granulation_work_center_row.to_stage, ProductionInventoryTransaction.Stage.GRANULATION_STORE)
+
+        granulation_store_row = ProductionInventoryTransaction.objects.get(
+            production_order=self.order,
+            stage=ProductionInventoryTransaction.Stage.GRANULATION_STORE,
+        )
+        self.assertEqual(str(granulation_store_row.outward_qty), "25.000")
+        self.assertEqual(str(granulation_store_row.balance_qty), "0.000")
+        self.assertEqual(granulation_store_row.to_stage, ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE)
+
+        connection_line_row = ProductionInventoryTransaction.objects.get(
+            production_order=self.order,
+            stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+        )
+        self.assertEqual(str(connection_line_row.inward_qty), "25.000")
+        self.assertEqual(str(connection_line_row.balance_qty), "25.000")
+        self.assertEqual(connection_line_row.from_stage, ProductionInventoryTransaction.Stage.GRANULATION_STORE)
+
         gl_batches_response = self.client.get(
             f"/api/production/orders/{self.order.id}/batches/",
             {"stage": "GL"},
@@ -1146,6 +1344,19 @@ class ProductionBatchStageTransitionTests(APITestCase):
         ad_batches = ad_batches_response.data["data"]
         completed_ad_row = next(row for row in ad_batches if row["id"] == ad_batch_id)
         self.assertEqual(completed_ad_row["display_status"], "PR - Production")
+
+        repeat_outward_response = self.client.post(
+            f"/api/production/orders/{self.order.id}/batches/{gl_batch.id}/confirm/",
+            format="json",
+        )
+        self.assertEqual(repeat_outward_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            ProductionInventoryTransaction.objects.filter(
+                production_order=self.order,
+                stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+            ).count(),
+            1,
+        )
 
     def test_pr_stage_records_only_include_pr_ready_orders_and_report_in_progress(self):
         create_response = self.client.post(
@@ -1368,6 +1579,520 @@ class ProductionBatchStageTransitionTests(APITestCase):
         self.assertEqual(matched_stage_row["batch_no"], completed_ad_batch.batch_no)
         self.assertEqual(matched_stage_row["display_batch_no"], completed_ad_batch.batch_no)
         self.assertEqual(matched_stage_row["workflow_status"], "BL")
+
+
+class ProductionInventoryLinkedStageFlowTests(APITestCase):
+    def setUp(self):
+        self.unique_suffix = uuid4().hex[:8]
+        self.user = UserModel.objects.create_superuser(
+            username=f"production-ledger-{self.unique_suffix}",
+            email=f"production-ledger-{self.unique_suffix}@example.com",
+            password="password123",
+        )
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh.access_token}")
+
+        self.item = Item.objects.create(
+            category="Raw Material",
+            group="Resin",
+            sub_group="Primary",
+            item_name=f"Inventory Resin {self.unique_suffix}",
+            unit="kgs",
+        )
+        self.bom = BOMVariant(variant_code=f"BOM-LINK-{self.unique_suffix.upper()}", name="Linked Inventory BOM")
+        self.bom.set_password("secret123")
+        self.bom.save()
+        BOMVariantComponent.objects.create(
+            bom_variant=self.bom,
+            item=self.item,
+            target_weight_grams="250.000",
+            min_weight_grams="195.000",
+            max_weight_grams="300.000",
+            unit="kgs",
+        )
+        self.primary_free_bin = BinCreationMaster.objects.create(
+            code=f"BIN-LINK-{self.unique_suffix.upper()}-A",
+            name=f"Primary Link Bin {self.unique_suffix}",
+            current_status=BinCreationMaster.BinStatus.FREE,
+            is_active=True,
+        )
+        self.primary_free_bag = BagCreationMaster.objects.create(
+            code=f"BAG-LINK-{self.unique_suffix.upper()}-A",
+            name=f"Primary Link Bag {self.unique_suffix}",
+            current_status=BagCreationMaster.BagStatus.FREE,
+            is_active=True,
+        )
+
+    def _create_order(self, production_id: str, production_type: str, stage: str, source_order: ProductionOrder | None = None):
+        extra_form_data = {"stage": stage, "next_workflow_stage": "-"}
+        if source_order is not None:
+            extra_form_data["source_order_id"] = source_order.id
+        return ProductionOrder.objects.create(
+            production_id=production_id,
+            production_type=production_type,
+            production_date=date.today(),
+            extra_form_data=extra_form_data,
+        )
+
+    def _create_and_start_batch(self, order: ProductionOrder, stage: str) -> int:
+        create_response = self.client.post(
+            f"/api/production/orders/{order.id}/batches/",
+            {"stage": stage, "bom_variant": self.bom.id},
+            format="json",
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        batch_id = create_response.data["data"]["id"]
+        start_response = self.client.post(
+            f"/api/production/orders/{order.id}/batches/{batch_id}/start/",
+            format="json",
+        )
+        self.assertEqual(start_response.status_code, status.HTTP_200_OK)
+        return batch_id
+
+    def _save_ad_weight_and_confirm(self, order: ProductionOrder, batch_id: int, weight: str = "250.000"):
+        batch_response = self.client.get(f"/api/production/orders/{order.id}/batches/", {"stage": "AD"})
+        self.assertEqual(batch_response.status_code, status.HTTP_200_OK)
+        batch_row = next(row for row in batch_response.data["data"] if row["id"] == batch_id)
+        weight_entry_id = batch_row["weight_entries"][0]["id"]
+
+        save_response = self.client.post(
+            f"/api/production/orders/{order.id}/batches/{batch_id}/weights/{weight_entry_id}/",
+            {"entered_weight_grams": weight},
+            format="json",
+        )
+        self.assertEqual(save_response.status_code, status.HTTP_200_OK)
+
+        confirm_response = self.client.post(
+            f"/api/production/orders/{order.id}/batches/{batch_id}/confirm/",
+            format="json",
+        )
+        self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
+
+    def _capture_output(self, order: ProductionOrder, batch_id: int, weight: str):
+        capture_response = self.client.post(
+            f"/api/production/orders/{order.id}/output-captures/",
+            {"source_batch": batch_id, "weight_kg": weight},
+            format="json",
+        )
+        self.assertEqual(capture_response.status_code, status.HTTP_201_CREATED)
+        return capture_response
+
+    def _create_linked_order_via_api(
+        self,
+        production_id: str,
+        production_type: str,
+        stage: str,
+        source_order: ProductionOrder | None = None,
+    ):
+        extra_form_data = {
+            "stage": stage,
+            "next_workflow_stage": "-",
+        }
+        if source_order is not None:
+            extra_form_data["source_order_id"] = source_order.id
+
+        response = self.client.post(
+            "/api/production/production/",
+            {
+                "production_id": production_id,
+                "production_for": f"Linked {stage} Order",
+                "production_type": production_type,
+                "status": "PLANNED",
+                "production_date": str(date.today()),
+                "shift": "Shift 1 (6:00 am - 2:00 pm)",
+                "planned_quantity": "25.000",
+                "planned_weight": "0.000",
+                "material_cost": "0.00",
+                "total_cost": "0.00",
+                "start_date_time": f"{date.today()}T06:00:00Z",
+                "extra_form_data": extra_form_data,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        return ProductionOrder.objects.get(production_id=production_id)
+
+    def test_ad_final_capture_moves_inventory_into_blend_wip(self):
+        ad_order = self._create_order("AD01", "WPE Additive Production", "AD")
+        ad_batch_id = self._create_and_start_batch(ad_order, "AD")
+
+        self._save_ad_weight_and_confirm(ad_order, ad_batch_id)
+
+        additive_row = ProductionInventoryTransaction.objects.get(
+            production_order=ad_order,
+            stage=ProductionInventoryTransaction.Stage.ADDITIVE_WORK_CENTER,
+        )
+        self.assertEqual(str(additive_row.inward_qty), "250.000")
+        self.assertEqual(str(additive_row.outward_qty), "250.000")
+        self.assertEqual(str(additive_row.balance_qty), "0.000")
+        self.assertEqual(additive_row.to_stage, ProductionInventoryTransaction.Stage.BLEND_WIP)
+
+        blend_wip_row = ProductionInventoryTransaction.objects.get(
+            production_order=ad_order,
+            stage=ProductionInventoryTransaction.Stage.BLEND_WIP,
+        )
+        self.assertEqual(str(blend_wip_row.inward_qty), "250.000")
+        self.assertEqual(str(blend_wip_row.outward_qty), "0.000")
+        self.assertEqual(str(blend_wip_row.balance_qty), "250.000")
+        self.assertEqual(blend_wip_row.from_stage, ProductionInventoryTransaction.Stage.ADDITIVE_WORK_CENTER)
+
+    def test_ad_save_weight_for_product_subtype_component_creates_additive_inventory_row(self):
+        category = ProductTypeCategory.objects.create(
+            name=f"Subtype Category {self.unique_suffix}",
+            description="Subtype category",
+            sort_order=1,
+            is_active=True,
+        )
+        subtype = ProductTypeSubtype.objects.create(
+            category=category,
+            name=f"Subtype Component {self.unique_suffix}",
+            description="Subtype component",
+            sort_order=1,
+            is_active=True,
+        )
+        subtype_bom = BOMVariant(
+            variant_code=f"BOM-SUB-{self.unique_suffix.upper()}",
+            name="Subtype Inventory BOM",
+        )
+        subtype_bom.set_password("secret123")
+        subtype_bom.save()
+        BOMVariantComponent.objects.create(
+            bom_variant=subtype_bom,
+            product_subtype=subtype,
+            target_weight_grams="4.500",
+            min_weight_grams="4.000",
+            max_weight_grams="5.000",
+            unit="kgs",
+        )
+
+        ad_order = self._create_order("AD07", "WPE Additive Production", "AD")
+        create_response = self.client.post(
+            f"/api/production/orders/{ad_order.id}/batches/",
+            {"stage": "AD", "bom_variant": subtype_bom.id},
+            format="json",
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        subtype_batch_id = create_response.data["data"]["id"]
+        weight_entry_id = create_response.data["data"]["weight_entries"][0]["id"]
+        start_response = self.client.post(
+            f"/api/production/orders/{ad_order.id}/batches/{subtype_batch_id}/start/",
+            format="json",
+        )
+        self.assertEqual(start_response.status_code, status.HTTP_200_OK)
+
+        save_response = self.client.post(
+            f"/api/production/orders/{ad_order.id}/batches/{subtype_batch_id}/weights/{weight_entry_id}/",
+            {"entered_weight_grams": "4.500"},
+            format="json",
+        )
+        self.assertEqual(save_response.status_code, status.HTTP_200_OK)
+
+        additive_row = ProductionInventoryTransaction.objects.get(
+            production_order=ad_order,
+            source_batch_id=subtype_batch_id,
+            stage=ProductionInventoryTransaction.Stage.ADDITIVE_WORK_CENTER,
+        )
+        self.assertIsNone(additive_row.item_id)
+        self.assertEqual(additive_row.item_code, subtype.code)
+        self.assertEqual(additive_row.item_name, subtype.name)
+        self.assertEqual(str(additive_row.inward_qty), "4.500")
+        self.assertEqual(str(additive_row.balance_qty), "4.500")
+        self.assertEqual(additive_row.uom, "kgs")
+
+    def test_production_inventory_history_lists_completed_source_stage_rows(self):
+        ad_order = self._create_order("AD06", "WPE Additive Production", "AD")
+        ad_batch_id = self._create_and_start_batch(ad_order, "AD")
+        self._save_ad_weight_and_confirm(ad_order, ad_batch_id)
+
+        additive_history_response = self.client.get(
+            "/api/inventory/production-inventory/",
+            {
+                "stage": ProductionInventoryTransaction.Stage.ADDITIVE_WORK_CENTER,
+                "include_history": "true",
+            },
+        )
+        self.assertEqual(additive_history_response.status_code, status.HTTP_200_OK)
+        additive_rows = additive_history_response.data["data"]["results"]
+        additive_row = next(row for row in additive_rows if row["production_id"] == "AD06")
+        self.assertEqual(additive_row["inward_qty"], "250.000")
+        self.assertEqual(additive_row["outward_qty"], "250.000")
+        self.assertEqual(additive_row["balance_qty"], "0.000")
+        self.assertEqual(additive_row["to_stage"], ProductionInventoryTransaction.Stage.BLEND_WIP)
+
+        bl_order = self._create_order("BL06", "WPE Blend Production", "BL", source_order=ad_order)
+        bl_batch_id = self._create_and_start_batch(bl_order, "BL")
+        self._capture_output(bl_order, bl_batch_id, "180.500")
+
+        confirm_bl_response = self.client.post(
+            f"/api/production/orders/{bl_order.id}/batches/{bl_batch_id}/confirm/",
+            format="json",
+        )
+        self.assertEqual(confirm_bl_response.status_code, status.HTTP_200_OK)
+
+        blend_store_history_response = self.client.get(
+            "/api/inventory/production-inventory/",
+            {
+                "stage": ProductionInventoryTransaction.Stage.BLEND_STORE,
+                "include_history": "true",
+            },
+        )
+        self.assertEqual(blend_store_history_response.status_code, status.HTTP_200_OK)
+        blend_store_rows = blend_store_history_response.data["data"]["results"]
+        blend_store_row = next(row for row in blend_store_rows if row["production_id"] == "BL06")
+        self.assertEqual(blend_store_row["inward_qty"], "180.500")
+        self.assertEqual(blend_store_row["outward_qty"], "180.500")
+        self.assertEqual(blend_store_row["balance_qty"], "0.000")
+        self.assertEqual(blend_store_row["to_stage"], ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER)
+
+    def test_production_inventory_api_supports_all_stage_totals_and_lot_scancode_fields(self):
+        ad_order = self._create_order("AD08", "WPE Additive Production", "AD")
+        ad_batch_id = self._create_and_start_batch(ad_order, "AD")
+        self._save_ad_weight_and_confirm(ad_order, ad_batch_id)
+
+        bl_order = self._create_order("BL08", "WPE Blend Production", "BL", source_order=ad_order)
+        bl_batch_id = self._create_and_start_batch(bl_order, "BL")
+        self._capture_output(bl_order, bl_batch_id, "180.500")
+        confirm_bl_response = self.client.post(
+            f"/api/production/orders/{bl_order.id}/batches/{bl_batch_id}/confirm/",
+            format="json",
+        )
+        self.assertEqual(confirm_bl_response.status_code, status.HTTP_200_OK)
+
+        gl_order = self._create_order("GL08", "WPE Granulated Blend Production", "GL", source_order=bl_order)
+        gl_batch_id = self._create_and_start_batch(gl_order, "GL")
+        self._capture_output(gl_order, gl_batch_id, "25.000")
+        confirm_gl_response = self.client.post(
+            f"/api/production/orders/{gl_order.id}/batches/{gl_batch_id}/confirm/",
+            format="json",
+        )
+        self.assertEqual(confirm_gl_response.status_code, status.HTTP_200_OK)
+
+        response = self.client.get(
+            "/api/inventory/production-inventory/",
+            {
+                "stage": "ALL",
+                "include_history": "true",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.data["data"]
+        rows = payload["results"]
+        totals = payload["totals"]
+
+        self.assertIn("total_inward_weight", totals)
+        self.assertIn("total_outward_weight", totals)
+        self.assertIn("total_current_weight", totals)
+        self.assertIn("planned_weight", totals)
+        self.assertGreater(Decimal(totals["total_inward_weight"]), Decimal("0.000"))
+
+        stages = {row["stage"] for row in rows}
+        self.assertIn(ProductionInventoryTransaction.Stage.ADDITIVE_WORK_CENTER, stages)
+        self.assertIn(ProductionInventoryTransaction.Stage.BLEND_WIP, stages)
+        self.assertIn(ProductionInventoryTransaction.Stage.BLEND_STORE, stages)
+        self.assertIn(ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER, stages)
+        self.assertIn(ProductionInventoryTransaction.Stage.GRANULATION_STORE, stages)
+        self.assertIn(ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE, stages)
+
+        blend_store_row = next(
+            row
+            for row in rows
+            if row["stage"] == ProductionInventoryTransaction.Stage.BLEND_STORE
+            and row["production_id"] == "BL08"
+        )
+        self.assertEqual(blend_store_row["binlot"], self.primary_free_bin.code)
+        self.assertEqual(blend_store_row["scancode"], ProductionOutputCapture.objects.get(source_batch_id=bl_batch_id).scancode_id)
+
+        granulation_store_row = next(
+            row
+            for row in rows
+            if row["stage"] == ProductionInventoryTransaction.Stage.GRANULATION_STORE
+            and row["production_id"] == "GL08"
+        )
+        self.assertEqual(granulation_store_row["baglot"], self.primary_free_bag.code)
+        self.assertEqual(granulation_store_row["scancode"], ProductionOutputCapture.objects.get(source_batch_id=gl_batch_id).scancode_id)
+
+    def test_source_options_are_empty_when_form_linking_is_disabled(self):
+        for stage in ("BL", "GL", "PR"):
+            response = self.client.get("/api/production/production/source-options/", {"stage": stage})
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertEqual(response.data, [])
+
+    def test_api_create_orders_ignore_source_link_fields(self):
+        ad_order = self._create_order("AD04", "WPE Additive Production", "AD")
+
+        created_bl_order = self._create_linked_order_via_api(
+            "BL04",
+            "WPE Blend Production",
+            "BL",
+            ad_order,
+        )
+        self.assertEqual(created_bl_order.extra_form_data.get("stage"), "BL")
+        self.assertNotIn("source_order_id", created_bl_order.extra_form_data)
+        self.assertNotIn("source_production_id", created_bl_order.extra_form_data)
+        self.assertNotIn("source_stage", created_bl_order.extra_form_data)
+
+        created_gl_order = self._create_linked_order_via_api(
+            "GL04",
+            "WPE Granulated Blend Production",
+            "GL",
+            ad_order,
+        )
+        self.assertEqual(created_gl_order.extra_form_data.get("stage"), "GL")
+        self.assertNotIn("source_order_id", created_gl_order.extra_form_data)
+
+        created_pr_order = self._create_linked_order_via_api(
+            "PR04",
+            "WPE Production Line",
+            "PR",
+            ad_order,
+        )
+        self.assertEqual(created_pr_order.extra_form_data.get("stage"), "PR")
+        self.assertNotIn("source_order_id", created_pr_order.extra_form_data)
+
+    def test_api_update_order_ignores_source_link_field_changes(self):
+        pr_order = self._create_linked_order_via_api(
+            "PR05",
+            "WPE Production Line",
+            "PR",
+        )
+
+        update_response = self.client.patch(
+            f"/api/production/production/{pr_order.id}/",
+            {
+                "production_for": "Independent PR Order Updated",
+                "extra_form_data": {
+                    "stage": "PR",
+                    "next_workflow_stage": "-",
+                    "source_order_id": 999999,
+                    "source_production_id": "GL99",
+                    "source_stage": "GL",
+                },
+            },
+            format="json",
+        )
+        self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+
+        pr_order.refresh_from_db()
+        self.assertEqual(pr_order.production_for, "Independent PR Order Updated")
+        self.assertEqual(pr_order.extra_form_data.get("stage"), "PR")
+        self.assertNotIn("source_order_id", pr_order.extra_form_data)
+        self.assertNotIn("source_production_id", pr_order.extra_form_data)
+        self.assertNotIn("source_stage", pr_order.extra_form_data)
+
+    def test_linked_bl_and_gl_orders_consume_and_forward_inventory_without_duplicates(self):
+        ad_order = self._create_order("AD02", "WPE Additive Production", "AD")
+        ad_batch_id = self._create_and_start_batch(ad_order, "AD")
+        self._save_ad_weight_and_confirm(ad_order, ad_batch_id)
+
+        bl_order = self._create_order("BL01", "WPE Blend Production", "BL", source_order=ad_order)
+        bl_batch_id = self._create_and_start_batch(bl_order, "BL")
+
+        bl_capture_response = self.client.post(
+            f"/api/production/orders/{bl_order.id}/output-captures/",
+            {"source_batch": bl_batch_id, "weight_kg": "180.500"},
+            format="json",
+        )
+        self.assertEqual(bl_capture_response.status_code, status.HTTP_201_CREATED)
+
+        source_blend_wip_row = ProductionInventoryTransaction.objects.get(
+            production_order=ad_order,
+            stage=ProductionInventoryTransaction.Stage.BLEND_WIP,
+        )
+        self.assertEqual(str(source_blend_wip_row.outward_qty), "180.500")
+        self.assertEqual(str(source_blend_wip_row.balance_qty), "69.500")
+
+        blend_store_row = ProductionInventoryTransaction.objects.get(
+            production_order=bl_order,
+            stage=ProductionInventoryTransaction.Stage.BLEND_STORE,
+        )
+        self.assertEqual(str(blend_store_row.inward_qty), "180.500")
+        self.assertEqual(str(blend_store_row.balance_qty), "180.500")
+        self.assertEqual(blend_store_row.from_stage, ProductionInventoryTransaction.Stage.BLEND_WIP)
+
+        confirm_bl_response = self.client.post(
+            f"/api/production/orders/{bl_order.id}/batches/{bl_batch_id}/confirm/",
+            format="json",
+        )
+        self.assertEqual(confirm_bl_response.status_code, status.HTTP_200_OK)
+
+        blend_store_row.refresh_from_db()
+        self.assertEqual(str(blend_store_row.outward_qty), "180.500")
+        self.assertEqual(str(blend_store_row.balance_qty), "0.000")
+        self.assertEqual(blend_store_row.to_stage, ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER)
+
+        granulation_work_center_row = ProductionInventoryTransaction.objects.get(
+            production_order=bl_order,
+            stage=ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
+        )
+        self.assertEqual(str(granulation_work_center_row.inward_qty), "180.500")
+        self.assertEqual(str(granulation_work_center_row.balance_qty), "180.500")
+
+        repeat_bl_confirm = self.client.post(
+            f"/api/production/orders/{bl_order.id}/batches/{bl_batch_id}/confirm/",
+            format="json",
+        )
+        self.assertEqual(repeat_bl_confirm.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            ProductionInventoryTransaction.objects.filter(
+                production_order=bl_order,
+                stage=ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
+            ).count(),
+            1,
+        )
+
+        gl_order = self._create_order("GL01", "WPE Granulated Blend Production", "GL", source_order=bl_order)
+        gl_batch_id = self._create_and_start_batch(gl_order, "GL")
+
+        gl_capture_response = self.client.post(
+            f"/api/production/orders/{gl_order.id}/output-captures/",
+            {"source_batch": gl_batch_id, "weight_kg": "25.000"},
+            format="json",
+        )
+        self.assertEqual(gl_capture_response.status_code, status.HTTP_201_CREATED)
+
+        granulation_work_center_row.refresh_from_db()
+        self.assertEqual(str(granulation_work_center_row.outward_qty), "25.000")
+        self.assertEqual(str(granulation_work_center_row.balance_qty), "155.500")
+
+        granulation_store_row = ProductionInventoryTransaction.objects.get(
+            production_order=gl_order,
+            stage=ProductionInventoryTransaction.Stage.GRANULATION_STORE,
+        )
+        self.assertEqual(str(granulation_store_row.inward_qty), "25.000")
+        self.assertEqual(str(granulation_store_row.balance_qty), "25.000")
+        self.assertEqual(granulation_store_row.from_stage, ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER)
+
+        confirm_gl_response = self.client.post(
+            f"/api/production/orders/{gl_order.id}/batches/{gl_batch_id}/confirm/",
+            format="json",
+        )
+        self.assertEqual(confirm_gl_response.status_code, status.HTTP_200_OK)
+
+        granulation_store_row.refresh_from_db()
+        self.assertEqual(str(granulation_store_row.outward_qty), "25.000")
+        self.assertEqual(str(granulation_store_row.balance_qty), "0.000")
+        self.assertEqual(granulation_store_row.to_stage, ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE)
+
+        connection_line_row = ProductionInventoryTransaction.objects.get(
+            production_order=gl_order,
+            stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+        )
+        self.assertEqual(str(connection_line_row.inward_qty), "25.000")
+        self.assertEqual(str(connection_line_row.balance_qty), "25.000")
+        self.assertEqual(connection_line_row.from_stage, ProductionInventoryTransaction.Stage.GRANULATION_STORE)
+
+        repeat_gl_confirm = self.client.post(
+            f"/api/production/orders/{gl_order.id}/batches/{gl_batch_id}/confirm/",
+            format="json",
+        )
+        self.assertEqual(repeat_gl_confirm.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            ProductionInventoryTransaction.objects.filter(
+                production_order=gl_order,
+                stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+            ).count(),
+            1,
+        )
 
 
 class RecipeMasterApiTests(APITestCase):

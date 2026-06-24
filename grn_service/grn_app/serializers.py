@@ -1,3 +1,5 @@
+from typing import Any
+
 from rest_framework import serializers
 
 from .models import GRN, GRNAuditLog, QCR
@@ -146,12 +148,156 @@ class GRNReadSerializer(serializers.ModelSerializer):
         }
 
 
+def _serializer_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _serializer_list(value: Any) -> list[dict[str, Any]]:
+    return [entry for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
+
+
+def _read_qcr_item_value(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _build_qcr_fallback_item(source_grn: GRN) -> dict[str, Any]:
+    return {
+        "item_id": source_grn.item_id,
+        "item_name": source_grn.product_description or source_grn.item_id,
+        "item_code": source_grn.item_id,
+        "sent_qty": source_grn.quantity if source_grn.quantity is not None else source_grn.total_quantity,
+        "received_qty": source_grn.accepted_qty,
+        "accepted_qty": source_grn.accepted_qty,
+        "rejected_qty": source_grn.rejected_qty,
+        "uom": source_grn.unit,
+        "unit": source_grn.unit,
+    }
+
+
+def _build_qcr_record_items(record: QCR) -> list[dict[str, Any]]:
+    source_grn = record.source_grn
+    source_raw_payload = _serializer_dict(source_grn.raw_payload)
+    snapshot = _serializer_dict(record.snapshot)
+    snapshot_raw_payload = _serializer_dict(snapshot.get("raw_payload"))
+
+    raw_items = _serializer_list(source_raw_payload.get("items")) or _serializer_list(snapshot_raw_payload.get("items"))
+    pending_items = _serializer_list(source_grn.grn_pending_items) or _serializer_list(snapshot.get("grn_pending_items"))
+    completed_items = _serializer_list(record.qcr_items)
+
+    if not raw_items and not pending_items and not completed_items and any(
+        value not in (None, "") for value in (source_grn.item_id, source_grn.product_description, source_grn.quantity, source_grn.total_quantity)
+    ):
+        raw_items = [_build_qcr_fallback_item(source_grn)]
+
+    row_count = max(len(raw_items), len(pending_items), len(completed_items))
+    rows: list[dict[str, Any]] = []
+
+    for index in range(row_count):
+        raw_item = raw_items[index] if index < len(raw_items) else {}
+        pending_item = pending_items[index] if index < len(pending_items) else {}
+        completed_item = completed_items[index] if index < len(completed_items) else {}
+
+        item_id = _read_qcr_item_value(
+            completed_item.get("item_id"),
+            pending_item.get("item_id"),
+            raw_item.get("item_id"),
+        )
+        item_name = _read_qcr_item_value(
+            completed_item.get("item_name"),
+            pending_item.get("item_name"),
+            raw_item.get("product_description"),
+            raw_item.get("item_name"),
+            item_id,
+            f"Line {index + 1}",
+        )
+        item_code = _read_qcr_item_value(
+            completed_item.get("item_code"),
+            completed_item.get("item_id"),
+            pending_item.get("item_code"),
+            pending_item.get("item_id"),
+            raw_item.get("item_code"),
+            raw_item.get("item_id"),
+        )
+        unit = _read_qcr_item_value(
+            completed_item.get("uom"),
+            completed_item.get("unit"),
+            pending_item.get("uom"),
+            pending_item.get("unit"),
+            raw_item.get("uom"),
+            raw_item.get("unit"),
+        )
+
+        rows.append(
+            {
+                "line_index": _read_qcr_item_value(
+                    completed_item.get("line_index"),
+                    pending_item.get("line_index"),
+                    index,
+                ),
+                "item_id": item_id,
+                "item_name": item_name,
+                "item_code": item_code,
+                "sent_qty": _read_qcr_item_value(
+                    completed_item.get("sent_qty"),
+                    pending_item.get("sent_qty"),
+                    raw_item.get("quantity"),
+                    raw_item.get("total_quantity"),
+                ),
+                "received_qty": _read_qcr_item_value(
+                    completed_item.get("received_qty"),
+                    pending_item.get("received_qty"),
+                    raw_item.get("received_qty"),
+                    raw_item.get("accepted_qty"),
+                ),
+                "accepted_qty": _read_qcr_item_value(
+                    completed_item.get("accepted_qty"),
+                    pending_item.get("accepted_qty"),
+                    raw_item.get("accepted_qty"),
+                ),
+                "rejected_qty": _read_qcr_item_value(
+                    completed_item.get("rejected_qty"),
+                    pending_item.get("rejected_qty"),
+                    raw_item.get("rejected_qty"),
+                ),
+                "rejection_reason": _read_qcr_item_value(
+                    completed_item.get("rejection_reason"),
+                    pending_item.get("rejection_reason"),
+                    raw_item.get("rejection_reason"),
+                    "",
+                ),
+                "uom": unit,
+                "unit": unit,
+                "store_in_id": _read_qcr_item_value(
+                    completed_item.get("store_in_id"),
+                    pending_item.get("store_in_id"),
+                    raw_item.get("store_in_id"),
+                    raw_item.get("store_in"),
+                ),
+                "store_in_name": _read_qcr_item_value(
+                    completed_item.get("store_in_name"),
+                    pending_item.get("store_in_name"),
+                    raw_item.get("store_in_name"),
+                    raw_item.get("store_in"),
+                ),
+            }
+        )
+
+    return rows
+
+
 class QCRSerializer(serializers.ModelSerializer):
-    source_grn_data = GRNSerializer(source="source_grn", read_only=True)
+    source_grn_data = GRNReadSerializer(source="source_grn", read_only=True)
+    items = serializers.SerializerMethodField()
 
     class Meta:
         model = QCR
         fields = "__all__"
+
+    def get_items(self, obj: QCR):
+        return _build_qcr_record_items(obj)
 
 
 class GRNAuditLogSerializer(serializers.ModelSerializer):

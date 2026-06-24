@@ -177,6 +177,8 @@ default_api_auth_exempt_paths = [
     "/api/token/refresh/",
     "/api/token/verify/",
     "/api/auth/login/",
+    "/api/scale/bridge/demand/",
+    "/api/scale/bridge/readings/",
 ]
 API_AUTH_EXEMPT_PATHS = list(
     dict.fromkeys(default_api_auth_exempt_paths + env_list("API_AUTH_EXEMPT_PATHS"))
@@ -212,3 +214,4 @@ SERIAL_PORT      = os.getenv("SERIAL_PORT", "AUTO")
 SERIAL_BAUD_RATE = int(os.getenv("SERIAL_BAUD_RATE", "9600"))
 SCALE_BRIDGE_API_KEY = os.getenv("SCALE_BRIDGE_API_KEY", "").strip()
 SCALE_BRIDGE_STALE_AFTER_SECONDS = int(os.getenv("SCALE_BRIDGE_STALE_AFTER_SECONDS", "5"))
+SCALE_BRIDGE_DEMAND_TIMEOUT_SECONDS = int(os.getenv("SCALE_BRIDGE_DEMAND_TIMEOUT_SECONDS", "6"))

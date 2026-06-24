@@ -5,6 +5,7 @@ from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from django.core.cache import cache
 from django.conf import settings
 from django.http import JsonResponse
 from django.utils import timezone
@@ -33,6 +34,7 @@ BRIDGE_STATUSES = {
     ScaleBridgeReading.Status.BRIDGE_NOT_REPORTING,
 }
 SERVER_CONNECTED_STATUSES = {"connected", "stable", "unstable", "overload"}
+BRIDGE_DEMAND_CACHE_KEY = "scale_bridge:demand_active"
 
 
 def _bridge_api_key_is_valid(request) -> bool:
@@ -47,6 +49,22 @@ def _bridge_api_key_is_valid(request) -> bool:
 def _json_error(message: str, *, status_code: int, **extra: Any) -> JsonResponse:
     payload = {"status": "error", "error": message, **extra}
     return JsonResponse(payload, status=status_code)
+
+
+def _bridge_demand_timeout_seconds() -> int:
+    return max(2, int(getattr(settings, "SCALE_BRIDGE_DEMAND_TIMEOUT_SECONDS", 6)))
+
+
+def mark_bridge_demand_active() -> None:
+    cache.set(BRIDGE_DEMAND_CACHE_KEY, True, timeout=_bridge_demand_timeout_seconds())
+
+
+def is_bridge_demand_active() -> bool:
+    return cache.get(BRIDGE_DEMAND_CACHE_KEY) is True
+
+
+def clear_bridge_demand() -> None:
+    cache.delete(BRIDGE_DEMAND_CACHE_KEY)
 
 
 def _parse_payload(request) -> dict[str, Any]:
@@ -120,6 +138,10 @@ def _get_bridge_reading(*, device_id: str | None, workstation_id: str | None) ->
     return None
 
 
+def _get_latest_bridge_reading() -> ScaleBridgeReading | None:
+    return ScaleBridgeReading.objects.order_by("-last_seen_at", "device_id").first()
+
+
 class LatestWeightView(View):
     """GET /api/scale/weight/latest/ — returns latest bridge or server-side serial reading."""
 
@@ -128,6 +150,8 @@ class LatestWeightView(View):
     def get(self, request, *args, **kwargs):
         device_id = str(request.GET.get("device_id") or "").strip() or None
         workstation_id = str(request.GET.get("workstation_id") or "").strip() or None
+        prefer_bridge = str(request.GET.get("prefer_bridge") or "").strip().lower() in {"1", "true", "yes", "on"}
+        stale_after_seconds = int(getattr(settings, "SCALE_BRIDGE_STALE_AFTER_SECONDS", 5))
 
         if device_id or workstation_id:
             reading = _get_bridge_reading(device_id=device_id, workstation_id=workstation_id)
@@ -144,9 +168,14 @@ class LatestWeightView(View):
                     "platform": sys.platform,
                 })
 
-            stale_after_seconds = int(getattr(settings, "SCALE_BRIDGE_STALE_AFTER_SECONDS", 5))
             stale = timezone.now() - reading.last_seen_at > timedelta(seconds=stale_after_seconds)
             return JsonResponse(_build_bridge_payload(reading, stale=stale))
+
+        if prefer_bridge:
+            reading = _get_latest_bridge_reading()
+            if reading is not None:
+                stale = timezone.now() - reading.last_seen_at > timedelta(seconds=stale_after_seconds)
+                return JsonResponse(_build_bridge_payload(reading, stale=stale))
 
         if not getattr(settings, "SCALE_ENABLED", True):
             return JsonResponse(get_disabled_weight())
@@ -231,6 +260,40 @@ class ScaleBridgeDevicesView(View):
                 "error": reading.error or None,
             })
         return JsonResponse({"devices": devices})
+
+
+class ScaleBridgeDemandStatusView(View):
+    """GET /api/scale/bridge/demand/ — tells the local bridge whether a UI currently needs live bridge weight."""
+
+    http_method_names = ["get"]
+
+    def get(self, request, *args, **kwargs):
+        if not _bridge_api_key_is_valid(request):
+            return _json_error("Invalid or missing bridge API key.", status_code=403)
+
+        return JsonResponse({
+            "active": is_bridge_demand_active(),
+            "timeout_seconds": _bridge_demand_timeout_seconds(),
+        })
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class ScaleBridgeDemandActivationView(View):
+    """POST /api/scale/bridge/demand/activate/ — UI heartbeat for bridge demand."""
+
+    http_method_names = ["post", "delete"]
+
+    def post(self, request, *args, **kwargs):
+        mark_bridge_demand_active()
+        return JsonResponse({
+            "ok": True,
+            "active": True,
+            "timeout_seconds": _bridge_demand_timeout_seconds(),
+        })
+
+    def delete(self, request, *args, **kwargs):
+        clear_bridge_demand()
+        return JsonResponse({"ok": True, "active": False})
 
 
 @method_decorator(csrf_exempt, name="dispatch")

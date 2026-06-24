@@ -7,6 +7,7 @@ from .models import (
     MaterialMovement,
     ProductionTransaction,
     ProductionSummary,
+    ProductionBatch,
     ProductionOrderMaterialPlan,
     BagCreationMaster,
     BinCreationMaster,
@@ -203,6 +204,12 @@ class ProductionOrderDetailSerializer(serializers.ModelSerializer):
 
 class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
     """Serializer for creating and updating Production Orders"""
+    STAGE_PRODUCTION_TYPES = {
+        "WPE Additive Production",
+        "WPE Blend Production",
+        "WPE Granulated Blend Production",
+        "WPE Production Line",
+    }
     production_type = serializers.CharField()
     materials = serializers.ListField(child=serializers.DictField(), required=False, write_only=True)
     extra_form_data = serializers.JSONField(required=False)
@@ -240,6 +247,17 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"end_date_time": "End time must be after start time."}
                 )
+
+        incoming_extra_form_data = dict(data.get("extra_form_data") or {})
+        # New forms no longer manage inter-stage PRD linkage. Preserve existing historical
+        # values on old records by ignoring new source-link writes instead of deleting data.
+        incoming_extra_form_data.pop("source_order_id", None)
+        incoming_extra_form_data.pop("source_production_id", None)
+        incoming_extra_form_data.pop("source_stage", None)
+
+        extra_form_data = dict(getattr(self.instance, "extra_form_data", {}) or {})
+        extra_form_data.update(incoming_extra_form_data)
+        data["extra_form_data"] = extra_form_data
         return data
 
     def validate_production_type(self, value):
@@ -253,6 +271,9 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
 
         legacy_values = {choice for choice, _ in ProductionOrder.PRODUCTION_TYPE_CHOICES}
         if normalized in legacy_values:
+            return normalized
+
+        if normalized in self.STAGE_PRODUCTION_TYPES:
             return normalized
 
         master_name = (

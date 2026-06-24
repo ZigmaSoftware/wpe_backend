@@ -4,6 +4,7 @@ from decimal import Decimal
 import re
 from django.db import models
 from django.db.models import Q
+from rest_framework.exceptions import ValidationError
 
 from apps.production.models import (
     BatchWeightEntry,
@@ -38,6 +39,28 @@ def _resolve_production_item_fields(order: ProductionOrder) -> tuple[str, str]:
     production_code = str(order.production_id or "").strip()
     production_name = str(order.production_for or "").strip() or str(order.production_type or "").strip() or production_code
     return production_code, production_name
+
+
+def _resolve_weight_entry_item_fields(entry: BatchWeightEntry):
+    item = entry.item or getattr(entry.bom_component, "item", None)
+    if item is not None:
+        return (
+            item,
+            str(getattr(item, "item_code", "") or "").strip(),
+            str(getattr(item, "item_name", "") or "").strip(),
+            str(getattr(item, "unit", "") or "").strip(),
+        )
+
+    bom_component = getattr(entry, "bom_component", None)
+    if bom_component is None:
+        return None, "", "", ""
+
+    return (
+        None,
+        str(getattr(bom_component, "component_code", "") or "").strip(),
+        str(getattr(bom_component, "component_name", "") or "").strip(),
+        str(getattr(bom_component, "unit", "") or "").strip(),
+    )
 
 
 def _extract_workflow_suffix(value: str | None) -> str:
@@ -87,14 +110,34 @@ def _consume_stage_quantity(
             )
 
     if not source_rows:
-        return
+        raise ValidationError(f"No available stock found in {stage} for the selected PRD ID and batch.")
 
+    available_qty = sum((Decimal(str(row.balance_qty or ZERO)) for row in source_rows), ZERO)
+    if available_qty < quantity:
+        raise ValidationError(
+            f"Cannot move {quantity:.3f} from {stage}. Available stock is {available_qty:.3f}."
+        )
+
+    remaining_to_consume = quantity
     for row in source_rows:
-        row.outward_qty = Decimal(str(row.inward_qty or ZERO))
-        row.balance_qty = ZERO
+        if remaining_to_consume <= ZERO:
+            break
+
+        current_balance = Decimal(str(row.balance_qty or ZERO))
+        if current_balance <= ZERO:
+            continue
+
+        consume_qty = min(current_balance, remaining_to_consume)
+        row.outward_qty = Decimal(str(row.outward_qty or ZERO)) + consume_qty
+        row.balance_qty = current_balance - consume_qty
         row.to_stage = next_stage
-        row.status = ProductionInventoryTransaction.Status.COMPLETED
+        row.status = (
+            ProductionInventoryTransaction.Status.COMPLETED
+            if row.balance_qty <= ZERO
+            else ProductionInventoryTransaction.Status.IN_PROGRESS
+        )
         row.save(update_fields=["outward_qty", "balance_qty", "to_stage", "status", "updated_at"])
+        remaining_to_consume -= consume_qty
 
 
 def get_available_stage_quantity(production_order: ProductionOrder, stage: str) -> Decimal:
@@ -117,6 +160,7 @@ def upsert_inventory_transaction(
     item=None,
     item_code: str = "",
     item_name: str = "",
+    uom: str | None = None,
     quantity: Decimal | str | int | float = ZERO,
     inward_qty: Decimal | str | int | float | None = None,
     outward_qty: Decimal | str | int | float | None = None,
@@ -149,7 +193,7 @@ def upsert_inventory_transaction(
         "inward_qty": resolved_inward_qty,
         "outward_qty": resolved_outward_qty,
         "balance_qty": resolved_balance_qty,
-        "uom": getattr(item, "unit", "") or "",
+        "uom": str(uom if uom is not None else getattr(item, "unit", "") or "").strip(),
         "from_stage": from_stage,
         "to_stage": to_stage,
         "reference_no": reference_no or str(production_order.production_id or "").strip() or None,
@@ -177,8 +221,8 @@ def sync_ad_save_weight(entry: BatchWeightEntry, *, created_by=None) -> Producti
     if entry.batch.stage != ProductionBatch.Stage.AD or entry.entered_weight_grams is None:
         return None
 
-    item = entry.item or getattr(entry.bom_component, "item", None)
-    if item is None:
+    item, item_code, item_name, uom = _resolve_weight_entry_item_fields(entry)
+    if not item_code and not item_name:
         return None
 
     quantity = Decimal(str(entry.entered_weight_grams or ZERO))
@@ -189,6 +233,9 @@ def sync_ad_save_weight(entry: BatchWeightEntry, *, created_by=None) -> Producti
         production_order=entry.batch.production_order,
         source_batch=entry.batch,
         item=item,
+        item_code=item_code,
+        item_name=item_name,
+        uom=uom,
         quantity=quantity,
         inward_qty=quantity,
         outward_qty=ZERO,
@@ -201,13 +248,53 @@ def sync_ad_save_weight(entry: BatchWeightEntry, *, created_by=None) -> Producti
     )
 
 
+def finalize_ad_batch_to_additive_store(
+    ad_batch: ProductionBatch,
+    *,
+    created_by=None,
+) -> list[ProductionInventoryTransaction]:
+    finalized_rows: list[ProductionInventoryTransaction] = []
+    for entry in _iter_batch_weight_entries(ad_batch):
+        if entry.entered_weight_grams is None:
+            continue
+
+        item, item_code, item_name, uom = _resolve_weight_entry_item_fields(entry)
+        if not item_code and not item_name:
+            continue
+
+        quantity = Decimal(str(entry.entered_weight_grams or ZERO))
+        finalized_rows.append(
+            upsert_inventory_transaction(
+                movement_key=f"ad-save:{entry.id}",
+                stage=ProductionInventoryTransaction.Stage.ADDITIVE_WORK_CENTER,
+                batch_code=str(ad_batch.batch_no or "").strip(),
+                production_order=ad_batch.production_order,
+                source_batch=ad_batch,
+                item=item,
+                item_code=item_code,
+                item_name=item_name,
+                uom=uom,
+                quantity=quantity,
+                inward_qty=quantity,
+                outward_qty=ZERO,
+                balance_qty=quantity,
+                from_stage="AD",
+                to_stage=ProductionInventoryTransaction.Stage.ADDITIVE_WORK_CENTER,
+                reference_no=str(ad_batch.production_order.production_id or "").strip() or None,
+                status=ProductionInventoryTransaction.Status.COMPLETED,
+                created_by=created_by,
+            )
+        )
+    return finalized_rows
+
+
 def move_ad_batch_to_blend_wip(ad_batch: ProductionBatch, *, created_by=None) -> list[ProductionInventoryTransaction]:
     moved_rows: list[ProductionInventoryTransaction] = []
     for entry in _iter_batch_weight_entries(ad_batch):
         if entry.entered_weight_grams is None:
             continue
-        item = entry.item or getattr(entry.bom_component, "item", None)
-        if item is None:
+        item, item_code, item_name, uom = _resolve_weight_entry_item_fields(entry)
+        if not item_code and not item_name:
             continue
 
         quantity = Decimal(str(entry.entered_weight_grams or ZERO))
@@ -218,6 +305,9 @@ def move_ad_batch_to_blend_wip(ad_batch: ProductionBatch, *, created_by=None) ->
             production_order=ad_batch.production_order,
             source_batch=ad_batch,
             item=item,
+            item_code=item_code,
+            item_name=item_name,
+            uom=uom,
             quantity=quantity,
             inward_qty=quantity,
             outward_qty=quantity,
@@ -236,6 +326,9 @@ def move_ad_batch_to_blend_wip(ad_batch: ProductionBatch, *, created_by=None) ->
                 production_order=ad_batch.production_order,
                 source_batch=ad_batch,
                 item=item,
+                item_code=item_code,
+                item_name=item_name,
+                uom=uom,
                 quantity=quantity,
                 inward_qty=quantity,
                 outward_qty=ZERO,
@@ -250,7 +343,13 @@ def move_ad_batch_to_blend_wip(ad_batch: ProductionBatch, *, created_by=None) ->
     return moved_rows
 
 
-def record_bl_final_capture(bl_batch: ProductionBatch, output_capture: ProductionOutputCapture, *, created_by=None) -> ProductionInventoryTransaction:
+def record_bl_final_capture(
+    bl_batch: ProductionBatch,
+    output_capture: ProductionOutputCapture,
+    *,
+    created_by=None,
+    source_order: ProductionOrder | None = None,
+) -> ProductionInventoryTransaction:
     production_code, production_name = _resolve_production_item_fields(bl_batch.production_order)
     quantity = Decimal(str(output_capture.weight_kg or ZERO))
 
@@ -259,7 +358,7 @@ def record_bl_final_capture(bl_batch: ProductionBatch, output_capture: Productio
         stage=ProductionInventoryTransaction.Stage.BLEND_WIP,
         next_stage=ProductionInventoryTransaction.Stage.BLEND_STORE,
         quantity=quantity,
-        production_order=bl_batch.production_order,
+        production_order=source_order or bl_batch.production_order,
         source_batch=source_batch,
         lineage_batch_code=str(bl_batch.batch_no or "").strip() or None,
     )
@@ -278,10 +377,10 @@ def record_bl_final_capture(bl_batch: ProductionBatch, output_capture: Productio
         inward_qty=quantity,
         outward_qty=ZERO,
         balance_qty=quantity,
-        from_stage=ProductionInventoryTransaction.Stage.BLENDING_WORK_CENTER,
+        from_stage=ProductionInventoryTransaction.Stage.BLEND_WIP,
         to_stage=ProductionInventoryTransaction.Stage.BLEND_STORE,
         reference_no=str(bl_batch.batch_no or "").strip() or None,
-        scan_code=str(output_capture.binlot or output_capture.scancode_id or "").strip() or None,
+        scan_code=str(output_capture.scancode_id or "").strip() or None,
         status=ProductionInventoryTransaction.Status.IN_PROGRESS,
         created_by=created_by,
     )
@@ -302,8 +401,12 @@ def move_bl_batch_to_granulation_work_center(
         ).select_related("item", "production_order", "source_batch")
     )
 
+    if not blend_store_rows:
+        raise ValidationError("No available Blend Store stock found to move into Granulation Work Center.")
+
     for row in blend_store_rows:
-        row.outward_qty = row.inward_qty
+        available_qty = Decimal(str(row.balance_qty or ZERO))
+        row.outward_qty = Decimal(str(row.outward_qty or ZERO)) + available_qty
         row.balance_qty = ZERO
         row.to_stage = ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER
         row.status = ProductionInventoryTransaction.Status.COMPLETED
@@ -320,10 +423,10 @@ def move_bl_batch_to_granulation_work_center(
                 item=row.item,
                 item_code=row.item_code,
                 item_name=row.item_name,
-                quantity=row.inward_qty,
-                inward_qty=row.inward_qty,
+                quantity=available_qty,
+                inward_qty=available_qty,
                 outward_qty=ZERO,
-                balance_qty=row.inward_qty,
+                balance_qty=available_qty,
                 from_stage=ProductionInventoryTransaction.Stage.BLEND_STORE,
                 to_stage=ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
                 reference_no=str(bl_batch.batch_no or "").strip() or None,
@@ -335,7 +438,13 @@ def move_bl_batch_to_granulation_work_center(
     return moved_rows
 
 
-def record_gl_final_capture(gl_batch: ProductionBatch, output_capture: ProductionOutputCapture, *, created_by=None) -> ProductionInventoryTransaction:
+def record_gl_final_capture(
+    gl_batch: ProductionBatch,
+    output_capture: ProductionOutputCapture,
+    *,
+    created_by=None,
+    source_order: ProductionOrder | None = None,
+) -> ProductionInventoryTransaction:
     production_code, production_name = _resolve_production_item_fields(gl_batch.production_order)
     quantity = Decimal(str(output_capture.weight_kg or ZERO))
 
@@ -343,7 +452,7 @@ def record_gl_final_capture(gl_batch: ProductionBatch, output_capture: Productio
         stage=ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
         next_stage=ProductionInventoryTransaction.Stage.GRANULATION_STORE,
         quantity=quantity,
-        production_order=gl_batch.production_order,
+        production_order=source_order or gl_batch.production_order,
         source_batch=getattr(gl_batch, "parent_batch", None),
         lineage_batch_code=str(gl_batch.batch_no or "").strip() or None,
     )
@@ -365,7 +474,7 @@ def record_gl_final_capture(gl_batch: ProductionBatch, output_capture: Productio
         from_stage=ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
         to_stage=ProductionInventoryTransaction.Stage.GRANULATION_STORE,
         reference_no=str(gl_batch.batch_no or "").strip() or None,
-        scan_code=str(output_capture.binlot or output_capture.scancode_id or "").strip() or None,
+        scan_code=str(output_capture.scancode_id or "").strip() or None,
         status=ProductionInventoryTransaction.Status.IN_PROGRESS,
         created_by=created_by,
     )
@@ -381,8 +490,12 @@ def move_gl_batch_to_connection_line(gl_batch: ProductionBatch, output_capture: 
         ).select_related("item", "production_order", "source_batch")
     )
 
+    if not gran_store_rows:
+        raise ValidationError("No available Granulation Store stock found to move into Connection to Line.")
+
     for row in gran_store_rows:
-        row.outward_qty = row.inward_qty
+        available_qty = Decimal(str(row.balance_qty or ZERO))
+        row.outward_qty = Decimal(str(row.outward_qty or ZERO)) + available_qty
         row.balance_qty = ZERO
         row.to_stage = ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE
         row.status = ProductionInventoryTransaction.Status.COMPLETED
@@ -399,10 +512,10 @@ def move_gl_batch_to_connection_line(gl_batch: ProductionBatch, output_capture: 
                 item=row.item,
                 item_code=row.item_code,
                 item_name=row.item_name,
-                quantity=row.inward_qty,
-                inward_qty=row.inward_qty,
+                quantity=available_qty,
+                inward_qty=available_qty,
                 outward_qty=ZERO,
-                balance_qty=row.inward_qty,
+                balance_qty=available_qty,
                 from_stage=ProductionInventoryTransaction.Stage.GRANULATION_STORE,
                 to_stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
                 reference_no=str(gl_batch.batch_no or "").strip() or None,
@@ -440,12 +553,18 @@ def record_pr_final_capture(pr_batch: ProductionBatch, output_capture: Productio
     )
 
 
-def move_pr_batch_to_line_work_center(pr_batch: ProductionBatch, output_capture: ProductionOutputCapture | None = None, *, created_by=None) -> list[ProductionInventoryTransaction]:
+def move_pr_batch_to_line_work_center(
+    pr_batch: ProductionBatch,
+    output_capture: ProductionOutputCapture | None = None,
+    *,
+    created_by=None,
+    source_order: ProductionOrder | None = None,
+) -> list[ProductionInventoryTransaction]:
     moved_rows: list[ProductionInventoryTransaction] = []
     connection_rows = list(
         ProductionInventoryTransaction.objects.filter(
             stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
-            production_order=pr_batch.production_order,
+            production_order=source_order or pr_batch.production_order,
             balance_qty__gt=ZERO,
         ).select_related("item", "production_order", "source_batch")
     )
