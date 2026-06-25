@@ -17,4 +17,6 @@ dependencies = [
     "argon2-cffi>=25.1.0",
     "rg>=0.0.76",
     "pyserial>=3.5",
+    "channels>=4.3.2",
+    "daphne>=4.2.2",
 ]
