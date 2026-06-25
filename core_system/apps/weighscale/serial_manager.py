@@ -7,6 +7,7 @@ to all connected WebSocket clients via Django Channels group 'weighscale_live'.
 """
 
 import re
+import sys
 import threading
 import logging
 
@@ -201,6 +202,7 @@ def _broadcast(event: str, **data) -> None:
 
 
 def _read_loop() -> None:
+    global _serial, _active_port
     buffer = b""
 
     while not _stop_event.is_set():
@@ -241,8 +243,8 @@ def _read_loop() -> None:
                         _serial.close()
                     except Exception:
                         pass
-                globals()["_serial"] = None
-                globals()["_active_port"] = None
+                _serial = None
+                _active_port = None
             _broadcast("disconnected", reason="device_removed")
             break
 
