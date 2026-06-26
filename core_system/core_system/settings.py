@@ -17,7 +17,7 @@ for project_path in (BASE_DIR, GRN_SERVICE_DIR):
     if project_path_string not in sys.path:
         sys.path.insert(0, project_path_string)
 
-load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -45,7 +45,7 @@ def ensure_list_values(values: list[str], required_values: list[str]) -> list[st
     return list(dict.fromkeys(values + required_values))
 
 
-ALLOWED_HOSTS = env_list("ALLOWED_HOSTS", ["127.0.0.1", "localhost"])
+ALLOWED_HOSTS = env_list("ALLOWED_HOSTS", ["127.0.0.1", "localhost", "192.168.5.19"])
 CORS_ALLOWED_ORIGINS = env_list(
     "CORS_ALLOWED_ORIGINS",
     [
@@ -57,6 +57,7 @@ CORS_ALLOWED_ORIGINS = env_list(
         "http://127.0.0.1:5173",
         "http://localhost:8080",
         "http://127.0.0.1:8080",
+        "http://192.168.5.19:8080",
         LIVE_FRONTEND_ORIGIN,
     ],
 )
@@ -180,6 +181,8 @@ default_api_auth_exempt_paths = [
     "/api/token/refresh/",
     "/api/token/verify/",
     "/api/auth/login/",
+    "/api/scale/bridge/demand/",
+    "/api/scale/bridge/readings/",
 ]
 API_AUTH_EXEMPT_PATHS = list(
     dict.fromkeys(default_api_auth_exempt_paths + env_list("API_AUTH_EXEMPT_PATHS"))
@@ -215,6 +218,7 @@ SERIAL_PORT      = os.getenv("SERIAL_PORT", "AUTO")
 SERIAL_BAUD_RATE = int(os.getenv("SERIAL_BAUD_RATE", "9600"))
 SCALE_BRIDGE_API_KEY = os.getenv("SCALE_BRIDGE_API_KEY", "").strip()
 SCALE_BRIDGE_STALE_AFTER_SECONDS = int(os.getenv("SCALE_BRIDGE_STALE_AFTER_SECONDS", "5"))
+SCALE_STALE_AFTER_SECONDS = int(os.getenv("STALE_AFTER_SECONDS", "5"))
 
 CHANNEL_LAYERS = {
     "default": {

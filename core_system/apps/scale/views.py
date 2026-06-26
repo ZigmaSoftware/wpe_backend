@@ -1,9 +1,11 @@
 import json
+import logging
 import sys
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from django.core.cache import cache
 from django.conf import settings
 from django.http import JsonResponse
 from django.utils import timezone
@@ -13,10 +15,16 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 import hmac
 
+from . import serial_reader
 from .models import ScaleBridgeReading
+
+logger = logging.getLogger(__name__)
+BRIDGE_DEMAND_CACHE_KEY = "scale_bridge_demand_active"
 
 BRIDGE_STATUSES = {
     ScaleBridgeReading.Status.CONNECTED,
+    ScaleBridgeReading.Status.STABLE,
+    ScaleBridgeReading.Status.UNSTABLE,
     ScaleBridgeReading.Status.DISCONNECTED,
     ScaleBridgeReading.Status.ERROR,
     ScaleBridgeReading.Status.NO_SERIAL_PORT,
@@ -36,6 +44,22 @@ def _bridge_api_key_is_valid(request) -> bool:
 def _json_error(message: str, *, status_code: int, **extra: Any) -> JsonResponse:
     payload = {"status": "error", "error": message, **extra}
     return JsonResponse(payload, status=status_code)
+
+
+def _bridge_demand_timeout_seconds() -> int:
+    return max(2, int(getattr(settings, "SCALE_BRIDGE_DEMAND_TIMEOUT_SECONDS", 6)))
+
+
+def mark_bridge_demand_active() -> None:
+    cache.set(BRIDGE_DEMAND_CACHE_KEY, True, timeout=_bridge_demand_timeout_seconds())
+
+
+def is_bridge_demand_active() -> bool:
+    return cache.get(BRIDGE_DEMAND_CACHE_KEY) is True
+
+
+def clear_bridge_demand() -> None:
+    cache.delete(BRIDGE_DEMAND_CACHE_KEY)
 
 
 def _parse_payload(request) -> dict[str, Any]:
@@ -66,7 +90,10 @@ def _build_bridge_payload(reading: ScaleBridgeReading, *, stale: bool) -> dict[s
     if stale:
         return {
             "status": ScaleBridgeReading.Status.BRIDGE_NOT_REPORTING,
-            "error": "No latest reading received from local bridge",
+            "error": (
+                f"No latest reading received from local bridge for device "
+                f"{reading.device_id} at workstation {reading.workstation_id}."
+            ),
             "device_id": reading.device_id,
             "workstation_id": reading.workstation_id,
             "weight": f"{Decimal(reading.weight or 0):.3f}",
@@ -98,11 +125,17 @@ def _build_bridge_payload(reading: ScaleBridgeReading, *, stale: bool) -> dict[s
 
 def _get_bridge_reading(*, device_id: str | None, workstation_id: str | None) -> ScaleBridgeReading | None:
     queryset = ScaleBridgeReading.objects.all()
+    if device_id and workstation_id:
+        return queryset.filter(device_id=device_id, workstation_id=workstation_id).first()
     if device_id:
         return queryset.filter(device_id=device_id).first()
     if workstation_id:
         return queryset.filter(workstation_id=workstation_id).order_by("-last_seen_at", "device_id").first()
     return None
+
+
+def _get_latest_bridge_reading() -> ScaleBridgeReading | None:
+    return ScaleBridgeReading.objects.order_by("-last_seen_at", "device_id").first()
 
 
 class LatestWeightView(View):
@@ -113,12 +146,27 @@ class LatestWeightView(View):
     def get(self, request, *args, **kwargs):
         device_id = str(request.GET.get("device_id") or "").strip() or None
         workstation_id = str(request.GET.get("workstation_id") or "").strip() or None
+        prefer_bridge = str(request.GET.get("prefer_bridge") or "").strip().lower() in {"1", "true", "yes", "on"}
+        stale_after_seconds = int(getattr(settings, "SCALE_BRIDGE_STALE_AFTER_SECONDS", 5))
 
-        reading = _get_bridge_reading(device_id=device_id, workstation_id=workstation_id)
+        if device_id is None and workstation_id is None:
+            if not prefer_bridge:
+                return JsonResponse(serial_reader.get_latest_weight())
+            reading = _get_latest_bridge_reading()
+            if reading is None:
+                return JsonResponse(serial_reader.get_latest_weight())
+        else:
+            reading = _get_bridge_reading(device_id=device_id, workstation_id=workstation_id)
+
         if reading is None:
+            logger.info(
+                "Scale bridge latest requested but no reading exists: device_id=%s workstation_id=%s",
+                device_id or "",
+                workstation_id or "",
+            )
             return JsonResponse({
                 "status": ScaleBridgeReading.Status.BRIDGE_NOT_REPORTING,
-                "error": "No reading received from local bridge",
+                "error": "No reading received from local bridge for the selected device/workstation.",
                 "device_id": device_id,
                 "workstation_id": workstation_id,
                 "weight": "0.000",
@@ -128,8 +176,15 @@ class LatestWeightView(View):
                 "platform": sys.platform,
             })
 
-        stale_after_seconds = int(getattr(settings, "SCALE_BRIDGE_STALE_AFTER_SECONDS", 5))
         stale = timezone.now() - reading.last_seen_at > timedelta(seconds=stale_after_seconds)
+        if stale:
+            logger.warning(
+                "Scale bridge reading is stale: device_id=%s workstation_id=%s last_seen_at=%s stale_after_seconds=%s",
+                reading.device_id,
+                reading.workstation_id,
+                reading.last_seen_at.isoformat() if reading.last_seen_at else None,
+                stale_after_seconds,
+            )
         return JsonResponse(_build_bridge_payload(reading, stale=stale))
 
 
@@ -162,7 +217,7 @@ class ScaleBridgeDevicesView(View):
         stale_after_seconds = int(getattr(settings, "SCALE_BRIDGE_STALE_AFTER_SECONDS", 5))
         cutoff = timezone.now() - timedelta(seconds=stale_after_seconds)
         devices = []
-        for reading in ScaleBridgeReading.objects.all().order_by("-last_seen_at", "device_id"):
+        for reading in ScaleBridgeReading.objects.all().order_by("-last_seen_at", "device_id", "workstation_id"):
             effective_status = (
                 ScaleBridgeReading.Status.BRIDGE_NOT_REPORTING
                 if reading.last_seen_at < cutoff
@@ -181,6 +236,40 @@ class ScaleBridgeDevicesView(View):
                 "error": reading.error or None,
             })
         return JsonResponse({"devices": devices})
+
+
+class ScaleBridgeDemandStatusView(View):
+    """GET /api/scale/bridge/demand/ — tells the local bridge whether a UI currently needs live bridge weight."""
+
+    http_method_names = ["get"]
+
+    def get(self, request, *args, **kwargs):
+        if not _bridge_api_key_is_valid(request):
+            return _json_error("Invalid or missing bridge API key.", status_code=403)
+
+        return JsonResponse({
+            "active": is_bridge_demand_active(),
+            "timeout_seconds": _bridge_demand_timeout_seconds(),
+        })
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class ScaleBridgeDemandActivationView(View):
+    """POST /api/scale/bridge/demand/activate/ — UI heartbeat for bridge demand."""
+
+    http_method_names = ["post", "delete"]
+
+    def post(self, request, *args, **kwargs):
+        mark_bridge_demand_active()
+        return JsonResponse({
+            "ok": True,
+            "active": True,
+            "timeout_seconds": _bridge_demand_timeout_seconds(),
+        })
+
+    def delete(self, request, *args, **kwargs):
+        clear_bridge_demand()
+        return JsonResponse({"ok": True, "active": False})
 
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -210,13 +299,21 @@ class ScaleBridgeReadingIngestView(View):
             return _json_error("status is invalid.", status_code=400)
 
         weight = _parse_decimal_weight(payload.get("weight"))
-        if status == ScaleBridgeReading.Status.CONNECTED and weight is None:
-            return _json_error("weight must be a valid decimal when status is connected.", status_code=400)
+        statuses_requiring_weight = {
+            ScaleBridgeReading.Status.CONNECTED,
+            ScaleBridgeReading.Status.STABLE,
+            ScaleBridgeReading.Status.UNSTABLE,
+        }
+        if status in statuses_requiring_weight and weight is None:
+            return _json_error(
+                "weight must be a valid decimal when status is connected, stable, or unstable.",
+                status_code=400,
+            )
 
         reading, _created = ScaleBridgeReading.objects.update_or_create(
             device_id=device_id,
+            workstation_id=workstation_id,
             defaults={
-                "workstation_id": workstation_id,
                 "weight": weight if weight is not None else Decimal("0.000"),
                 "unit": str(payload.get("unit") or "kg").strip() or "kg",
                 "status": status,
@@ -228,6 +325,15 @@ class ScaleBridgeReadingIngestView(View):
                 "last_seen_at": timezone.now(),
             },
         )
+
+        if reading.status != ScaleBridgeReading.Status.CONNECTED:
+            logger.info(
+                "Scale bridge reported non-connected status: device_id=%s workstation_id=%s status=%s error=%s",
+                reading.device_id,
+                reading.workstation_id,
+                reading.status,
+                reading.error,
+            )
 
         return JsonResponse({
             "ok": True,
