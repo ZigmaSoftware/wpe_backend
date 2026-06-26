@@ -23,6 +23,7 @@ CH340_VID = 0x1A86
 CH340_PID = 0x7523
 CONNECTED_STATUSES = {"connected", "stable", "unstable"}
 RETRY_DELAY_SECONDS = 3
+BACKEND_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 BRIDGE_ENV_PATH = Path(__file__).resolve().parent / ".env"
 
 
@@ -52,7 +53,12 @@ class BridgeState:
 
 
 def load_config() -> BridgeConfig:
-    load_dotenv(BRIDGE_ENV_PATH, override=True)
+    # Support either the shared backend env or a bridge-local env, with bridge-local
+    # values taking precedence for per-workstation overrides.
+    if BACKEND_ENV_PATH.exists():
+        load_dotenv(BACKEND_ENV_PATH, override=False)
+    if BRIDGE_ENV_PATH.exists():
+        load_dotenv(BRIDGE_ENV_PATH, override=True)
     config = BridgeConfig(
         server_url=os.getenv("WPE_SERVER_URL", "").strip().rstrip("/"),
         bridge_api_key=os.getenv("SCALE_BRIDGE_API_KEY", os.getenv("BRIDGE_API_KEY", "")).strip(),

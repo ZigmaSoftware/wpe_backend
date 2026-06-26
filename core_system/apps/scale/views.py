@@ -19,6 +19,7 @@ from . import serial_reader
 from .models import ScaleBridgeReading
 
 logger = logging.getLogger(__name__)
+BRIDGE_DEMAND_CACHE_KEY = "scale_bridge_demand_active"
 
 BRIDGE_STATUSES = {
     ScaleBridgeReading.Status.CONNECTED,
@@ -149,9 +150,14 @@ class LatestWeightView(View):
         stale_after_seconds = int(getattr(settings, "SCALE_BRIDGE_STALE_AFTER_SECONDS", 5))
 
         if device_id is None and workstation_id is None:
-            return JsonResponse(serial_reader.get_latest_weight())
+            if not prefer_bridge:
+                return JsonResponse(serial_reader.get_latest_weight())
+            reading = _get_latest_bridge_reading()
+            if reading is None:
+                return JsonResponse(serial_reader.get_latest_weight())
+        else:
+            reading = _get_bridge_reading(device_id=device_id, workstation_id=workstation_id)
 
-        reading = _get_bridge_reading(device_id=device_id, workstation_id=workstation_id)
         if reading is None:
             logger.info(
                 "Scale bridge latest requested but no reading exists: device_id=%s workstation_id=%s",
@@ -170,7 +176,6 @@ class LatestWeightView(View):
                 "platform": sys.platform,
             })
 
-        stale_after_seconds = int(getattr(settings, "SCALE_BRIDGE_STALE_AFTER_SECONDS", 5))
         stale = timezone.now() - reading.last_seen_at > timedelta(seconds=stale_after_seconds)
         if stale:
             logger.warning(
