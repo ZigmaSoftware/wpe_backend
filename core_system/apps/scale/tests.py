@@ -1,13 +1,18 @@
+import json
 from types import SimpleNamespace
 from datetime import timedelta
-from unittest import TestCase
+from unittest import TestCase, skipIf
 from unittest.mock import patch
 
-from django.test import TestCase as DjangoTestCase, override_settings
+from django.test import RequestFactory, SimpleTestCase, TestCase as DjangoTestCase, override_settings
 from django.utils import timezone
 
 from .models import ScaleBridgeReading
-from . import serial_reader
+
+try:
+    from . import serial_reader
+except ImportError:
+    serial_reader = None
 
 
 def make_port(
@@ -34,6 +39,7 @@ def make_port(
     )
 
 
+@skipIf(serial_reader is None, "apps.scale.serial_reader is not present in this checkout.")
 class AutoPortSelectionTests(TestCase):
     def setUp(self):
         serial_reader._failed_ports_until.clear()
@@ -72,6 +78,7 @@ class AutoPortSelectionTests(TestCase):
         self.assertEqual(serial_reader.find_auto_port(), "/dev/ttyUSB1")
 
 
+@skipIf(serial_reader is None, "apps.scale.serial_reader is not present in this checkout.")
 class ScaleDisabledStateTests(TestCase):
     def test_disabled_weight_payload_is_disconnected(self):
         payload = serial_reader.get_disabled_weight()
@@ -83,6 +90,66 @@ class ScaleDisabledStateTests(TestCase):
         self.assertIsNone(payload["detected_port"])
         self.assertTrue(payload["timestamp"])
         self.assertEqual(payload["source"], "server_serial")
+
+
+@skipIf(serial_reader is None, "apps.scale.serial_reader is not present in this checkout.")
+class LatestWeightServerSerialEndpointTests(SimpleTestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    @patch("apps.scale.views.serial_reader.get_latest_weight")
+    def test_latest_weight_without_ids_uses_server_serial_reader(self, get_latest_weight):
+        get_latest_weight.return_value = {
+            "status": "stable",
+            "weight": "12.345",
+            "unit": "kg",
+            "source": "server_serial",
+        }
+
+        from .views import LatestWeightView
+
+        response = LatestWeightView.as_view()(self.factory.get("/api/scale/weight/latest/"))
+        payload = json.loads(response.content.decode("utf-8"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "stable")
+        self.assertEqual(payload["source"], "server_serial")
+        get_latest_weight.assert_called_once_with()
+
+
+@skipIf(serial_reader is None, "apps.scale.serial_reader is not present in this checkout.")
+@override_settings(SCALE_ENABLED=True, SCALE_STALE_AFTER_SECONDS=5)
+class ServerSerialStalePayloadTests(SimpleTestCase):
+    def tearDown(self):
+        from apps.weighscale import serial_manager
+
+        with serial_manager._lock:
+            serial_manager._latest_payload = None
+
+    @patch("apps.scale.serial_reader._connect_if_needed", return_value=(True, None, "/dev/ttyUSB0"))
+    def test_stale_server_serial_reading_becomes_disconnected(self, _connect_if_needed):
+        from apps.weighscale import serial_manager
+
+        stale_seen_at = (timezone.now() - timedelta(seconds=30)).isoformat()
+        with serial_manager._lock:
+            serial_manager._latest_payload = {
+                "status": "stable",
+                "weight": "15.250",
+                "unit": "kg",
+                "stable": True,
+                "timestamp": stale_seen_at,
+                "captured_at": stale_seen_at,
+                "last_seen_at": stale_seen_at,
+                "raw_data": "ST,GS,+15.250kg",
+                "detected_port": "/dev/ttyUSB0",
+            }
+
+        payload = serial_reader.get_latest_weight()
+
+        self.assertEqual(payload["status"], "disconnected")
+        self.assertEqual(payload["weight"], "15.250")
+        self.assertEqual(payload["source"], "server_serial")
+        self.assertEqual(payload["detected_port"], "/dev/ttyUSB0")
 
 
 @override_settings(SCALE_BRIDGE_API_KEY="bridge-secret", SCALE_BRIDGE_STALE_AFTER_SECONDS=5)
@@ -106,10 +173,91 @@ class ScaleBridgeApiTests(DjangoTestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        reading = ScaleBridgeReading.objects.get(device_id="AD-WEIGH-01")
+        reading = ScaleBridgeReading.objects.get(device_id="AD-WEIGH-01", workstation_id="PC-01")
         self.assertEqual(reading.workstation_id, "PC-01")
         self.assertEqual(str(reading.weight), "12.345")
         self.assertEqual(reading.status, ScaleBridgeReading.Status.CONNECTED)
+
+    def test_bridge_ingest_accepts_stable_reading_with_weight(self):
+        response = self.client.post(
+            "/api/scale/bridge/readings/",
+            data='{"device_id":"AD-WEIGH-01","workstation_id":"PC-01","status":"stable","weight":12.345,"unit":"kg"}',
+            content_type="application/json",
+            headers={"X-Bridge-Api-Key": "bridge-secret"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        reading = ScaleBridgeReading.objects.get(device_id="AD-WEIGH-01", workstation_id="PC-01")
+        self.assertEqual(reading.status, ScaleBridgeReading.Status.STABLE)
+
+    def test_bridge_ingest_rejects_unstable_reading_without_weight(self):
+        response = self.client.post(
+            "/api/scale/bridge/readings/",
+            data='{"device_id":"AD-WEIGH-01","workstation_id":"PC-01","status":"unstable"}',
+            content_type="application/json",
+            headers={"X-Bridge-Api-Key": "bridge-secret"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(ScaleBridgeReading.objects.count(), 0)
+
+    def test_bridge_ingest_keeps_same_device_on_different_workstations_separate(self):
+        headers = {"X-Bridge-Api-Key": "bridge-secret"}
+        first = self.client.post(
+            "/api/scale/bridge/readings/",
+            data='{"device_id":"SCALE-02","workstation_id":"WAREHOUSE-PC","status":"connected","weight":4.200}',
+            content_type="application/json",
+            headers=headers,
+        )
+        second = self.client.post(
+            "/api/scale/bridge/readings/",
+            data='{"device_id":"SCALE-02","workstation_id":"PACKING-PC","status":"connected","weight":9.500}',
+            content_type="application/json",
+            headers=headers,
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(ScaleBridgeReading.objects.count(), 2)
+        self.assertEqual(
+            str(ScaleBridgeReading.objects.get(device_id="SCALE-02", workstation_id="WAREHOUSE-PC").weight),
+            "4.200",
+        )
+        self.assertEqual(
+            str(ScaleBridgeReading.objects.get(device_id="SCALE-02", workstation_id="PACKING-PC").weight),
+            "9.500",
+        )
+
+    def test_latest_weight_uses_device_and_workstation_pair_when_both_are_selected(self):
+        now = timezone.now()
+        ScaleBridgeReading.objects.create(
+            device_id="SCALE-02",
+            workstation_id="WAREHOUSE-PC",
+            weight="4.200",
+            status=ScaleBridgeReading.Status.CONNECTED,
+            captured_at=now,
+            last_seen_at=now,
+        )
+        ScaleBridgeReading.objects.create(
+            device_id="SCALE-02",
+            workstation_id="PACKING-PC",
+            weight="9.500",
+            status=ScaleBridgeReading.Status.CONNECTED,
+            captured_at=now,
+            last_seen_at=now,
+        )
+
+        response = self.client.get(
+            "/api/scale/weight/latest/",
+            {"device_id": "SCALE-02", "workstation_id": "PACKING-PC"},
+        )
+        payload = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "connected")
+        self.assertEqual(payload["device_id"], "SCALE-02")
+        self.assertEqual(payload["workstation_id"], "PACKING-PC")
+        self.assertEqual(payload["weight"], "9.500")
 
     def test_latest_weight_returns_bridge_payload_for_selected_device(self):
         captured_at = timezone.now()

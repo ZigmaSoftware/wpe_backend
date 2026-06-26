@@ -20,9 +20,9 @@ from dotenv import load_dotenv
 
 CH340_VID = 0x1A86
 CH340_PID = 0x7523
-CONNECTED_STATUSES = {"connected"}
+CONNECTED_STATUSES = {"connected", "stable", "unstable"}
 RETRY_DELAY_SECONDS = 3
-BACKEND_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+BRIDGE_ENV_PATH = Path(__file__).resolve().parent / ".env"
 
 
 @dataclass
@@ -49,7 +49,7 @@ class BridgeState:
 
 
 def load_config() -> BridgeConfig:
-    load_dotenv(BACKEND_ENV_PATH)
+    load_dotenv(BRIDGE_ENV_PATH, override=True)
     config = BridgeConfig(
         server_url=os.getenv("WPE_SERVER_URL", "").strip().rstrip("/"),
         bridge_api_key=os.getenv("SCALE_BRIDGE_API_KEY", os.getenv("BRIDGE_API_KEY", "")).strip(),
@@ -136,12 +136,13 @@ def describe_available_ports() -> str:
     )
 
 
-def parse_weight_data(raw_line: str) -> dict[str, str] | None:
+def parse_weight_data(raw_line: str) -> dict[str, str | bool] | None:
     line = raw_line.strip()
     if not line:
         return None
 
     upper = line.upper()
+    stable = ("ST" in upper or "GS" in upper) or ("US" not in upper and "UNSTABLE" not in upper)
     match = re.search(r"([+-]?\s*\d+\.?\d*)\s*(KG|LBS|LB|OZ|T\b|G\b)", upper)
     if match:
         weight_str = match.group(1).replace(" ", "")
@@ -150,6 +151,7 @@ def parse_weight_data(raw_line: str) -> dict[str, str] | None:
             return {
                 "weight": f"{float(weight_str):.3f}",
                 "unit": unit_map.get(match.group(2), match.group(2).lower()),
+                "stable": stable,
             }
         except ValueError:
             return None
@@ -159,7 +161,11 @@ def parse_weight_data(raw_line: str) -> dict[str, str] | None:
         return None
 
     try:
-        return {"weight": f"{float(numeric_match.group(1).replace(' ', '')):.3f}", "unit": "kg"}
+        return {
+            "weight": f"{float(numeric_match.group(1).replace(' ', '')):.3f}",
+            "unit": "kg",
+            "stable": stable,
+        }
     except ValueError:
         return None
 
@@ -296,7 +302,7 @@ def main() -> None:
                             )
                         else:
                             state = BridgeState(
-                                status="connected",
+                                status="stable" if parsed["stable"] else "unstable",
                                 weight=parsed["weight"],
                                 unit=parsed["unit"],
                                 raw_value=raw_line,
