@@ -1440,6 +1440,7 @@ class ProductionOutputCapture(models.Model):
     session_key = models.TextField(blank=True)
     device_id = models.CharField(max_length=100, blank=True, db_index=True)
     workstation_id = models.CharField(max_length=100, blank=True, db_index=True)
+    bridge_client_id = models.CharField(max_length=128, blank=True, db_index=True)
     weight_source = models.CharField(max_length=32, blank=True, default="")
     captured_at = models.DateTimeField(default=timezone.now, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)

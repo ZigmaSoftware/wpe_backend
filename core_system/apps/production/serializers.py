@@ -810,6 +810,7 @@ class ProductionOutputCaptureSerializer(serializers.ModelSerializer):
             "session_key",
             "device_id",
             "workstation_id",
+            "bridge_client_id",
             "weight_source",
             "captured_at",
             "component_columns",

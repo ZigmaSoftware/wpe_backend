@@ -653,12 +653,14 @@ def get_production_scancode_timezone():
 def extract_weight_capture_metadata(request):
     device_id = str(request.data.get("device_id") or "").strip()
     workstation_id = str(request.data.get("workstation_id") or "").strip()
+    bridge_client_id = str(request.data.get("bridge_client_id") or request.data.get("client_id") or "").strip()
     weight_source = str(request.data.get("source") or request.data.get("weight_source") or "").strip()
     if not weight_source:
         weight_source = "local_bridge" if device_id or workstation_id else "server_serial"
     return {
         "device_id": device_id,
         "workstation_id": workstation_id,
+        "bridge_client_id": bridge_client_id,
         "weight_source": weight_source,
     }
 
@@ -1691,6 +1693,7 @@ class ProductionBatchConfirmAPIView(generics.GenericAPIView):
                 "session_key": self._build_output_session_key(entries),
                 "device_id": metadata["device_id"],
                 "workstation_id": metadata["workstation_id"],
+                "bridge_client_id": metadata["bridge_client_id"],
                 "weight_source": metadata["weight_source"],
                 "captured_at": captured_at,
             },
@@ -2134,6 +2137,7 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
                     session_key=self._build_manual_output_session_key(batch, weight_kg, captured_at),
                     device_id=metadata["device_id"],
                     workstation_id=metadata["workstation_id"],
+                    bridge_client_id=metadata["bridge_client_id"],
                     weight_source=metadata["weight_source"],
                     captured_at=captured_at,
                 )
