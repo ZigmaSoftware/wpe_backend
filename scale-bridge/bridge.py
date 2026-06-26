@@ -4,6 +4,7 @@ import logging
 import os
 import platform
 import re
+import socket
 import sys
 import time
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ CH340_VID = 0x1A86
 CH340_PID = 0x7523
 CONNECTED_STATUSES = {"connected", "stable", "unstable"}
 RETRY_DELAY_SECONDS = 3
+BACKEND_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 BRIDGE_ENV_PATH = Path(__file__).resolve().parent / ".env"
 
 
@@ -35,6 +37,8 @@ class BridgeConfig:
     serial_baud_rate: int
     push_interval_ms: int
     stale_after_seconds: int
+    demand_poll_seconds: int
+    idle_demand_poll_seconds: int
 
 
 @dataclass
@@ -49,7 +53,12 @@ class BridgeState:
 
 
 def load_config() -> BridgeConfig:
-    load_dotenv(BRIDGE_ENV_PATH, override=True)
+    # Support either the shared backend env or a bridge-local env, with bridge-local
+    # values taking precedence for per-workstation overrides.
+    if BACKEND_ENV_PATH.exists():
+        load_dotenv(BACKEND_ENV_PATH, override=False)
+    if BRIDGE_ENV_PATH.exists():
+        load_dotenv(BRIDGE_ENV_PATH, override=True)
     config = BridgeConfig(
         server_url=os.getenv("WPE_SERVER_URL", "").strip().rstrip("/"),
         bridge_api_key=os.getenv("SCALE_BRIDGE_API_KEY", os.getenv("BRIDGE_API_KEY", "")).strip(),
@@ -59,6 +68,8 @@ def load_config() -> BridgeConfig:
         serial_baud_rate=int(os.getenv("SERIAL_BAUD_RATE", "9600")),
         push_interval_ms=max(200, int(os.getenv("PUSH_INTERVAL_MS", "500"))),
         stale_after_seconds=max(2, int(os.getenv("STALE_AFTER_SECONDS", "5"))),
+        demand_poll_seconds=max(1, int(os.getenv("BRIDGE_DEMAND_POLL_SECONDS", "2"))),
+        idle_demand_poll_seconds=max(2, int(os.getenv("BRIDGE_IDLE_POLL_SECONDS", "10"))),
     )
     missing = [
         name
@@ -186,7 +197,7 @@ def push_state(session: requests.Session, config: BridgeConfig, state: BridgeSta
     response = session.post(
         f"{config.server_url}/api/scale/bridge/readings/",
         json=payload,
-        timeout=10,
+        timeout=(3, 5),
         headers={"X-Bridge-Api-Key": config.bridge_api_key},
     )
     response.raise_for_status()
@@ -199,6 +210,17 @@ def push_state(session: requests.Session, config: BridgeConfig, state: BridgeSta
         config.workstation_id,
         response.text.strip(),
     )
+
+
+def demand_is_active(session: requests.Session, config: BridgeConfig) -> bool:
+    response = session.get(
+        f"{config.server_url}/api/scale/bridge/demand/",
+        timeout=(3, 5),
+        headers={"X-Bridge-Api-Key": config.bridge_api_key},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return bool(payload.get("active"))
 
 
 def build_disconnected_state(*, status: str, error: str, detected_port: str | None) -> BridgeState:
@@ -259,6 +281,8 @@ def main() -> None:
     state = build_disconnected_state(status="disconnected", error="Bridge starting.", detected_port=None)
     last_push_at = 0.0
     last_valid_read_at = 0.0
+    last_demand_check_at = 0.0
+    bridge_active = False
 
     logging.info(
         "Scale bridge started: os=%s platform=%s device=%s workstation=%s server=%s port=%s baud_rate=%s visible_ports=%s",
@@ -274,6 +298,27 @@ def main() -> None:
 
     while True:
         try:
+            now_monotonic = time.monotonic()
+            demand_poll_interval = (
+                config.demand_poll_seconds if bridge_active else config.idle_demand_poll_seconds
+            )
+            if now_monotonic - last_demand_check_at >= demand_poll_interval:
+                bridge_active = demand_is_active(session, config)
+                last_demand_check_at = now_monotonic
+
+            if not bridge_active:
+                if serial_conn is not None and serial_conn.is_open:
+                    serial_conn.close()
+                serial_conn = None
+                active_port = None
+                state = build_disconnected_state(
+                    status="disconnected",
+                    error="Waiting for an active Output Weight Capture page.",
+                    detected_port=None,
+                )
+                time.sleep(0.25)
+                continue
+
             if serial_conn is None or not serial_conn.is_open:
                 serial_conn, active_port, state = open_serial_connection(config)
                 last_push_at = 0.0
@@ -343,7 +388,13 @@ def main() -> None:
             serial_conn = None
             time.sleep(RETRY_DELAY_SECONDS)
         except requests.RequestException as exc:
-            logging.warning("Push failed: %s", exc)
+            logging.warning("Bridge request failed: %s", exc)
+            last_push_at = time.monotonic()
+            bridge_active = False
+            if serial_conn is not None and serial_conn.is_open:
+                serial_conn.close()
+            serial_conn = None
+            active_port = None
             time.sleep(RETRY_DELAY_SECONDS)
         except KeyboardInterrupt:
             logging.info("Scale bridge stopped by user.")

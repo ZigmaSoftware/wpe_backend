@@ -30,6 +30,7 @@ urlpatterns = [
     path("grn/<int:pk>/move-pending-to-qcr/", GRNPendingToQCRAPIView.as_view(), name="grn-pending-to-qcr"),
     path("qcr/", QCRListAPIView.as_view(), name="qcr-list"),
     path("qcr/grn/", QCRListAPIView.as_view(tab_scope="grn"), name="qcr-grn-list"),
+    path("qcr/completed/", QCRListAPIView.as_view(tab_scope="completed"), name="qcr-completed-list"),
     path("qcr/cancelled/", QCRListAPIView.as_view(tab_scope="cancelled"), name="qcr-cancelled-list"),
     path("qcr/<int:pk>/status/", QCRStatusUpdateAPIView.as_view(), name="qcr-status-update"),
     path("warehouse-inventory/", WarehouseInventoryListAPIView.as_view(), name="warehouse-inventory-list"),
