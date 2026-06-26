@@ -33,6 +33,7 @@ class BridgeConfig:
     bridge_api_key: str
     device_id: str
     workstation_id: str
+    bridge_client_id: str
     serial_port: str
     serial_baud_rate: int
     push_interval_ms: int
@@ -52,6 +53,20 @@ class BridgeState:
     captured_at: datetime | None = None
 
 
+def normalize_identifier(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9._:-]+", "-", value.strip())
+    return normalized.strip("-") or "unknown-client"
+
+
+def resolve_bridge_client_id() -> str:
+    configured = os.getenv("BRIDGE_CLIENT_ID", os.getenv("CLIENT_ID", "")).strip()
+    if configured:
+        return normalize_identifier(configured)
+
+    hostname = socket.gethostname() or platform.node() or "unknown-host"
+    return normalize_identifier(hostname)
+
+
 def load_config() -> BridgeConfig:
     # Support either the shared backend env or a bridge-local env, with bridge-local
     # values taking precedence for per-workstation overrides.
@@ -64,6 +79,7 @@ def load_config() -> BridgeConfig:
         bridge_api_key=os.getenv("SCALE_BRIDGE_API_KEY", os.getenv("BRIDGE_API_KEY", "")).strip(),
         device_id=os.getenv("DEVICE_ID", "").strip(),
         workstation_id=os.getenv("WORKSTATION_ID", "").strip(),
+        bridge_client_id=resolve_bridge_client_id(),
         serial_port=os.getenv("SERIAL_PORT", "AUTO").strip() or "AUTO",
         serial_baud_rate=int(os.getenv("SERIAL_BAUD_RATE", "9600")),
         push_interval_ms=max(200, int(os.getenv("PUSH_INTERVAL_MS", "500"))),
@@ -185,6 +201,7 @@ def push_state(session: requests.Session, config: BridgeConfig, state: BridgeSta
     payload = {
         "device_id": config.device_id,
         "workstation_id": config.workstation_id,
+        "bridge_client_id": config.bridge_client_id,
         "weight": state.weight,
         "unit": state.unit,
         "status": state.status,
@@ -202,12 +219,13 @@ def push_state(session: requests.Session, config: BridgeConfig, state: BridgeSta
     )
     response.raise_for_status()
     logging.info(
-        "Push success: status=%s weight=%s %s device=%s workstation=%s response=%s",
+        "Push success: status=%s weight=%s %s device=%s workstation=%s bridge_client_id=%s response=%s",
         state.status,
         state.weight,
         state.unit,
         config.device_id,
         config.workstation_id,
+        config.bridge_client_id,
         response.text.strip(),
     )
 
@@ -285,11 +303,12 @@ def main() -> None:
     bridge_active = False
 
     logging.info(
-        "Scale bridge started: os=%s platform=%s device=%s workstation=%s server=%s port=%s baud_rate=%s visible_ports=%s",
+        "Scale bridge started: os=%s platform=%s device=%s workstation=%s bridge_client_id=%s server=%s port=%s baud_rate=%s visible_ports=%s",
         platform.platform(),
         sys.platform,
         config.device_id,
         config.workstation_id,
+        config.bridge_client_id,
         config.server_url,
         config.serial_port,
         config.serial_baud_rate,
