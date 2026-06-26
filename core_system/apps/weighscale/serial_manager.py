@@ -7,6 +7,7 @@ to all connected WebSocket clients via Django Channels group 'weighscale_live'.
 """
 
 import re
+import sys
 import threading
 import logging
 
@@ -25,6 +26,7 @@ _serial: serial.Serial | None = None
 _reader_thread: threading.Thread | None = None
 _stop_event = threading.Event()
 _active_port: str | None = None
+_latest_payload: dict | None = None
 
 
 CH340_VID = 0x1A86
@@ -100,6 +102,40 @@ def get_active_port() -> str | None:
         return _active_port
 
 
+def get_latest_payload() -> dict | None:
+    with _lock:
+        return dict(_latest_payload) if _latest_payload is not None else None
+
+
+def _store_payload(
+    *,
+    status: str,
+    weight: float | str = 0,
+    unit: str = "kg",
+    stable: bool | None = None,
+    raw_data: str = "",
+    error: str = "",
+    detected_port: str | None = None,
+) -> None:
+    now = timezone.now().isoformat()
+    payload = {
+        "status": status,
+        "weight": f"{float(weight or 0):.3f}",
+        "unit": unit or "kg",
+        "stable": stable,
+        "timestamp": now,
+        "captured_at": now,
+        "last_seen_at": now,
+        "raw_data": raw_data or "",
+        "detected_port": detected_port,
+        "error": error or None,
+        "source": "server_serial",
+    }
+    with _lock:
+        global _latest_payload
+        _latest_payload = payload
+
+
 def connect(port: str, baud_rate: int = 9600) -> tuple[bool, str | None]:
     global _serial, _reader_thread, _active_port, _stop_event
 
@@ -120,8 +156,10 @@ def connect(port: str, baud_rate: int = 9600) -> tuple[bool, str | None]:
         msg = str(exc)
         if "[Errno 13]" in msg or "permission denied" in msg.lower():
             msg = f"{msg} — Permission denied. Add user to dialout group: sudo usermod -aG dialout $USER"
+        _store_payload(status="error", error=msg, detected_port=port)
         return False, msg
     except Exception as exc:
+        _store_payload(status="error", error=str(exc), detected_port=port)
         return False, str(exc)
 
     with _lock:
@@ -135,6 +173,7 @@ def connect(port: str, baud_rate: int = 9600) -> tuple[bool, str | None]:
         daemon=True,
     )
     _reader_thread.start()
+    _store_payload(status="connected", detected_port=port)
     logger.info("Weighscale serial connected: port=%s baud=%d", port, baud_rate)
     return True, None
 
@@ -156,6 +195,7 @@ def disconnect() -> bool:
         pass
 
     _broadcast("disconnected", reason="explicit_disconnect")
+    _store_payload(status="disconnected", error="explicit_disconnect", detected_port=None)
     logger.info("Weighscale serial disconnected.")
     return True
 
@@ -201,6 +241,7 @@ def _broadcast(event: str, **data) -> None:
 
 
 def _read_loop() -> None:
+    global _serial, _active_port
     buffer = b""
 
     while not _stop_event.is_set():
@@ -235,19 +276,33 @@ def _read_loop() -> None:
 
         except serial.SerialException as exc:
             logger.warning("Weighscale serial error: %s", exc)
+            disconnected_port = None
             with _lock:
+                disconnected_port = _active_port
                 if _serial:
                     try:
                         _serial.close()
                     except Exception:
                         pass
-                globals()["_serial"] = None
-                globals()["_active_port"] = None
+                _serial = None
+                _active_port = None
             _broadcast("disconnected", reason="device_removed")
+            _store_payload(status="disconnected", error=str(exc), detected_port=disconnected_port)
             break
 
         except Exception as exc:
             logger.exception("Weighscale read loop error: %s", exc)
+            error_port = None
+            with _lock:
+                error_port = _active_port
+                if _serial:
+                    try:
+                        _serial.close()
+                    except Exception:
+                        pass
+                _serial = None
+                _active_port = None
+            _store_payload(status="error", error=str(exc), detected_port=error_port)
             break
 
     logger.info("Weighscale read loop exited.")
@@ -256,13 +311,30 @@ def _read_loop() -> None:
 def _process_line(raw_line: str) -> None:
     parsed = parse_weight(raw_line)
     if parsed:
+        status = "stable" if parsed["stable"] else "unstable"
+        detected_port = get_active_port()
+        timestamp = timezone.now().isoformat()
+        _store_payload(
+            status=status,
+            weight=parsed["weight"],
+            unit=parsed["unit"],
+            stable=parsed["stable"],
+            raw_data=raw_line,
+            detected_port=detected_port,
+        )
         _broadcast(
             "weight",
             raw=raw_line,
             weight=parsed["weight"],
             unit=parsed["unit"],
             stable=parsed["stable"],
-            timestamp=timezone.now().isoformat(),
+            timestamp=timestamp,
         )
     else:
+        _store_payload(
+            status="invalid_reading",
+            raw_data=raw_line,
+            error="Unable to parse weight from serial data.",
+            detected_port=get_active_port(),
+        )
         logger.debug("Unparseable serial line: %r", raw_line)
