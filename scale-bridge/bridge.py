@@ -5,12 +5,16 @@ import os
 import platform
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from json import dumps
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 import serial
@@ -35,6 +39,8 @@ class BridgeConfig:
     serial_baud_rate: int
     push_interval_ms: int
     stale_after_seconds: int
+    identity_host: str
+    identity_port: int
 
 
 @dataclass
@@ -59,6 +65,8 @@ def load_config() -> BridgeConfig:
         serial_baud_rate=int(os.getenv("SERIAL_BAUD_RATE", "9600")),
         push_interval_ms=max(200, int(os.getenv("PUSH_INTERVAL_MS", "500"))),
         stale_after_seconds=max(2, int(os.getenv("STALE_AFTER_SECONDS", "5"))),
+        identity_host=os.getenv("LOCAL_IDENTITY_HOST", "127.0.0.1").strip() or "127.0.0.1",
+        identity_port=max(0, int(os.getenv("LOCAL_IDENTITY_PORT", "8765"))),
     )
     missing = [
         name
@@ -79,6 +87,70 @@ def setup_logging() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+
+
+class LocalIdentityHandler(BaseHTTPRequestHandler):
+    config: BridgeConfig
+
+    def end_headers(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Accept")
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(204)
+        self.end_headers()
+
+    def do_GET(self) -> None:
+        path = urlparse(self.path).path
+        if path not in {"/", "/identity"}:
+            self.send_response(404)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":false,"error":"not_found"}')
+            return
+
+        body = dumps({
+            "ok": True,
+            "device_id": self.config.device_id,
+            "workstation_id": self.config.workstation_id,
+            "serial_port": self.config.serial_port,
+            "serial_baud_rate": self.config.serial_baud_rate,
+            "server_url": self.config.server_url,
+        }).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        logging.debug("Local identity request: " + format, *args)
+
+
+def start_identity_server(config: BridgeConfig) -> None:
+    if config.identity_port <= 0:
+        logging.info("Local identity endpoint disabled.")
+        return
+
+    handler = type("ConfiguredLocalIdentityHandler", (LocalIdentityHandler,), {"config": config})
+    try:
+        server = ThreadingHTTPServer((config.identity_host, config.identity_port), handler)
+    except OSError as exc:
+        logging.warning("Local identity endpoint unavailable on %s:%s: %s", config.identity_host, config.identity_port, exc)
+        return
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    logging.info(
+        "Local identity endpoint listening at http://%s:%s/identity for device=%s workstation=%s",
+        config.identity_host,
+        config.identity_port,
+        config.device_id,
+        config.workstation_id,
     )
 
 
@@ -253,6 +325,7 @@ def open_serial_connection(config: BridgeConfig) -> tuple[serial.Serial | None, 
 def main() -> None:
     setup_logging()
     config = load_config()
+    start_identity_server(config)
     session = requests.Session()
     serial_conn: serial.Serial | None = None
     active_port: str | None = None

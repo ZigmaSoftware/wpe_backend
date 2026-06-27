@@ -26,4 +26,15 @@ SERIAL_BAUD_RATE=9600
 PUSH_INTERVAL_MS=500
 STALE_AFTER_SECONDS=5
 SCALE_BRIDGE_STALE_AFTER_SECONDS=5
+LOCAL_IDENTITY_HOST=127.0.0.1
+LOCAL_IDENTITY_PORT=8765
 ```
+
+The local identity endpoint exposes only workstation identity to the browser:
+
+```text
+http://127.0.0.1:8765/identity
+```
+
+The production output page uses this endpoint to lock scale selection to the
+`DEVICE_ID` and `WORKSTATION_ID` configured on the current operator PC.
