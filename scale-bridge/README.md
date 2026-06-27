@@ -27,12 +27,15 @@ SERIAL_BAUD_RATE=9600
 PUSH_INTERVAL_MS=500
 STALE_AFTER_SECONDS=5
 SCALE_BRIDGE_STALE_AFTER_SECONDS=5
+LOCAL_IDENTITY_HOST=127.0.0.1
+LOCAL_IDENTITY_PORT=8765
 ```
 
-Use a unique `DEVICE_ID`, `WORKSTATION_ID`, and `BRIDGE_CLIENT_ID` on every client PC. Example:
+The local identity endpoint exposes only workstation identity to the browser:
 
-- `SCALE-01` / `PRODUCTION-PC-01` / `production-pc-01`
-- `SCALE-02` / `BLENDING-PC` / `blending-pc`
-- `SCALE-03` / `GRANULATION-PC` / `granulation-pc`
+```text
+http://127.0.0.1:8765/identity
+```
 
-If `BRIDGE_CLIENT_ID` is omitted, `bridge.py` falls back to the local machine hostname.
+The production output page uses this endpoint to lock scale selection to the
+`DEVICE_ID`, `WORKSTATION_ID`, and `BRIDGE_CLIENT_ID` configured on the current operator PC.
