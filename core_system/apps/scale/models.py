@@ -15,6 +15,7 @@ class ScaleBridgeReading(models.Model):
 
     device_id = models.CharField(max_length=100, db_index=True)
     workstation_id = models.CharField(max_length=100, db_index=True)
+    bridge_client_id = models.CharField(max_length=128, blank=True, default="", db_index=True)
     weight = models.DecimalField(max_digits=14, decimal_places=3, default=0)
     unit = models.CharField(max_length=16, default="kg")
     status = models.CharField(max_length=32, choices=Status.choices, default=Status.DISCONNECTED)
@@ -31,14 +32,21 @@ class ScaleBridgeReading(models.Model):
         ordering = ["-last_seen_at", "device_id"]
         constraints = [
             models.UniqueConstraint(
-                fields=["device_id", "workstation_id"],
-                name="scale_bridge_device_workstation_unique",
+                fields=["device_id", "workstation_id", "bridge_client_id"],
+                name="scale_bridge_device_workstation_client_unique",
             ),
         ]
         indexes = [
-            models.Index(fields=["device_id", "workstation_id"], name="scale_bridge_device_ws_idx"),
-            models.Index(fields=["workstation_id", "last_seen_at"], name="scale_bridge_ws_seen_idx"),
+            models.Index(
+                fields=["device_id", "workstation_id", "bridge_client_id"],
+                name="scale_br_dev_ws_cli_idx",
+            ),
+            models.Index(
+                fields=["workstation_id", "bridge_client_id", "last_seen_at"],
+                name="scale_br_ws_cli_seen_idx",
+            ),
         ]
 
     def __str__(self) -> str:
-        return f"{self.device_id} @ {self.workstation_id}"
+        client_label = self.bridge_client_id or "legacy"
+        return f"{self.device_id} @ {self.workstation_id} [{client_label}]"

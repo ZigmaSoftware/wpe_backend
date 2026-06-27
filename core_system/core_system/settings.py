@@ -181,6 +181,8 @@ default_api_auth_exempt_paths = [
     "/api/token/refresh/",
     "/api/token/verify/",
     "/api/auth/login/",
+    "/api/scale/bridge/demand/",
+    "/api/scale/bridge/readings/",
 ]
 API_AUTH_EXEMPT_PATHS = list(
     dict.fromkeys(default_api_auth_exempt_paths + env_list("API_AUTH_EXEMPT_PATHS"))

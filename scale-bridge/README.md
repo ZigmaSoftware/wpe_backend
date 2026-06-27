@@ -19,8 +19,9 @@ Set these values in `../.env` (`wpe-backend/.env`). The bridge reads the same en
 ```env
 WPE_SERVER_URL=http://127.0.0.1:8000
 SCALE_BRIDGE_API_KEY=replace-with-bridge-api-key
-DEVICE_ID=AD-WEIGH-01
+DEVICE_ID=SCALE-01
 WORKSTATION_ID=PRODUCTION-PC-01
+BRIDGE_CLIENT_ID=production-pc-01
 SERIAL_PORT=AUTO
 SERIAL_BAUD_RATE=9600
 PUSH_INTERVAL_MS=500
@@ -37,4 +38,4 @@ http://127.0.0.1:8765/identity
 ```
 
 The production output page uses this endpoint to lock scale selection to the
-`DEVICE_ID` and `WORKSTATION_ID` configured on the current operator PC.
+`DEVICE_ID`, `WORKSTATION_ID`, and `BRIDGE_CLIENT_ID` configured on the current operator PC.

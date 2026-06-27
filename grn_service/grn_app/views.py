@@ -21,7 +21,8 @@ from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.store.services import add_stock_from_grn
+from apps.store.models import StoreTransaction, Warehouse
+from apps.store.services import add_stock_from_grn, get_store_warehouse, resolve_item_for_grn_line, transfer_stock
 from .models import GRN, GRNAuditLog, QCR
 from .serializers import GRNAuditLogSerializer, GRNReadSerializer, GRNSerializer, QCRSerializer
 
@@ -346,6 +347,7 @@ GRN_LEGACY_VALUE_FIELDS = (
 ACTIVE_QCR_SCOPES = {"", "active", "qcr", "pending", "open"}
 CANCELLED_QCR_SCOPES = {"cancelled", "canceled", "cancel", "rejected", "reject"}
 MOVED_TO_GRN_SCOPES = {"moved to grn", "moved_to_grn", "moved-grn", "grn", "approved", "grn approved", "grn_approved"}
+COMPLETED_QCR_SCOPES = {"completed", "complete", "closed", "done"}
 GENERATED_GRN_PREFIX = "GRN - WPE - "
 GENERATED_GRN_PATTERN = re.compile(r"^GRN\s*-\s*WPE\s*-\s*(\d+)$", re.IGNORECASE)
 GRN_PENDING_SCOPES = {"pending", "grn pending", "grn_pending", "pending-grn", "pending_grn"}
@@ -995,7 +997,11 @@ def build_store_sync_payload(*, grn: GRN, qcr_status: str | None = None, accepte
     payload["process_status"] = grn.process_status
     if qcr_status:
         payload["qcr_status"] = qcr_status
-    payload["target_warehouse"] = grn.accepted_warehouse or "Stores" if accepted else grn.rejected_warehouse or "Rejected Warehouse - CBE"
+    payload["target_warehouse"] = (
+        grn.accepted_warehouse or "Stores"
+        if accepted
+        else grn.rejected_warehouse or "Rejected Warehouse - CBE"
+    )
     if not accepted:
         payload["use_rejected_qty"] = True
     if grn.grn_date:
@@ -1026,6 +1032,221 @@ def build_store_sync_payload_for_qcr(*, qcr_record: QCR, qcr_status: str | None 
     payload["generated_grn_no"] = final_grn_no
     payload["grn_no"] = final_grn_no
     return payload
+
+
+STORE_WAREHOUSE_ALIASES = {"", "store", "stores", "main store"}
+
+
+def resolve_configured_warehouse(
+    warehouse_name: Any,
+    *,
+    field_label: str,
+    allow_store_alias: bool = False,
+) -> Warehouse:
+    normalized_name = normalize_warehouse_label(warehouse_name)
+
+    if allow_store_alias and normalized_name in STORE_WAREHOUSE_ALIASES:
+        warehouse = (
+            Warehouse.objects.filter(is_active=True)
+            .filter(
+                Q(code__iexact="STORE")
+                | Q(name__iexact="Main Store")
+                | Q(name__iexact="Stores")
+                | Q(warehouse_type=Warehouse.WarehouseType.STORE)
+            )
+            .order_by("id")
+            .first()
+        )
+        if warehouse is not None:
+            return warehouse
+        raise DRFValidationError({field_label: "Store Stock warehouse is not configured."})
+
+    if not normalized_name:
+        raise DRFValidationError({field_label: "Warehouse is required."})
+
+    warehouse = (
+        Warehouse.objects.filter(is_active=True)
+        .filter(Q(name__iexact=str(warehouse_name).strip()) | Q(code__iexact=str(warehouse_name).strip()))
+        .order_by("id")
+        .first()
+    )
+    if warehouse is not None:
+        return warehouse
+
+    raise DRFValidationError({field_label: f"Warehouse '{warehouse_name}' is not configured."})
+
+
+def build_qcr_transfer_reference(grn_no: str, line_number: int, outcome: str) -> str:
+    return f"{grn_no}:{line_number}:{outcome}"
+
+
+def build_qcr_transfer_metadata(
+    *,
+    qcr_record: QCR,
+    line_number: int,
+    outcome: str,
+    source_warehouse: Warehouse,
+    destination_warehouse: Warehouse,
+    line_payload: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "grn_no": qcr_record.generated_grn_no or qcr_record.grn_reference_no,
+        "generated_grn_no": qcr_record.generated_grn_no,
+        "grn_reference_no": qcr_record.grn_reference_no,
+        "qcr_id": qcr_record.id,
+        "line_number": line_number,
+        "qc_outcome": outcome,
+        "source_warehouse": source_warehouse.code,
+        "destination_warehouse": destination_warehouse.code,
+        "raw_line": line_payload,
+    }
+
+
+def transfer_qcr_completion_stock(
+    *,
+    qcr_record: QCR,
+    normalized_qcr_items: list[dict[str, Any]],
+    created_by=None,
+) -> dict[str, list[int]]:
+    grn = qcr_record.source_grn
+    sync_payload = build_store_sync_payload_for_qcr(qcr_record=qcr_record, qcr_status=qcr_record.status, accepted=True)
+    raw_payload, raw_items = ensure_grn_payload_item_lines(grn)
+    transaction_date = grn.grn_date or timezone.localdate()
+    accepted_transaction_ids: list[int] = []
+    rejected_transaction_ids: list[int] = []
+
+    for index, qcr_item in enumerate(normalized_qcr_items, start=1):
+        raw_item = raw_items[index - 1] if index - 1 < len(raw_items) and isinstance(raw_items[index - 1], dict) else {}
+        line_payload = {
+            **raw_item,
+            "item_id": qcr_item.get("item_id") or raw_item.get("item_id"),
+            "item_name": qcr_item.get("item_name") or raw_item.get("item_name"),
+            "product_description": qcr_item.get("item_name") or raw_item.get("product_description") or raw_item.get("item_name"),
+            "item_code": qcr_item.get("item_code") or qcr_item.get("item_id") or raw_item.get("item_code") or raw_item.get("item_id"),
+            "quantity": qcr_item.get("sent_qty") or raw_item.get("quantity"),
+            "received_qty": qcr_item.get("received_qty") or raw_item.get("received_qty"),
+            "accepted_qty": qcr_item.get("accepted_qty") or raw_item.get("accepted_qty"),
+            "rejected_qty": qcr_item.get("rejected_qty") or raw_item.get("rejected_qty"),
+            "unit": qcr_item.get("uom") or qcr_item.get("unit") or raw_item.get("unit"),
+            "uom": qcr_item.get("uom") or qcr_item.get("unit") or raw_item.get("uom"),
+            "store_in_id": qcr_item.get("store_in_id") or raw_item.get("store_in_id") or raw_item.get("store_in"),
+            "store_in_name": qcr_item.get("store_in_name") or raw_item.get("store_in_name") or raw_item.get("store_in"),
+            "rejection_reason": qcr_item.get("rejection_reason") or raw_item.get("rejection_reason"),
+        }
+        item = resolve_item_for_grn_line(sync_payload, line_payload)
+
+        source_warehouse_name = (
+            grn.grn_warehouse
+            or qcr_item.get("store_in_name")
+            or raw_item.get("store_in_name")
+            or raw_item.get("store_in")
+            or "QC Pending Warehouse - CBE"
+        )
+        source_warehouse = resolve_configured_warehouse(
+            source_warehouse_name,
+            field_label=f"items[{index - 1}].source_warehouse",
+        )
+
+        accepted_qty = parse_optional_decimal(qcr_item.get("accepted_qty"))
+        if accepted_qty > 0:
+            destination_warehouse = get_store_warehouse()
+            accepted_reference_id = build_qcr_transfer_reference(
+                qcr_record.generated_grn_no or qcr_record.grn_reference_no,
+                index,
+                "accepted",
+            )
+            if StoreTransaction.objects.filter(
+                reference_type=StoreTransaction.ReferenceType.GRN,
+                reference_id=accepted_reference_id,
+            ).exists():
+                raise DRFValidationError(
+                    {
+                        "items": (
+                            f"Accepted stock movement already exists for line {index}. "
+                            "This QCR cannot be completed twice."
+                        )
+                    }
+                )
+            accepted_result = transfer_stock(
+                item=item,
+                quantity=accepted_qty,
+                source_warehouse=source_warehouse,
+                destination_warehouse=destination_warehouse,
+                reference_type=StoreTransaction.ReferenceType.GRN,
+                reference_id=accepted_reference_id,
+                remarks=f"QCR accepted stock transfer for {qcr_record.generated_grn_no or qcr_record.grn_reference_no}",
+                metadata=build_qcr_transfer_metadata(
+                    qcr_record=qcr_record,
+                    line_number=index,
+                    outcome="accepted",
+                    source_warehouse=source_warehouse,
+                    destination_warehouse=destination_warehouse,
+                    line_payload=line_payload,
+                ),
+                created_by=created_by,
+                transaction_date=transaction_date,
+            )
+            accepted_transaction_ids.extend(
+                [
+                    accepted_result["issue_transaction"].id,
+                    accepted_result["receipt_transaction"].id,
+                ]
+            )
+
+        rejected_qty = parse_optional_decimal(qcr_item.get("rejected_qty"))
+        if rejected_qty > 0:
+            destination_warehouse = resolve_configured_warehouse(
+                grn.rejected_warehouse or "Rejected Warehouse - CBE",
+                field_label="rejected_warehouse",
+            )
+            rejected_reference_id = build_qcr_transfer_reference(
+                qcr_record.generated_grn_no or qcr_record.grn_reference_no,
+                index,
+                "rejected",
+            )
+            if StoreTransaction.objects.filter(
+                reference_type=StoreTransaction.ReferenceType.GRN,
+                reference_id=rejected_reference_id,
+            ).exists():
+                raise DRFValidationError(
+                    {
+                        "items": (
+                            f"Rejected stock movement already exists for line {index}. "
+                            "This QCR cannot be completed twice."
+                        )
+                    }
+                )
+            rejected_result = transfer_stock(
+                item=item,
+                quantity=rejected_qty,
+                source_warehouse=source_warehouse,
+                destination_warehouse=destination_warehouse,
+                reference_type=StoreTransaction.ReferenceType.GRN,
+                reference_id=rejected_reference_id,
+                remarks=f"QCR rejected stock transfer for {qcr_record.generated_grn_no or qcr_record.grn_reference_no}",
+                metadata=build_qcr_transfer_metadata(
+                    qcr_record=qcr_record,
+                    line_number=index,
+                    outcome="rejected",
+                    source_warehouse=source_warehouse,
+                    destination_warehouse=destination_warehouse,
+                    line_payload=line_payload,
+                ),
+                created_by=created_by,
+                transaction_date=transaction_date,
+            )
+            rejected_transaction_ids.extend(
+                [
+                    rejected_result["issue_transaction"].id,
+                    rejected_result["receipt_transaction"].id,
+                ]
+            )
+
+    raw_payload["items"] = raw_items
+    return {
+        "accepted_transaction_ids": accepted_transaction_ids,
+        "rejected_transaction_ids": rejected_transaction_ids,
+    }
 
 
 def generate_next_wpe_grn_no() -> str:
@@ -1650,6 +1871,8 @@ class QCRListAPIView(APIView):
                     Q(status=GRN_REJECTED_STATUS)
                     | Q(status=MOVED_TO_GRN_STATUS, source_grn__qc_status="Partial")
                 )
+            elif list_scope in COMPLETED_QCR_SCOPES:
+                queryset = queryset.filter(status__in=[MOVED_TO_GRN_STATUS, GRN_REJECTED_STATUS])
             elif list_scope in MOVED_TO_GRN_SCOPES:
                 queryset = queryset.filter(status=MOVED_TO_GRN_STATUS)
             elif list_scope == "all":
@@ -1830,6 +2053,33 @@ def build_warehouse_inventory_rows(warehouse_name: str) -> list[dict[str, Any]]:
                 for item in matching_items
             ]
         )
+        item_lines = [
+            {
+                "line_index": item.get("line_index"),
+                "item_id": item.get("item_id"),
+                "item_name": str(
+                    item.get("item_name")
+                    or item.get("product_description")
+                    or item.get("item_id")
+                    or ""
+                ),
+                "item_code": str(item.get("item_code") or item.get("item_id") or ""),
+                "sent_qty": decimal_to_string(
+                    parse_optional_decimal(item.get("sent_qty") or item.get("quantity") or item.get("total_quantity"))
+                )
+                or "0",
+                "received_qty": decimal_to_string(
+                    parse_optional_decimal(item.get("received_qty") or item.get("accepted_qty"))
+                )
+                or "0",
+                "accepted_qty": decimal_to_string(
+                    parse_optional_decimal(item.get("accepted_qty") or item.get("received_qty"))
+                )
+                or "0",
+                "rejected_qty": decimal_to_string(parse_optional_decimal(item.get("rejected_qty"))) or "0",
+            }
+            for item in matching_items
+        ]
         supplier_name = (
             grn.trade_name
             or (grn.raw_payload.get("supplier_details", {}) if isinstance(grn.raw_payload, dict) else {}).get("trade_name")
@@ -1852,6 +2102,7 @@ def build_warehouse_inventory_rows(warehouse_name: str) -> list[dict[str, Any]]:
                 "supplier": supplier_name,
                 "po_no": po_number,
                 "items": ", ".join(item_names),
+                "item_lines": item_lines,
                 "inward_qty": decimal_to_string(inward_qty) or "0",
                 "outward_qty": decimal_to_string(outward_qty) or "0",
                 "status": grn.process_status,
@@ -2002,7 +2253,9 @@ def build_grn_pending_items(grn: GRN, item_lines: list[dict[str, Any]] | None = 
                 "line_index": index,
                 "item_id": item_line.get("item_id"),
                 "item_name": item_line.get("product_description") or item_line.get("item_id"),
+                "item_code": item_line.get("item_code") or item_line.get("item_id"),
                 "unit": item_line.get("unit"),
+                "uom": item_line.get("unit"),
                 "sent_qty": decimal_to_string(sent_qty) if sent_qty is not None else item_line.get("quantity") or item_line.get("total_quantity"),
                 "received_qty": item_line.get("received_qty") or item_line.get("accepted_qty"),
                 "store_in_id": item_line.get("store_in_id") or item_line.get("store_in"),
@@ -2140,7 +2393,9 @@ def normalize_qcr_completion_items(
             "line_index": line_index,
             "item_id": item_line.get("item_id"),
             "item_name": item_name,
+            "item_code": item_line.get("item_code") or item_line.get("item_id"),
             "unit": unit,
+            "uom": unit,
             "sent_qty": sent_qty_text,
             "received_qty": decimal_to_string(received_qty),
             "accepted_qty": decimal_to_string(accepted_qty),
@@ -2214,7 +2469,9 @@ def normalize_pending_to_qcr_items(grn: GRN, payload_items: Any) -> tuple[list[d
                 "line_index": index,
                 "item_id": item_line.get("item_id"),
                 "item_name": item_line.get("product_description") or item_line.get("item_id"),
+                "item_code": item_line.get("item_code") or item_line.get("item_id"),
                 "unit": item_line.get("unit"),
+                "uom": item_line.get("unit"),
                 "sent_qty": decimal_to_string(sent_qty) if sent_qty is not None else item_line.get("quantity") or item_line.get("total_quantity"),
                 "received_qty": decimal_to_string(received_qty),
                 "accepted_qty": decimal_to_string(received_qty),
@@ -2526,9 +2783,9 @@ class QCRStatusUpdateAPIView(APIView):
                     grn.grn_pending_items = normalized_pending_items
                     grn.accepted_qty = total_accepted
                     grn.rejected_qty = total_rejected
+                    ensure_generated_grn_no(qcr_record)
 
                     if total_accepted > 0:
-                        ensure_generated_grn_no(qcr_record)
                         qcr_record.status = MOVED_TO_GRN_STATUS
                         grn.process_status = GRN_APPROVED_STATUS
                         grn.qc_status = "Pass" if total_rejected == 0 else "Partial"
@@ -2561,6 +2818,12 @@ class QCRStatusUpdateAPIView(APIView):
                             f"Rejected quantity: {decimal_to_string(total_rejected)}. "
                             f"Reasons: {qcr_record.remarks}"
                         )
+
+                    transfer_summary = transfer_qcr_completion_stock(
+                        qcr_record=qcr_record,
+                        normalized_qcr_items=normalized_qcr_items,
+                        created_by=getattr(request, "user", None),
+                    )
 
                     qcr_record.save(
                         update_fields=[
@@ -2620,6 +2883,28 @@ class QCRStatusUpdateAPIView(APIView):
                     actor=actor,
                     notes=audit_notes,
                 )
+
+                if action == "complete":
+                    if transfer_summary["accepted_transaction_ids"]:
+                        GRNAuditLog.objects.create(
+                            grn=grn,
+                            stage=GRNAuditLog.STAGE_ADDED_TO_STORE,
+                            actor=actor,
+                notes=(
+                    f"Accepted stock transferred to {destination_warehouse.name} "
+                    f"for {len(transfer_summary['accepted_transaction_ids']) // 2} line(s)."
+                ),
+            )
+                    if transfer_summary["rejected_transaction_ids"]:
+                        GRNAuditLog.objects.create(
+                            grn=grn,
+                            stage=GRNAuditLog.STAGE_QCR_REJECTED,
+                            actor=actor,
+                            notes=(
+                                f"Rejected stock transferred to {grn.rejected_warehouse or 'Rejected Warehouse - CBE'} "
+                                f"for {len(transfer_summary['rejected_transaction_ids']) // 2} line(s)."
+                            ),
+                        )
 
                 if action == "move_to_grn" and grn.accepted_qty is not None and grn.accepted_qty > 0:
                     sync_payload = build_store_sync_payload_for_qcr(
