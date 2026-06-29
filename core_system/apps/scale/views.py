@@ -224,6 +224,12 @@ class LatestWeightView(View):
                     "workstation_id is required when requesting bridge scale data.",
                     status_code=400,
                 )
+            # Treat explicit bridge weight polling as live demand so the local bridge
+            # can start reading even if a separate heartbeat is delayed or missing.
+            mark_bridge_demand_active(
+                workstation_id=workstation_id,
+                bridge_client_id=bridge_client_id,
+            )
             reading = _get_bridge_reading(
                 device_id=device_id,
                 workstation_id=workstation_id,

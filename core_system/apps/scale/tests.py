@@ -9,6 +9,7 @@ from django.test import RequestFactory, SimpleTestCase, TestCase as DjangoTestCa
 from django.utils import timezone
 
 from .models import ScaleBridgeReading
+from .views import is_bridge_demand_active
 
 try:
     from . import serial_reader
@@ -356,6 +357,12 @@ class ScaleBridgeApiTests(DjangoTestCase):
         self.assertEqual(payload["workstation_id"], "PC-01")
         self.assertEqual(payload["bridge_client_id"], self.primary_client_id)
         self.assertEqual(payload["source"], "local_bridge")
+        self.assertTrue(
+            is_bridge_demand_active(
+                workstation_id="PC-01",
+                bridge_client_id=self.primary_client_id,
+            )
+        )
 
     def test_latest_weight_returns_disconnected_when_stale_for_exact_client(self):
         captured_at = timezone.now() - timedelta(seconds=30)
