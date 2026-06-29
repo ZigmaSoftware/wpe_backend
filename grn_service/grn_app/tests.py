@@ -1188,6 +1188,8 @@ class GRNQCRFlowTests(TestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "success")
+        self.assertEqual(response.data["message"], "QCR completed with partial rejection.")
 
         grn.refresh_from_db()
         qcr.refresh_from_db()
@@ -1234,6 +1236,20 @@ class GRNQCRFlowTests(TestCase):
                 reference_type=StoreTransaction.ReferenceType.GRN,
             ).count(),
             3,
+        )
+        self.assertTrue(
+            GRNAuditLog.objects.filter(
+                grn=grn,
+                stage=GRNAuditLog.STAGE_ADDED_TO_STORE,
+                notes__icontains="Main Store",
+            ).exists()
+        )
+        self.assertTrue(
+            GRNAuditLog.objects.filter(
+                grn=grn,
+                stage=GRNAuditLog.STAGE_QCR_REJECTED,
+                notes__icontains="Rejected Warehouse - CBE",
+            ).exists()
         )
 
     def test_qcr_complete_uses_product_name_when_external_item_id_points_to_different_item(self):

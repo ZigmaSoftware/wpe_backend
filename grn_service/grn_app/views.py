@@ -1107,13 +1107,15 @@ def transfer_qcr_completion_stock(
     qcr_record: QCR,
     normalized_qcr_items: list[dict[str, Any]],
     created_by=None,
-) -> dict[str, list[int]]:
+) -> dict[str, Any]:
     grn = qcr_record.source_grn
     sync_payload = build_store_sync_payload_for_qcr(qcr_record=qcr_record, qcr_status=qcr_record.status, accepted=True)
     raw_payload, raw_items = ensure_grn_payload_item_lines(grn)
     transaction_date = grn.grn_date or timezone.localdate()
     accepted_transaction_ids: list[int] = []
     rejected_transaction_ids: list[int] = []
+    accepted_destination_warehouse_name: str | None = None
+    rejected_destination_warehouse_name: str | None = None
 
     for index, qcr_item in enumerate(normalized_qcr_items, start=1):
         raw_item = raw_items[index - 1] if index - 1 < len(raw_items) and isinstance(raw_items[index - 1], dict) else {}
@@ -1150,6 +1152,7 @@ def transfer_qcr_completion_stock(
         accepted_qty = parse_optional_decimal(qcr_item.get("accepted_qty"))
         if accepted_qty > 0:
             destination_warehouse = get_store_warehouse()
+            accepted_destination_warehouse_name = destination_warehouse.name
             accepted_reference_id = build_qcr_transfer_reference(
                 qcr_record.generated_grn_no or qcr_record.grn_reference_no,
                 index,
@@ -1199,6 +1202,7 @@ def transfer_qcr_completion_stock(
                 grn.rejected_warehouse or "Rejected Warehouse - CBE",
                 field_label="rejected_warehouse",
             )
+            rejected_destination_warehouse_name = destination_warehouse.name
             rejected_reference_id = build_qcr_transfer_reference(
                 qcr_record.generated_grn_no or qcr_record.grn_reference_no,
                 index,
@@ -1246,6 +1250,8 @@ def transfer_qcr_completion_stock(
     return {
         "accepted_transaction_ids": accepted_transaction_ids,
         "rejected_transaction_ids": rejected_transaction_ids,
+        "accepted_destination_warehouse_name": accepted_destination_warehouse_name,
+        "rejected_destination_warehouse_name": rejected_destination_warehouse_name,
     }
 
 
@@ -2886,22 +2892,32 @@ class QCRStatusUpdateAPIView(APIView):
 
                 if action == "complete":
                     if transfer_summary["accepted_transaction_ids"]:
+                        accepted_destination_name = (
+                            transfer_summary["accepted_destination_warehouse_name"]
+                            or grn.accepted_warehouse
+                            or "Main Store"
+                        )
                         GRNAuditLog.objects.create(
                             grn=grn,
                             stage=GRNAuditLog.STAGE_ADDED_TO_STORE,
                             actor=actor,
-                notes=(
-                    f"Accepted stock transferred to {destination_warehouse.name} "
-                    f"for {len(transfer_summary['accepted_transaction_ids']) // 2} line(s)."
-                ),
-            )
+                            notes=(
+                                f"Accepted stock transferred to {accepted_destination_name} "
+                                f"for {len(transfer_summary['accepted_transaction_ids']) // 2} line(s)."
+                            ),
+                        )
                     if transfer_summary["rejected_transaction_ids"]:
+                        rejected_destination_name = (
+                            transfer_summary["rejected_destination_warehouse_name"]
+                            or grn.rejected_warehouse
+                            or "Rejected Warehouse - CBE"
+                        )
                         GRNAuditLog.objects.create(
                             grn=grn,
                             stage=GRNAuditLog.STAGE_QCR_REJECTED,
                             actor=actor,
                             notes=(
-                                f"Rejected stock transferred to {grn.rejected_warehouse or 'Rejected Warehouse - CBE'} "
+                                f"Rejected stock transferred to {rejected_destination_name} "
                                 f"for {len(transfer_summary['rejected_transaction_ids']) // 2} line(s)."
                             ),
                         )
