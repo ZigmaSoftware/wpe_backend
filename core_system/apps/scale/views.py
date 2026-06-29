@@ -5,7 +5,6 @@ from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from django.core.cache import cache
 from django.conf import settings
 from django.http import JsonResponse
 from django.utils import timezone
@@ -16,11 +15,9 @@ from django.utils.decorators import method_decorator
 import hmac
 
 from . import serial_reader
-from .models import ScaleBridgeReading
+from .models import ScaleBridgeDemandLease, ScaleBridgeReading
 
 logger = logging.getLogger(__name__)
-BRIDGE_DEMAND_CACHE_KEY = "scale_bridge_demand_active"
-
 BRIDGE_STATUSES = {
     ScaleBridgeReading.Status.CONNECTED,
     ScaleBridgeReading.Status.STABLE,
@@ -66,27 +63,47 @@ def _parse_scope(source: Any) -> tuple[str | None, str | None, str | None]:
     )
 
 
-def _build_bridge_demand_cache_key(*, workstation_id: str, bridge_client_id: str) -> str:
-    return f"{BRIDGE_DEMAND_CACHE_KEY}:{workstation_id}:{bridge_client_id}"
-
-
 def mark_bridge_demand_active(*, workstation_id: str, bridge_client_id: str) -> None:
-    cache.set(
-        _build_bridge_demand_cache_key(workstation_id=workstation_id, bridge_client_id=bridge_client_id),
-        True,
-        timeout=_bridge_demand_timeout_seconds(),
+    expires_at = timezone.now() + timedelta(seconds=_bridge_demand_timeout_seconds())
+    ScaleBridgeDemandLease.objects.update_or_create(
+        workstation_id=workstation_id,
+        bridge_client_id=bridge_client_id,
+        defaults={"expires_at": expires_at},
     )
 
 
 def is_bridge_demand_active(*, workstation_id: str, bridge_client_id: str) -> bool:
-    return (
-        cache.get(_build_bridge_demand_cache_key(workstation_id=workstation_id, bridge_client_id=bridge_client_id))
-        is True
+    now = timezone.now()
+    return ScaleBridgeDemandLease.objects.filter(
+        workstation_id=workstation_id,
+        bridge_client_id=bridge_client_id,
+        expires_at__gt=now,
+    ).exists()
+
+
+def purge_expired_bridge_demand() -> None:
+    ScaleBridgeDemandLease.objects.filter(expires_at__lte=timezone.now()).delete()
+
+
+def _purge_expired_bridge_demand_if_due() -> None:
+    # Keep the demand lease table small without adding a separate cleanup job.
+    if timezone.now().microsecond < 100000:
+        purge_expired_bridge_demand()
+
+
+def _touch_bridge_demand(*, workstation_id: str, bridge_client_id: str) -> None:
+    _purge_expired_bridge_demand_if_due()
+    mark_bridge_demand_active(
+        workstation_id=workstation_id,
+        bridge_client_id=bridge_client_id,
     )
 
 
 def clear_bridge_demand(*, workstation_id: str, bridge_client_id: str) -> None:
-    cache.delete(_build_bridge_demand_cache_key(workstation_id=workstation_id, bridge_client_id=bridge_client_id))
+    ScaleBridgeDemandLease.objects.filter(
+        workstation_id=workstation_id,
+        bridge_client_id=bridge_client_id,
+    ).delete()
 
 
 def _parse_payload(request) -> dict[str, Any]:
@@ -226,7 +243,7 @@ class LatestWeightView(View):
                 )
             # Treat explicit bridge weight polling as live demand so the local bridge
             # can start reading even if a separate heartbeat is delayed or missing.
-            mark_bridge_demand_active(
+            _touch_bridge_demand(
                 workstation_id=workstation_id,
                 bridge_client_id=bridge_client_id,
             )
@@ -384,7 +401,7 @@ class ScaleBridgeDemandActivationView(View):
         if workstation_id is None:
             return _json_error("workstation_id is required for UI bridge demand activation.", status_code=400)
 
-        mark_bridge_demand_active(workstation_id=workstation_id, bridge_client_id=bridge_client_id)
+        _touch_bridge_demand(workstation_id=workstation_id, bridge_client_id=bridge_client_id)
         return JsonResponse({
             "ok": True,
             "active": True,
