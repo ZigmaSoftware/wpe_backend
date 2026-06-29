@@ -50,16 +50,43 @@ def _bridge_demand_timeout_seconds() -> int:
     return max(2, int(getattr(settings, "SCALE_BRIDGE_DEMAND_TIMEOUT_SECONDS", 6)))
 
 
-def mark_bridge_demand_active() -> None:
-    cache.set(BRIDGE_DEMAND_CACHE_KEY, True, timeout=_bridge_demand_timeout_seconds())
+def _clean_identifier(value: Any) -> str | None:
+    cleaned = str(value or "").strip()
+    return cleaned or None
 
 
-def is_bridge_demand_active() -> bool:
-    return cache.get(BRIDGE_DEMAND_CACHE_KEY) is True
+def _parse_scope(source: Any) -> tuple[str | None, str | None, str | None]:
+    if source is None:
+        return None, None, None
+    getter = source.get if hasattr(source, "get") else lambda key, default=None: default
+    return (
+        _clean_identifier(getter("device_id")),
+        _clean_identifier(getter("workstation_id")),
+        _clean_identifier(getter("bridge_client_id") or getter("client_id")),
+    )
 
 
-def clear_bridge_demand() -> None:
-    cache.delete(BRIDGE_DEMAND_CACHE_KEY)
+def _build_bridge_demand_cache_key(*, workstation_id: str, bridge_client_id: str) -> str:
+    return f"{BRIDGE_DEMAND_CACHE_KEY}:{workstation_id}:{bridge_client_id}"
+
+
+def mark_bridge_demand_active(*, workstation_id: str, bridge_client_id: str) -> None:
+    cache.set(
+        _build_bridge_demand_cache_key(workstation_id=workstation_id, bridge_client_id=bridge_client_id),
+        True,
+        timeout=_bridge_demand_timeout_seconds(),
+    )
+
+
+def is_bridge_demand_active(*, workstation_id: str, bridge_client_id: str) -> bool:
+    return (
+        cache.get(_build_bridge_demand_cache_key(workstation_id=workstation_id, bridge_client_id=bridge_client_id))
+        is True
+    )
+
+
+def clear_bridge_demand(*, workstation_id: str, bridge_client_id: str) -> None:
+    cache.delete(_build_bridge_demand_cache_key(workstation_id=workstation_id, bridge_client_id=bridge_client_id))
 
 
 def _parse_payload(request) -> dict[str, Any]:
@@ -90,6 +117,7 @@ def _build_bridge_payload(reading: ScaleBridgeReading, *, stale: bool) -> dict[s
     if stale:
         return {
             "status": ScaleBridgeReading.Status.DISCONNECTED,
+            "message": "No active local scale found for this client.",
             "error": (
                 f"No latest reading received from local bridge for device "
                 f"{reading.device_id} at workstation {reading.workstation_id} "
@@ -100,27 +128,32 @@ def _build_bridge_payload(reading: ScaleBridgeReading, *, stale: bool) -> dict[s
             "bridge_client_id": _reading_bridge_client_id(reading),
             "weight": f"{Decimal(reading.weight or 0):.3f}",
             "unit": reading.unit or "kg",
+            "is_stable": False,
             "source": reading.source or "local_bridge",
             "raw_data": reading.raw_value or "",
             "captured_at": reading.captured_at.isoformat() if reading.captured_at else None,
             "last_seen_at": reading.last_seen_at.isoformat() if reading.last_seen_at else None,
+            "device_port": reading.detected_port or None,
             "detected_port": reading.detected_port or None,
             "platform": sys.platform,
         }
 
     return {
         "status": reading.status,
+        "message": None,
         "error": reading.error or None,
         "device_id": reading.device_id,
         "workstation_id": reading.workstation_id,
         "bridge_client_id": _reading_bridge_client_id(reading),
         "weight": f"{Decimal(reading.weight or 0):.3f}",
         "unit": reading.unit or "kg",
+        "is_stable": reading.status == ScaleBridgeReading.Status.STABLE,
         "source": reading.source or "local_bridge",
         "raw_data": reading.raw_value or "",
         "captured_at": reading.captured_at.isoformat() if reading.captured_at else None,
         "timestamp": reading.captured_at.isoformat() if reading.captured_at else None,
         "last_seen_at": reading.last_seen_at.isoformat() if reading.last_seen_at else None,
+        "device_port": reading.detected_port or None,
         "detected_port": reading.detected_port or None,
         "platform": sys.platform,
 }
@@ -206,18 +239,32 @@ class LatestWeightView(View):
             )
             return JsonResponse({
                 "status": ScaleBridgeReading.Status.DISCONNECTED,
+                "message": "No active local scale found for this client.",
                 "error": "No active local scale found for this workstation and bridge client.",
                 "device_id": device_id,
                 "workstation_id": workstation_id,
                 "bridge_client_id": bridge_client_id,
                 "weight": "0.000",
                 "unit": "kg",
+                "is_stable": False,
                 "source": "local_bridge",
                 "last_seen_at": None,
+                "device_port": None,
+                "detected_port": None,
                 "platform": sys.platform,
             })
 
         stale = timezone.now() - reading.last_seen_at > timedelta(seconds=stale_after_seconds)
+        logger.info(
+            "Scale bridge latest requested: device_id=%s workstation_id=%s bridge_client_id=%s matched_reading_id=%s last_seen_at=%s status=%s stale=%s",
+            device_id or "",
+            workstation_id or "",
+            bridge_client_id or "",
+            reading.id,
+            reading.last_seen_at.isoformat() if reading.last_seen_at else None,
+            reading.status,
+            stale,
+        )
         if stale:
             logger.warning(
                 "Scale bridge reading is stale: device_id=%s workstation_id=%s bridge_client_id=%s last_seen_at=%s stale_after_seconds=%s",
@@ -295,9 +342,21 @@ class ScaleBridgeDemandStatusView(View):
         if not _bridge_api_key_is_valid(request):
             return _json_error("Invalid or missing bridge API key.", status_code=403)
 
+        device_id, workstation_id, bridge_client_id = _parse_scope(request.GET)
+        if bridge_client_id is None:
+            return _json_error("bridge_client_id is required for bridge demand checks.", status_code=400)
+        if workstation_id is None:
+            return _json_error("workstation_id is required for bridge demand checks.", status_code=400)
+
         return JsonResponse({
-            "active": is_bridge_demand_active(),
+            "active": is_bridge_demand_active(
+                workstation_id=workstation_id,
+                bridge_client_id=bridge_client_id,
+            ),
             "timeout_seconds": _bridge_demand_timeout_seconds(),
+            "device_id": device_id,
+            "workstation_id": workstation_id,
+            "bridge_client_id": bridge_client_id,
         })
 
 
@@ -308,16 +367,47 @@ class ScaleBridgeDemandActivationView(View):
     http_method_names = ["post", "delete"]
 
     def post(self, request, *args, **kwargs):
-        mark_bridge_demand_active()
+        try:
+            payload = _parse_payload(request)
+        except json.JSONDecodeError:
+            return _json_error("Request body must be valid JSON.", status_code=400)
+
+        device_id, workstation_id, bridge_client_id = _parse_scope(payload)
+        if bridge_client_id is None:
+            return _json_error("bridge_client_id is required for UI bridge demand activation.", status_code=400)
+        if workstation_id is None:
+            return _json_error("workstation_id is required for UI bridge demand activation.", status_code=400)
+
+        mark_bridge_demand_active(workstation_id=workstation_id, bridge_client_id=bridge_client_id)
         return JsonResponse({
             "ok": True,
             "active": True,
             "timeout_seconds": _bridge_demand_timeout_seconds(),
+            "device_id": device_id,
+            "workstation_id": workstation_id,
+            "bridge_client_id": bridge_client_id,
         })
 
     def delete(self, request, *args, **kwargs):
-        clear_bridge_demand()
-        return JsonResponse({"ok": True, "active": False})
+        try:
+            payload = _parse_payload(request)
+        except json.JSONDecodeError:
+            return _json_error("Request body must be valid JSON.", status_code=400)
+
+        device_id, workstation_id, bridge_client_id = _parse_scope(payload)
+        if bridge_client_id is None:
+            return _json_error("bridge_client_id is required for UI bridge demand deactivation.", status_code=400)
+        if workstation_id is None:
+            return _json_error("workstation_id is required for UI bridge demand deactivation.", status_code=400)
+
+        clear_bridge_demand(workstation_id=workstation_id, bridge_client_id=bridge_client_id)
+        return JsonResponse({
+            "ok": True,
+            "active": False,
+            "device_id": device_id,
+            "workstation_id": workstation_id,
+            "bridge_client_id": bridge_client_id,
+        })
 
 
 @method_decorator(csrf_exempt, name="dispatch")
