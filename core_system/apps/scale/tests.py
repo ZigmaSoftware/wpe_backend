@@ -393,7 +393,7 @@ class ScaleBridgeApiTests(DjangoTestCase):
         self.assertEqual(payload["status"], "disconnected")
         self.assertEqual(payload["device_id"], "AD-WEIGH-01")
 
-    def test_latest_weight_prefers_most_recent_bridge_reading_when_requested(self):
+    def test_latest_weight_rejects_bridge_request_without_client_scope(self):
         older = timezone.now() - timedelta(seconds=2)
         newer = timezone.now()
         ScaleBridgeReading.objects.create(
@@ -422,11 +422,11 @@ class ScaleBridgeApiTests(DjangoTestCase):
         response = self.client.get("/api/scale/weight/latest/", {"prefer_bridge": "1"}, **self.auth_headers)
         payload = response.json()
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload["status"], "connected")
-        self.assertEqual(payload["device_id"], "GL-WEIGH-02")
-        self.assertEqual(payload["workstation_id"], "PC-02")
-        self.assertEqual(payload["source"], "local_bridge")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            payload["error"],
+            "bridge_client_id and workstation_id are required when requesting bridge scale data.",
+        )
 
     def test_bridge_demand_endpoint_reports_active_only_for_exact_client_scope(self):
         response = self.client.get(
