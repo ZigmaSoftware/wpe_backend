@@ -208,10 +208,6 @@ def _get_bridge_reading(
     return None
 
 
-def _get_latest_bridge_reading() -> ScaleBridgeReading | None:
-    return ScaleBridgeReading.objects.order_by("-last_seen_at", "device_id").first()
-
-
 class LatestWeightView(View):
     """GET /api/scale/weight/latest/ — returns latest bridge reading."""
 
@@ -227,9 +223,10 @@ class LatestWeightView(View):
         if device_id is None and workstation_id is None and bridge_client_id is None:
             if not prefer_bridge:
                 return JsonResponse(serial_reader.get_latest_weight())
-            reading = _get_latest_bridge_reading()
-            if reading is None:
-                return JsonResponse(serial_reader.get_latest_weight())
+            return _json_error(
+                "bridge_client_id and workstation_id are required when requesting bridge scale data.",
+                status_code=400,
+            )
         else:
             if bridge_client_id is None:
                 return _json_error(
