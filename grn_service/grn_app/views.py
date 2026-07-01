@@ -21,8 +21,14 @@ from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.store.models import StoreTransaction, Warehouse
-from apps.store.services import add_stock_from_grn, get_store_warehouse, resolve_item_for_grn_line, transfer_stock
+from apps.store.models import StoreStock, StoreTransaction, Warehouse
+from apps.store.services import (
+    add_stock_from_grn,
+    get_store_warehouse,
+    get_warehouse_by_name,
+    resolve_item_for_grn_line,
+    transfer_stock,
+)
 from .models import GRN, GRNAuditLog, QCR
 from .serializers import GRNAuditLogSerializer, GRNReadSerializer, GRNSerializer, QCRSerializer
 
@@ -1035,6 +1041,7 @@ def build_store_sync_payload_for_qcr(*, qcr_record: QCR, qcr_status: str | None 
 
 
 STORE_WAREHOUSE_ALIASES = {"", "store", "stores", "main store"}
+AUTO_CREATE_WAREHOUSE_LABELS = ("qc pending", "reject")
 
 
 def resolve_configured_warehouse(
@@ -1072,6 +1079,9 @@ def resolve_configured_warehouse(
     )
     if warehouse is not None:
         return warehouse
+
+    if any(label in normalized_name for label in AUTO_CREATE_WAREHOUSE_LABELS):
+        return get_warehouse_by_name(str(warehouse_name).strip())
 
     raise DRFValidationError({field_label: f"Warehouse '{warehouse_name}' is not configured."})
 
@@ -1150,6 +1160,44 @@ def transfer_qcr_completion_stock(
         )
 
         accepted_qty = parse_optional_decimal(qcr_item.get("accepted_qty"))
+        rejected_qty = parse_optional_decimal(qcr_item.get("rejected_qty"))
+        requested_source_qty = accepted_qty + rejected_qty
+        source_stock = StoreStock.objects.filter(item=item, warehouse=source_warehouse).first()
+        available_source_qty = source_stock.available_qty if source_stock is not None else Decimal("0")
+        pre_qcr_reference_id = f"{qcr_record.generated_grn_no or qcr_record.grn_reference_no}:{index}"
+
+        if requested_source_qty > available_source_qty and not StoreTransaction.objects.filter(
+            item=item,
+            warehouse=source_warehouse,
+            transaction_type=StoreTransaction.TransactionType.GRN_INWARD,
+            reference_type=StoreTransaction.ReferenceType.GRN,
+            reference_id=pre_qcr_reference_id,
+        ).exists():
+            repair_payload = deepcopy(sync_payload)
+            repair_payload["target_warehouse"] = source_warehouse.name
+            repair_payload["allow_pre_qcr_store_sync"] = True
+            repair_payload["accepted_qty"] = ""
+            repair_payload["quantity"] = ""
+            repair_payload["total_quantity"] = ""
+            repair_items: list[dict[str, Any]] = []
+            missing_source_qty = requested_source_qty - available_source_qty
+
+            for repair_index, repair_raw_item in enumerate(raw_items, start=1):
+                repair_item = deepcopy(repair_raw_item) if isinstance(repair_raw_item, dict) else {}
+                if repair_index == index:
+                    repair_item["accepted_qty"] = decimal_to_string(missing_source_qty)
+                    repair_item["quantity"] = decimal_to_string(missing_source_qty)
+                    repair_item["total_quantity"] = decimal_to_string(missing_source_qty)
+                else:
+                    repair_item["accepted_qty"] = "0"
+                    repair_item["quantity"] = "0"
+                    repair_item["total_quantity"] = "0"
+                    repair_item["rejected_qty"] = "0"
+                repair_items.append(repair_item)
+
+            repair_payload["items"] = repair_items
+            add_stock_from_grn(repair_payload, created_by=created_by)
+
         if accepted_qty > 0:
             destination_warehouse = get_store_warehouse()
             accepted_destination_warehouse_name = destination_warehouse.name
@@ -1196,7 +1244,6 @@ def transfer_qcr_completion_stock(
                 ]
             )
 
-        rejected_qty = parse_optional_decimal(qcr_item.get("rejected_qty"))
         if rejected_qty > 0:
             destination_warehouse = resolve_configured_warehouse(
                 grn.rejected_warehouse or "Rejected Warehouse - CBE",
