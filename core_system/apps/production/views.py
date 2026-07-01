@@ -2083,6 +2083,7 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
         if source_inventory_stage:
             available_qty = get_available_stage_quantity_for_context(
                 production_order=linked_source_order or order,
+                fallback_production_order=order,
                 stage=source_inventory_stage,
                 source_batch=getattr(batch, "parent_batch", None),
                 lineage_batch_code=str(batch.batch_no or "").strip() or None,
