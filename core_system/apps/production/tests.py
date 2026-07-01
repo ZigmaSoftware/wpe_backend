@@ -1838,7 +1838,7 @@ class ProductionInventoryLinkedStageFlowTests(APITestCase):
         )
         self.assertEqual(blend_store_history_response.status_code, status.HTTP_200_OK)
         blend_store_rows = blend_store_history_response.data["data"]["results"]
-        blend_store_row = next(row for row in blend_store_rows if row["production_id"] == "BL06")
+        blend_store_row = next(row for row in blend_store_rows if row["production_id"] == bl_order.production_id)
         self.assertEqual(blend_store_row["inward_qty"], "180.500")
         self.assertEqual(blend_store_row["outward_qty"], "180.500")
         self.assertEqual(blend_store_row["balance_qty"], "0.000")
@@ -1897,7 +1897,7 @@ class ProductionInventoryLinkedStageFlowTests(APITestCase):
             row
             for row in rows
             if row["stage"] == ProductionInventoryTransaction.Stage.BLEND_STORE
-            and row["production_id"] == "BL08"
+            and row["production_id"] == bl_order.production_id
         )
         self.assertEqual(blend_store_row["binlot"], self.primary_free_bin.code)
         self.assertEqual(blend_store_row["scancode"], ProductionOutputCapture.objects.get(source_batch_id=bl_batch_id).scancode_id)
@@ -1906,7 +1906,7 @@ class ProductionInventoryLinkedStageFlowTests(APITestCase):
             row
             for row in rows
             if row["stage"] == ProductionInventoryTransaction.Stage.GRANULATION_STORE
-            and row["production_id"] == "GL08"
+            and row["production_id"] == gl_order.production_id
         )
         self.assertEqual(granulation_store_row["baglot"], self.primary_free_bag.code)
         self.assertEqual(granulation_store_row["scancode"], ProductionOutputCapture.objects.get(source_batch_id=gl_batch_id).scancode_id)
@@ -1979,6 +1979,373 @@ class ProductionInventoryLinkedStageFlowTests(APITestCase):
         self.assertNotIn("source_production_id", pr_order.extra_form_data)
         self.assertNotIn("source_stage", pr_order.extra_form_data)
 
+    def test_separated_stage_orders_without_source_link_still_consume_inventory_by_lineage(self):
+        ad_order = self._create_order("AD06", "WPE Additive Production", "AD")
+        ad_order.extra_form_data = {
+            "stage": "AD",
+            "next_workflow_stage": "-",
+            "finished_goods": {
+                "id": 2,
+                "item_code": "PRD001",
+                "item_name": "HSN-500",
+                "unit": "METER",
+            },
+            "work_center": "2",
+            "selected_bom_variant_id": str(self.bom.id),
+        }
+        ad_order.save(update_fields=["extra_form_data"])
+        ad_batch_id = self._create_and_start_batch(ad_order, "AD")
+        self._save_ad_weight_and_confirm(ad_order, ad_batch_id)
+
+        source_blend_wip_row = ProductionInventoryTransaction.objects.get(
+            production_order=ad_order,
+            stage=ProductionInventoryTransaction.Stage.BLEND_WIP,
+        )
+        self.assertEqual(str(source_blend_wip_row.balance_qty), "250.000")
+
+        bl_order = ProductionOrder.objects.create(
+            production_id="BL02",
+            production_type="WPE Blend Production",
+            production_date=date.today(),
+            extra_form_data={
+                "stage": "BL",
+                "next_workflow_stage": "-",
+                "finished_goods": {
+                    "id": 2,
+                    "item_code": "PRD001",
+                    "item_name": "HSN-500",
+                    "unit": "METER",
+                },
+                "work_center": "2",
+                "selected_bom_variant_id": str(self.bom.id),
+            },
+        )
+        bl_batch_id = self._create_and_start_batch(bl_order, "BL")
+
+        bl_capture_response = self.client.post(
+            f"/api/production/orders/{bl_order.id}/output-captures/",
+            {"source_batch": bl_batch_id, "weight_kg": "180.500"},
+            format="json",
+        )
+        self.assertEqual(bl_capture_response.status_code, status.HTTP_201_CREATED)
+
+        source_blend_wip_row.refresh_from_db()
+        self.assertEqual(str(source_blend_wip_row.outward_qty), "180.500")
+        self.assertEqual(str(source_blend_wip_row.balance_qty), "69.500")
+
+        blend_store_row = ProductionInventoryTransaction.objects.get(
+            source_batch_id=bl_batch_id,
+            stage=ProductionInventoryTransaction.Stage.BLEND_STORE,
+        )
+        self.assertEqual(blend_store_row.production_order_id, bl_order.id)
+        self.assertEqual(blend_store_row.production_id, bl_order.production_id)
+        self.assertEqual(blend_store_row.batch_code, source_blend_wip_row.batch_code)
+
+        confirm_bl_response = self.client.post(
+            f"/api/production/orders/{bl_order.id}/batches/{bl_batch_id}/confirm/",
+            format="json",
+        )
+        self.assertEqual(confirm_bl_response.status_code, status.HTTP_200_OK)
+
+        granulation_work_center_row = ProductionInventoryTransaction.objects.get(
+            source_batch_id=bl_batch_id,
+            stage=ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
+        )
+        self.assertEqual(granulation_work_center_row.production_order_id, bl_order.id)
+        self.assertEqual(granulation_work_center_row.production_id, bl_order.production_id)
+        self.assertEqual(granulation_work_center_row.batch_code, source_blend_wip_row.batch_code)
+        bl_batch = ProductionBatch.objects.get(pk=bl_batch_id)
+
+        gl_order = ProductionOrder.objects.create(
+            production_id="GL02",
+            production_type="WPE Granulated Blend Production",
+            production_date=date.today(),
+            extra_form_data={
+                "stage": "GL",
+                "next_workflow_stage": "-",
+                "finished_goods": {
+                    "id": 2,
+                    "item_code": "PRD001",
+                    "item_name": "HSN-500",
+                    "unit": "METER",
+                },
+                "work_center": "2",
+                "selected_bom_variant_id": str(self.bom.id),
+            },
+        )
+        gl_batch_id = self._create_and_start_batch(gl_order, "GL")
+
+        gl_capture_response = self.client.post(
+            f"/api/production/orders/{gl_order.id}/output-captures/",
+            {"source_batch": gl_batch_id, "weight_kg": "25.000"},
+            format="json",
+        )
+        self.assertEqual(gl_capture_response.status_code, status.HTTP_201_CREATED)
+
+        confirm_gl_response = self.client.post(
+            f"/api/production/orders/{gl_order.id}/batches/{gl_batch_id}/confirm/",
+            format="json",
+        )
+        self.assertEqual(confirm_gl_response.status_code, status.HTTP_200_OK)
+
+        granulation_store_row = ProductionInventoryTransaction.objects.get(
+            source_batch_id=gl_batch_id,
+            stage=ProductionInventoryTransaction.Stage.GRANULATION_STORE,
+        )
+
+        connection_line_row = ProductionInventoryTransaction.objects.get(
+            source_batch_id=gl_batch_id,
+            stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+        )
+        self.assertEqual(connection_line_row.production_order_id, gl_order.id)
+        self.assertEqual(connection_line_row.production_id, gl_order.production_id)
+        self.assertEqual(connection_line_row.batch_code, source_blend_wip_row.batch_code)
+        gl_batch = ProductionBatch.objects.get(pk=gl_batch_id)
+
+        blend_store_response = self.client.get(
+            "/api/inventory/production-inventory/",
+            {
+                "stage": ProductionInventoryTransaction.Stage.BLEND_STORE,
+                "include_history": "true",
+            },
+        )
+        self.assertEqual(blend_store_response.status_code, status.HTTP_200_OK)
+        blend_store_payload = blend_store_response.data["data"]["results"]
+        blend_store_api_row = next(
+            row
+            for row in blend_store_payload
+            if row["id"] == blend_store_row.id
+        )
+        self.assertEqual(blend_store_api_row["batch_no"], bl_batch.batch_no)
+        self.assertEqual(blend_store_api_row["batch_code"], source_blend_wip_row.batch_code)
+        self.assertEqual(blend_store_api_row["production_id"], bl_order.production_id)
+
+        granulation_work_center_response = self.client.get(
+            "/api/inventory/production-inventory/",
+            {
+                "stage": ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
+                "include_history": "true",
+            },
+        )
+        self.assertEqual(granulation_work_center_response.status_code, status.HTTP_200_OK)
+        granulation_work_center_payload = granulation_work_center_response.data["data"]["results"]
+        granulation_work_center_api_row = next(
+            row
+            for row in granulation_work_center_payload
+            if row["id"] == granulation_work_center_row.id
+        )
+        self.assertEqual(granulation_work_center_api_row["batch_no"], bl_batch.batch_no)
+        self.assertEqual(granulation_work_center_api_row["batch_code"], source_blend_wip_row.batch_code)
+        self.assertEqual(granulation_work_center_api_row["production_id"], bl_order.production_id)
+
+        granulation_store_response = self.client.get(
+            "/api/inventory/production-inventory/",
+            {
+                "stage": ProductionInventoryTransaction.Stage.GRANULATION_STORE,
+                "include_history": "true",
+            },
+        )
+        self.assertEqual(granulation_store_response.status_code, status.HTTP_200_OK)
+        granulation_store_payload = granulation_store_response.data["data"]["results"]
+        granulation_store_api_row = next(
+            row
+            for row in granulation_store_payload
+            if row["id"] == granulation_store_row.id
+        )
+        self.assertEqual(granulation_store_api_row["batch_no"], gl_batch.batch_no)
+        self.assertEqual(granulation_store_api_row["batch_code"], source_blend_wip_row.batch_code)
+        self.assertEqual(granulation_store_api_row["production_id"], gl_order.production_id)
+
+        connection_line_response = self.client.get(
+            "/api/inventory/production-inventory/",
+            {
+                "stage": ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+                "include_history": "true",
+            },
+        )
+        self.assertEqual(connection_line_response.status_code, status.HTTP_200_OK)
+        connection_line_payload = connection_line_response.data["data"]["results"]
+        connection_line_api_row = next(
+            row
+            for row in connection_line_payload
+            if row["id"] == connection_line_row.id
+        )
+        self.assertEqual(connection_line_api_row["batch_no"], gl_batch.batch_no)
+        self.assertEqual(connection_line_api_row["batch_code"], source_blend_wip_row.batch_code)
+        self.assertEqual(connection_line_api_row["production_id"], gl_order.production_id)
+
+    def test_bl_capture_uses_current_order_context_when_linked_source_order_is_sparse(self):
+        stale_ad_order = self._create_order("AD10", "WPE Additive Production", "AD")
+
+        fresh_ad_order = self._create_order("AD11", "WPE Additive Production", "AD")
+        fresh_ad_order.extra_form_data = {
+            "stage": "AD",
+            "next_workflow_stage": "-",
+            "finished_goods": {"id": 2, "item_code": "PRD001", "item_name": "HSN-500", "unit": "METER"},
+            "work_center": "2",
+            "selected_bom_variant_id": str(self.bom.id),
+        }
+        fresh_ad_order.save(update_fields=["extra_form_data"])
+        fresh_ad_batch_id = self._create_and_start_batch(fresh_ad_order, "AD")
+        self._save_ad_weight_and_confirm(fresh_ad_order, fresh_ad_batch_id)
+
+        source_blend_wip_row = ProductionInventoryTransaction.objects.get(
+            production_order=fresh_ad_order,
+            stage=ProductionInventoryTransaction.Stage.BLEND_WIP,
+        )
+        self.assertEqual(str(source_blend_wip_row.balance_qty), "250.000")
+
+        bl_order = self._create_order("BL10", "WPE Blend Production", "BL", source_order=stale_ad_order)
+        bl_order.extra_form_data = {
+            "stage": "BL",
+            "next_workflow_stage": "-",
+            "source_order_id": stale_ad_order.id,
+            "finished_goods": {"id": 2, "item_code": "PRD001", "item_name": "HSN-500", "unit": "METER"},
+            "work_center": "2",
+            "selected_bom_variant_id": str(self.bom.id),
+        }
+        bl_order.save(update_fields=["extra_form_data"])
+        bl_batch_id = self._create_and_start_batch(bl_order, "BL")
+
+        bl_capture_response = self.client.post(
+            f"/api/production/orders/{bl_order.id}/output-captures/",
+            {"source_batch": bl_batch_id, "weight_kg": "4.600"},
+            format="json",
+        )
+        self.assertEqual(bl_capture_response.status_code, status.HTTP_201_CREATED)
+
+        source_blend_wip_row.refresh_from_db()
+        self.assertEqual(str(source_blend_wip_row.outward_qty), "4.600")
+        self.assertEqual(str(source_blend_wip_row.balance_qty), "245.400")
+
+        blend_store_row = ProductionInventoryTransaction.objects.get(
+            source_batch_id=bl_batch_id,
+            stage=ProductionInventoryTransaction.Stage.BLEND_STORE,
+        )
+        self.assertEqual(str(blend_store_row.inward_qty), "4.600")
+        self.assertEqual(blend_store_row.production_order_id, bl_order.id)
+        self.assertEqual(blend_store_row.production_id, bl_order.production_id)
+
+    def test_gl_capture_uses_compatible_granulation_work_center_stock_when_linked_parent_is_exhausted(self):
+        old_ad_order = self._create_order("AD05", "WPE Additive Production", "AD")
+        old_ad_order.extra_form_data = {
+            "stage": "AD",
+            "next_workflow_stage": "-",
+            "finished_goods": {"id": 2, "item_code": "PRD001", "item_name": "HSN-500", "unit": "METER"},
+            "work_center": "2",
+            "selected_bom_variant_id": str(self.bom.id),
+        }
+        old_ad_order.save(update_fields=["extra_form_data"])
+        old_ad_batch_id = self._create_and_start_batch(old_ad_order, "AD")
+        self._save_ad_weight_and_confirm(old_ad_order, old_ad_batch_id)
+
+        old_bl_order = self._create_order("BL01", "WPE Blend Production", "BL", source_order=old_ad_order)
+        old_bl_order.extra_form_data = {
+            "stage": "BL",
+            "next_workflow_stage": "-",
+            "source_order_id": old_ad_order.id,
+            "finished_goods": {"id": 2, "item_code": "PRD001", "item_name": "HSN-500", "unit": "METER"},
+            "work_center": "2",
+            "selected_bom_variant_id": "6",
+        }
+        old_bl_order.save(update_fields=["extra_form_data"])
+        old_bl_batch_id = self._create_and_start_batch(old_bl_order, "BL")
+        self._capture_output(old_bl_order, old_bl_batch_id, "4.200")
+        self.assertEqual(
+            self.client.post(
+                f"/api/production/orders/{old_bl_order.id}/batches/{old_bl_batch_id}/confirm/",
+                format="json",
+            ).status_code,
+            status.HTTP_200_OK,
+        )
+
+        gl_order = self._create_order("GL01", "WPE Granulated Blend Production", "GL", source_order=old_bl_order)
+        gl_order.extra_form_data = {
+            "stage": "GL",
+            "next_workflow_stage": "-",
+            "source_order_id": old_bl_order.id,
+            "finished_goods": {"id": 2, "item_code": "PRD001", "item_name": "HSN-500", "unit": "METER"},
+            "work_center": "2",
+            "selected_bom_variant_id": "6",
+        }
+        gl_order.save(update_fields=["extra_form_data"])
+        old_gl_batch_id = self._create_and_start_batch(gl_order, "GL")
+        self._capture_output(gl_order, old_gl_batch_id, "4.200")
+        self.assertEqual(
+            self.client.post(
+                f"/api/production/orders/{gl_order.id}/batches/{old_gl_batch_id}/confirm/",
+                format="json",
+            ).status_code,
+            status.HTTP_200_OK,
+        )
+
+        stale_parent_batch = ProductionBatch.objects.get(pk=old_bl_batch_id)
+        stale_gran_row = ProductionInventoryTransaction.objects.get(
+            source_batch_id=stale_parent_batch.id,
+            stage=ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
+        )
+        self.assertEqual(str(stale_gran_row.balance_qty), "0.000")
+
+        fresh_ad_order = self._create_order("AD06", "WPE Additive Production", "AD")
+        fresh_ad_order.extra_form_data = {
+            "stage": "AD",
+            "next_workflow_stage": "-",
+            "finished_goods": {"id": 2, "item_code": "PRD001", "item_name": "HSN-500", "unit": "METER"},
+            "work_center": "2",
+            "selected_bom_variant_id": str(self.bom.id),
+        }
+        fresh_ad_order.save(update_fields=["extra_form_data"])
+        fresh_ad_batch_id = self._create_and_start_batch(fresh_ad_order, "AD")
+        self._save_ad_weight_and_confirm(fresh_ad_order, fresh_ad_batch_id)
+
+        fresh_bl_order = ProductionOrder.objects.create(
+            production_id="BL02",
+            production_type="WPE Blend Production",
+            production_date=date.today(),
+            extra_form_data={
+                "stage": "BL",
+                "next_workflow_stage": "-",
+                "finished_goods": {"id": 2, "item_code": "PRD001", "item_name": "HSN-500", "unit": "METER"},
+                "work_center": "2",
+                "selected_bom_variant_id": str(self.bom.id),
+            },
+        )
+        fresh_bl_batch_id = self._create_and_start_batch(fresh_bl_order, "BL")
+        self._capture_output(fresh_bl_order, fresh_bl_batch_id, "3.400")
+        self.assertEqual(
+            self.client.post(
+                f"/api/production/orders/{fresh_bl_order.id}/batches/{fresh_bl_batch_id}/confirm/",
+                format="json",
+            ).status_code,
+            status.HTTP_200_OK,
+        )
+
+        second_gl_batch_id = self._create_and_start_batch(gl_order, "GL")
+        second_gl_batch = ProductionBatch.objects.get(pk=second_gl_batch_id)
+        self.assertEqual(second_gl_batch.parent_batch_id, stale_parent_batch.id)
+
+        second_capture_response = self.client.post(
+            f"/api/production/orders/{gl_order.id}/output-captures/",
+            {"source_batch": second_gl_batch_id, "weight_kg": "3.400"},
+            format="json",
+        )
+        self.assertEqual(second_capture_response.status_code, status.HTTP_201_CREATED)
+
+        compatible_gran_row = ProductionInventoryTransaction.objects.get(
+            source_batch_id=fresh_bl_batch_id,
+            stage=ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
+        )
+        self.assertIsNotNone(compatible_gran_row)
+        compatible_gran_row.refresh_from_db()
+        self.assertEqual(str(compatible_gran_row.outward_qty), "3.400")
+
+        new_gran_store_row = ProductionInventoryTransaction.objects.get(
+            source_batch_id=second_gl_batch_id,
+            stage=ProductionInventoryTransaction.Stage.GRANULATION_STORE,
+        )
+        self.assertEqual(str(new_gran_store_row.inward_qty), "3.400")
+        self.assertEqual(new_gran_store_row.production_id, gl_order.production_id)
+
     def test_linked_bl_and_gl_orders_consume_and_forward_inventory_without_duplicates(self):
         ad_order = self._create_order("AD02", "WPE Additive Production", "AD")
         ad_batch_id = self._create_and_start_batch(ad_order, "AD")
@@ -2002,12 +2369,14 @@ class ProductionInventoryLinkedStageFlowTests(APITestCase):
         self.assertEqual(str(source_blend_wip_row.balance_qty), "69.500")
 
         blend_store_row = ProductionInventoryTransaction.objects.get(
-            production_order=bl_order,
+            source_batch_id=bl_batch_id,
             stage=ProductionInventoryTransaction.Stage.BLEND_STORE,
         )
         self.assertEqual(str(blend_store_row.inward_qty), "180.500")
         self.assertEqual(str(blend_store_row.balance_qty), "180.500")
         self.assertEqual(blend_store_row.from_stage, ProductionInventoryTransaction.Stage.BLEND_WIP)
+        self.assertEqual(blend_store_row.production_order_id, bl_order.id)
+        self.assertEqual(blend_store_row.production_id, bl_order.production_id)
 
         confirm_bl_response = self.client.post(
             f"/api/production/orders/{bl_order.id}/batches/{bl_batch_id}/confirm/",
@@ -2021,11 +2390,13 @@ class ProductionInventoryLinkedStageFlowTests(APITestCase):
         self.assertEqual(blend_store_row.to_stage, ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER)
 
         granulation_work_center_row = ProductionInventoryTransaction.objects.get(
-            production_order=bl_order,
+            source_batch_id=bl_batch_id,
             stage=ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
         )
         self.assertEqual(str(granulation_work_center_row.inward_qty), "180.500")
         self.assertEqual(str(granulation_work_center_row.balance_qty), "180.500")
+        self.assertEqual(granulation_work_center_row.production_order_id, bl_order.id)
+        self.assertEqual(granulation_work_center_row.production_id, bl_order.production_id)
 
         repeat_bl_confirm = self.client.post(
             f"/api/production/orders/{bl_order.id}/batches/{bl_batch_id}/confirm/",
@@ -2034,7 +2405,7 @@ class ProductionInventoryLinkedStageFlowTests(APITestCase):
         self.assertEqual(repeat_bl_confirm.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(
             ProductionInventoryTransaction.objects.filter(
-                production_order=bl_order,
+                source_batch_id=bl_batch_id,
                 stage=ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
             ).count(),
             1,
@@ -2055,12 +2426,14 @@ class ProductionInventoryLinkedStageFlowTests(APITestCase):
         self.assertEqual(str(granulation_work_center_row.balance_qty), "155.500")
 
         granulation_store_row = ProductionInventoryTransaction.objects.get(
-            production_order=gl_order,
+            source_batch_id=gl_batch_id,
             stage=ProductionInventoryTransaction.Stage.GRANULATION_STORE,
         )
         self.assertEqual(str(granulation_store_row.inward_qty), "25.000")
         self.assertEqual(str(granulation_store_row.balance_qty), "25.000")
         self.assertEqual(granulation_store_row.from_stage, ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER)
+        self.assertEqual(granulation_store_row.production_order_id, gl_order.id)
+        self.assertEqual(granulation_store_row.production_id, gl_order.production_id)
 
         confirm_gl_response = self.client.post(
             f"/api/production/orders/{gl_order.id}/batches/{gl_batch_id}/confirm/",
@@ -2074,12 +2447,14 @@ class ProductionInventoryLinkedStageFlowTests(APITestCase):
         self.assertEqual(granulation_store_row.to_stage, ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE)
 
         connection_line_row = ProductionInventoryTransaction.objects.get(
-            production_order=gl_order,
+            source_batch_id=gl_batch_id,
             stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
         )
         self.assertEqual(str(connection_line_row.inward_qty), "25.000")
         self.assertEqual(str(connection_line_row.balance_qty), "25.000")
         self.assertEqual(connection_line_row.from_stage, ProductionInventoryTransaction.Stage.GRANULATION_STORE)
+        self.assertEqual(connection_line_row.production_order_id, gl_order.id)
+        self.assertEqual(connection_line_row.production_id, gl_order.production_id)
 
         repeat_gl_confirm = self.client.post(
             f"/api/production/orders/{gl_order.id}/batches/{gl_batch_id}/confirm/",
@@ -2088,7 +2463,7 @@ class ProductionInventoryLinkedStageFlowTests(APITestCase):
         self.assertEqual(repeat_gl_confirm.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(
             ProductionInventoryTransaction.objects.filter(
-                production_order=gl_order,
+                source_batch_id=gl_batch_id,
                 stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
             ).count(),
             1,

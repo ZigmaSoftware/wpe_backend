@@ -22,7 +22,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.store.models import StoreTransaction, Warehouse
-from apps.store.services import add_stock_from_grn, get_store_warehouse, resolve_item_for_grn_line, transfer_stock
+from apps.store.services import add_stock_from_grn, get_store_warehouse, get_warehouse_by_name, resolve_item_for_grn_line, transfer_stock
 from .models import GRN, GRNAuditLog, QCR
 from .serializers import GRNAuditLogSerializer, GRNReadSerializer, GRNSerializer, QCRSerializer
 
@@ -142,6 +142,15 @@ HEADER_ALIASES = {
     "total tax amount": "total_tax_amount",
     "total_after_tax": "total_after_tax",
     "total after tax": "total_after_tax",
+    "grn_warehouse": "grn_warehouse",
+    "grn warehouse": "grn_warehouse",
+    "warehouse": "grn_warehouse",
+    "source_warehouse": "source_warehouse",
+    "source warehouse": "source_warehouse",
+    "accepted_warehouse": "accepted_warehouse",
+    "accepted warehouse": "accepted_warehouse",
+    "rejected_warehouse": "rejected_warehouse",
+    "rejected warehouse": "rejected_warehouse",
     "status": "status",
 }
 
@@ -187,6 +196,106 @@ DECIMAL_FIELDS = {
 INTEGER_FIELDS = {"item_serial_number"}
 BOOLEAN_FIELDS = {"status"}
 REQUIRED_FIELDS = ("grn_no",)
+ITEM_IMPORT_FIELDS = (
+    "item_id",
+    "item_serial_number",
+    "product_description",
+    "hsn_code",
+    "total_quantity",
+    "quantity",
+    "free_quantity",
+    "accepted_qty",
+    "rejected_qty",
+    "unit",
+    "unit_price",
+    "total_amount",
+    "discount",
+    "assessable_value",
+    "gst_rate",
+    "igst_amount",
+    "cgst_amount",
+    "sgst_amount",
+    "total_item_value",
+)
+DOCUMENT_IMPORT_FIELDS = (
+    "po_no",
+    "po_date",
+    "grn_no",
+    "grn_date",
+    "supplier_invoice_no",
+    "supplier_invoice_date",
+    "gateentry_bookno",
+    "gateentry_bookdate",
+    "tolerance",
+)
+REQUIREMENT_IMPORT_FIELDS = (
+    "req_date",
+    "req_person_name",
+    "req_person_id",
+    "req_department",
+    "req_reason",
+)
+SUPPLIER_IMPORT_FIELDS = (
+    "supplier_id",
+    "gstin",
+    "contact_name",
+    "trade_name",
+    "contact_type",
+    "address1",
+    "address2",
+    "location",
+    "pincode",
+    "state_name",
+    "state_code",
+    "country",
+    "person_name",
+    "phone_number",
+    "email",
+    "category",
+    "segment",
+    "sub_segment",
+    "sales_contact_id",
+    "currency",
+)
+VALUE_IMPORT_FIELDS = (
+    "freight_charge",
+    "loading_unloading_charge",
+    "total_before_tax",
+    "total_tax_amount",
+    "total_after_tax",
+)
+INVOICE_IMPORT_FIELDS = (
+    "grn_warehouse",
+    "source_warehouse",
+    "accepted_warehouse",
+    "rejected_warehouse",
+)
+SHARED_IMPORT_FIELDS = (
+    *DOCUMENT_IMPORT_FIELDS,
+    *REQUIREMENT_IMPORT_FIELDS,
+    *SUPPLIER_IMPORT_FIELDS,
+    *VALUE_IMPORT_FIELDS,
+    *INVOICE_IMPORT_FIELDS,
+    "status",
+)
+SUMMARY_SUM_FIELDS = (
+    "total_quantity",
+    "quantity",
+    "free_quantity",
+    "accepted_qty",
+    "rejected_qty",
+    "total_amount",
+    "assessable_value",
+    "igst_amount",
+    "cgst_amount",
+    "sgst_amount",
+    "total_item_value",
+)
+SUMMARY_TOTAL_FIELDS = (
+    "total_before_tax",
+    "total_tax_amount",
+    "total_after_tax",
+)
 RECEIVER_NESTED_KEYS = {"document_details", "document_requirement_details", "supplier_details", "items", "value_details"}
 ALL_NESTED_KEYS = RECEIVER_NESTED_KEYS | {"invoice_details"}
 EDITABLE_DOCUMENT_DETAILS_FIELDS = {
@@ -514,6 +623,158 @@ def format_serializer_errors(errors: dict[str, Any]) -> str:
         parts.append(f"{field}: {message_text}")
 
     return "; ".join(parts) if parts else "Invalid GRN row"
+
+
+def _is_populated_import_value(value: Any) -> bool:
+    return value not in (None, "")
+
+
+def _serialize_import_value(field_name: str, value: Any) -> Any:
+    if value in (None, ""):
+        return None
+    if field_name in DECIMAL_FIELDS:
+        return decimal_to_string(value) if isinstance(value, Decimal) else value
+    if field_name in MODEL_DATE_FIELDS:
+        return value.isoformat() if isinstance(value, date) else value
+    if field_name in BOOLEAN_FIELDS:
+        return bool(value)
+    return value
+
+
+def _merge_group_shared_field(
+    shared_values: dict[str, Any],
+    field_name: str,
+    value: Any,
+    *,
+    grn_no: str,
+    row_number: int,
+) -> None:
+    if not _is_populated_import_value(value):
+        return
+    existing_value = shared_values.get(field_name)
+    if not _is_populated_import_value(existing_value):
+        shared_values[field_name] = value
+        return
+    if existing_value != value:
+        raise ValueError(
+            f"Conflicting value for '{field_name}' found for GRN '{grn_no}' at row {row_number}."
+        )
+
+
+def _resolve_group_summary_decimal(
+    rows: list[dict[str, Any]],
+    field_name: str,
+    *,
+    always_sum: bool,
+) -> Decimal | None:
+    values = [
+        value
+        for grouped_row in rows
+        if (value := (grouped_row.get("payload") or {}).get(field_name)) is not None
+    ]
+    if not values:
+        return None
+    if always_sum:
+        return sum(values, Decimal("0"))
+    unique_values = []
+    for value in values:
+        if value not in unique_values:
+            unique_values.append(value)
+    if len(unique_values) == 1:
+        return unique_values[0]
+    return sum(values, Decimal("0"))
+
+
+def build_grouped_grn_import_payload(grn_no: str, grouped_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    shared_values: dict[str, Any] = {}
+    item_lines: list[dict[str, Any]] = []
+
+    for grouped_row in grouped_rows:
+        row_number = grouped_row["row_number"]
+        row_payload = grouped_row["payload"]
+        for field_name in SHARED_IMPORT_FIELDS:
+            _merge_group_shared_field(
+                shared_values,
+                field_name,
+                row_payload.get(field_name),
+                grn_no=grn_no,
+                row_number=row_number,
+            )
+
+        item_line = {
+            field_name: _serialize_import_value(field_name, row_payload.get(field_name))
+            for field_name in ITEM_IMPORT_FIELDS
+            if _is_populated_import_value(row_payload.get(field_name))
+        }
+        if item_line:
+            item_lines.append(item_line)
+
+    if not item_lines:
+        item_lines = [{}]
+
+    first_item = item_lines[0]
+    summary_payload = dict(shared_values)
+
+    for field_name in SUMMARY_SUM_FIELDS:
+        summary_value = _resolve_group_summary_decimal(grouped_rows, field_name, always_sum=True)
+        if summary_value is not None:
+            summary_payload[field_name] = summary_value
+
+    for field_name in SUMMARY_TOTAL_FIELDS:
+        summary_value = _resolve_group_summary_decimal(grouped_rows, field_name, always_sum=True)
+        if summary_value is not None:
+            summary_payload[field_name] = summary_value
+
+    for field_name in (
+        "item_id",
+        "item_serial_number",
+        "product_description",
+        "hsn_code",
+        "unit",
+        "unit_price",
+        "discount",
+        "gst_rate",
+    ):
+        item_value = first_item.get(field_name)
+        if _is_populated_import_value(item_value):
+            summary_payload[field_name] = item_value
+
+    payload = {
+        field_name: summary_payload.get(field_name)
+        for field_name in GRN_LEGACY_VALUE_FIELDS
+        if field_name in summary_payload
+    }
+
+    payload["grn_no"] = grn_no
+    payload["raw_payload"] = {
+        "document_details": {
+            field_name: _serialize_import_value(field_name, shared_values.get(field_name))
+            for field_name in DOCUMENT_IMPORT_FIELDS
+            if _is_populated_import_value(shared_values.get(field_name))
+        },
+        "document_requirement_details": {
+            field_name: _serialize_import_value(field_name, shared_values.get(field_name))
+            for field_name in REQUIREMENT_IMPORT_FIELDS
+            if _is_populated_import_value(shared_values.get(field_name))
+        },
+        "supplier_details": {
+            field_name: _serialize_import_value(field_name, shared_values.get(field_name))
+            for field_name in SUPPLIER_IMPORT_FIELDS
+            if _is_populated_import_value(shared_values.get(field_name))
+        },
+        "items": item_lines,
+        "value_details": {
+            field_name: _serialize_import_value(field_name, summary_payload.get(field_name))
+            for field_name in VALUE_IMPORT_FIELDS
+            if _is_populated_import_value(summary_payload.get(field_name))
+        },
+        "invoice_details": {
+            field_name: _serialize_import_value(field_name, shared_values.get(field_name))
+            for field_name in INVOICE_IMPORT_FIELDS
+            if _is_populated_import_value(shared_values.get(field_name))
+        },
+    }
+    return payload
 
 
 def is_blank(value: Any) -> bool:
@@ -1107,13 +1368,15 @@ def transfer_qcr_completion_stock(
     qcr_record: QCR,
     normalized_qcr_items: list[dict[str, Any]],
     created_by=None,
-) -> dict[str, list[int]]:
+) -> dict[str, Any]:
     grn = qcr_record.source_grn
     sync_payload = build_store_sync_payload_for_qcr(qcr_record=qcr_record, qcr_status=qcr_record.status, accepted=True)
     raw_payload, raw_items = ensure_grn_payload_item_lines(grn)
     transaction_date = grn.grn_date or timezone.localdate()
     accepted_transaction_ids: list[int] = []
     rejected_transaction_ids: list[int] = []
+    accepted_destination_warehouse_name: str | None = None
+    rejected_destination_warehouse_name: str | None = None
 
     for index, qcr_item in enumerate(normalized_qcr_items, start=1):
         raw_item = raw_items[index - 1] if index - 1 < len(raw_items) and isinstance(raw_items[index - 1], dict) else {}
@@ -1150,6 +1413,7 @@ def transfer_qcr_completion_stock(
         accepted_qty = parse_optional_decimal(qcr_item.get("accepted_qty"))
         if accepted_qty > 0:
             destination_warehouse = get_store_warehouse()
+            accepted_destination_warehouse_name = destination_warehouse.name
             accepted_reference_id = build_qcr_transfer_reference(
                 qcr_record.generated_grn_no or qcr_record.grn_reference_no,
                 index,
@@ -1195,10 +1459,10 @@ def transfer_qcr_completion_stock(
 
         rejected_qty = parse_optional_decimal(qcr_item.get("rejected_qty"))
         if rejected_qty > 0:
-            destination_warehouse = resolve_configured_warehouse(
-                grn.rejected_warehouse or "Rejected Warehouse - CBE",
-                field_label="rejected_warehouse",
+            destination_warehouse = get_warehouse_by_name(
+                grn.rejected_warehouse or "Rejected Warehouse - CBE"
             )
+            rejected_destination_warehouse_name = destination_warehouse.name
             rejected_reference_id = build_qcr_transfer_reference(
                 qcr_record.generated_grn_no or qcr_record.grn_reference_no,
                 index,
@@ -1246,6 +1510,8 @@ def transfer_qcr_completion_stock(
     return {
         "accepted_transaction_ids": accepted_transaction_ids,
         "rejected_transaction_ids": rejected_transaction_ids,
+        "accepted_destination_warehouse_name": accepted_destination_warehouse_name,
+        "rejected_destination_warehouse_name": rejected_destination_warehouse_name,
     }
 
 
@@ -1779,6 +2045,7 @@ class GRNImportAPIView(APIView):
             created_count = 0
             failed_rows: list[dict[str, Any]] = []
             processed_count = 0
+            grouped_rows_by_grn_no: dict[str, list[dict[str, Any]]] = {}
 
             for row_number, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
                 if is_blank_row(row):
@@ -1807,11 +2074,27 @@ class GRNImportAPIView(APIView):
                     failed_rows.append({"row": row_number, "message": str(exc)})
                     continue
 
-                serializer = GRNSerializer(data=payload)
+                grn_no = str(payload.get("grn_no") or "").strip()
+                grouped_rows_by_grn_no.setdefault(grn_no, []).append(
+                    {
+                        "row_number": row_number,
+                        "payload": payload,
+                    }
+                )
+
+            for grn_no, grouped_rows in grouped_rows_by_grn_no.items():
+                first_row_number = grouped_rows[0]["row_number"]
+                try:
+                    grouped_payload = build_grouped_grn_import_payload(grn_no, grouped_rows)
+                except ValueError as exc:
+                    failed_rows.append({"row": first_row_number, "message": str(exc)})
+                    continue
+
+                serializer = GRNSerializer(data=grouped_payload)
                 if not serializer.is_valid():
                     failed_rows.append(
                         {
-                            "row": row_number,
+                            "row": first_row_number,
                             "message": format_serializer_errors(serializer.errors),
                             "details": serializer.errors,
                         }
@@ -1822,7 +2105,7 @@ class GRNImportAPIView(APIView):
                     with transaction.atomic():
                         serializer.save()
                 except IntegrityError as exc:
-                    failed_rows.append({"row": row_number, "message": str(exc)})
+                    failed_rows.append({"row": first_row_number, "message": str(exc)})
                     continue
 
                 created_count += 1
@@ -2886,22 +3169,32 @@ class QCRStatusUpdateAPIView(APIView):
 
                 if action == "complete":
                     if transfer_summary["accepted_transaction_ids"]:
+                        accepted_destination_name = (
+                            transfer_summary["accepted_destination_warehouse_name"]
+                            or grn.accepted_warehouse
+                            or "Main Store"
+                        )
                         GRNAuditLog.objects.create(
                             grn=grn,
                             stage=GRNAuditLog.STAGE_ADDED_TO_STORE,
                             actor=actor,
-                notes=(
-                    f"Accepted stock transferred to {destination_warehouse.name} "
-                    f"for {len(transfer_summary['accepted_transaction_ids']) // 2} line(s)."
-                ),
-            )
+                            notes=(
+                                f"Accepted stock transferred to {accepted_destination_name} "
+                                f"for {len(transfer_summary['accepted_transaction_ids']) // 2} line(s)."
+                            ),
+                        )
                     if transfer_summary["rejected_transaction_ids"]:
+                        rejected_destination_name = (
+                            transfer_summary["rejected_destination_warehouse_name"]
+                            or grn.rejected_warehouse
+                            or "Rejected Warehouse - CBE"
+                        )
                         GRNAuditLog.objects.create(
                             grn=grn,
                             stage=GRNAuditLog.STAGE_QCR_REJECTED,
                             actor=actor,
                             notes=(
-                                f"Rejected stock transferred to {grn.rejected_warehouse or 'Rejected Warehouse - CBE'} "
+                                f"Rejected stock transferred to {rejected_destination_name} "
                                 f"for {len(transfer_summary['rejected_transaction_ids']) // 2} line(s)."
                             ),
                         )

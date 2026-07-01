@@ -9,6 +9,7 @@ from django.test import RequestFactory, SimpleTestCase, TestCase as DjangoTestCa
 from django.utils import timezone
 
 from .models import ScaleBridgeReading
+from .views import is_bridge_demand_active
 
 try:
     from . import serial_reader
@@ -356,6 +357,12 @@ class ScaleBridgeApiTests(DjangoTestCase):
         self.assertEqual(payload["workstation_id"], "PC-01")
         self.assertEqual(payload["bridge_client_id"], self.primary_client_id)
         self.assertEqual(payload["source"], "local_bridge")
+        self.assertTrue(
+            is_bridge_demand_active(
+                workstation_id="PC-01",
+                bridge_client_id=self.primary_client_id,
+            )
+        )
 
     def test_latest_weight_returns_disconnected_when_stale_for_exact_client(self):
         captured_at = timezone.now() - timedelta(seconds=30)
@@ -386,7 +393,7 @@ class ScaleBridgeApiTests(DjangoTestCase):
         self.assertEqual(payload["status"], "disconnected")
         self.assertEqual(payload["device_id"], "AD-WEIGH-01")
 
-    def test_latest_weight_prefers_most_recent_bridge_reading_when_requested(self):
+    def test_latest_weight_rejects_bridge_request_without_client_scope(self):
         older = timezone.now() - timedelta(seconds=2)
         newer = timezone.now()
         ScaleBridgeReading.objects.create(
@@ -415,15 +422,20 @@ class ScaleBridgeApiTests(DjangoTestCase):
         response = self.client.get("/api/scale/weight/latest/", {"prefer_bridge": "1"}, **self.auth_headers)
         payload = response.json()
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload["status"], "connected")
-        self.assertEqual(payload["device_id"], "GL-WEIGH-02")
-        self.assertEqual(payload["workstation_id"], "PC-02")
-        self.assertEqual(payload["source"], "local_bridge")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            payload["error"],
+            "bridge_client_id and workstation_id are required when requesting bridge scale data.",
+        )
 
-    def test_bridge_demand_endpoint_reports_active_after_ui_heartbeat(self):
+    def test_bridge_demand_endpoint_reports_active_only_for_exact_client_scope(self):
         response = self.client.get(
             "/api/scale/bridge/demand/",
+            {
+                "device_id": "AD-WEIGH-01",
+                "workstation_id": "PC-01",
+                "bridge_client_id": self.primary_client_id,
+            },
             HTTP_X_BRIDGE_API_KEY="bridge-secret",
         )
         self.assertEqual(response.status_code, 200)
@@ -431,6 +443,11 @@ class ScaleBridgeApiTests(DjangoTestCase):
 
         activate_response = self.client.post(
             "/api/scale/bridge/demand/activate/",
+            data=json.dumps({
+                "device_id": "AD-WEIGH-01",
+                "workstation_id": "PC-01",
+                "bridge_client_id": self.primary_client_id,
+            }),
             content_type="application/json",
             **self.auth_headers,
         )
@@ -438,13 +455,35 @@ class ScaleBridgeApiTests(DjangoTestCase):
 
         response = self.client.get(
             "/api/scale/bridge/demand/",
+            {
+                "device_id": "AD-WEIGH-01",
+                "workstation_id": "PC-01",
+                "bridge_client_id": self.primary_client_id,
+            },
             HTTP_X_BRIDGE_API_KEY="bridge-secret",
         )
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["active"])
 
+        other_scope_response = self.client.get(
+            "/api/scale/bridge/demand/",
+            {
+                "device_id": "AD-WEIGH-01",
+                "workstation_id": "PC-01",
+                "bridge_client_id": self.secondary_client_id,
+            },
+            HTTP_X_BRIDGE_API_KEY="bridge-secret",
+        )
+        self.assertEqual(other_scope_response.status_code, 200)
+        self.assertFalse(other_scope_response.json()["active"])
+
         deactivate_response = self.client.delete(
             "/api/scale/bridge/demand/activate/",
+            data=json.dumps({
+                "device_id": "AD-WEIGH-01",
+                "workstation_id": "PC-01",
+                "bridge_client_id": self.primary_client_id,
+            }),
             content_type="application/json",
             **self.auth_headers,
         )
@@ -452,6 +491,11 @@ class ScaleBridgeApiTests(DjangoTestCase):
 
         response = self.client.get(
             "/api/scale/bridge/demand/",
+            {
+                "device_id": "AD-WEIGH-01",
+                "workstation_id": "PC-01",
+                "bridge_client_id": self.primary_client_id,
+            },
             HTTP_X_BRIDGE_API_KEY="bridge-secret",
         )
         self.assertEqual(response.status_code, 200)

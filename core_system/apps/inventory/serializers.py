@@ -166,12 +166,18 @@ class ProductionInventoryTransactionSerializer(serializers.ModelSerializer):
         return ProductionInventoryTransaction.Stage(obj.stage).label if obj.stage else ""
 
     def get_batch_no(self, obj):
+        source_batch = getattr(obj, "source_batch", None)
+        if source_batch is not None:
+            current_batch_no = str(getattr(source_batch, "batch_no", "") or "").strip()
+            if current_batch_no:
+                return current_batch_no
+
+            workflow_batch_no = str(getattr(source_batch, "workflow_batch_no", "") or "").strip()
+            if workflow_batch_no:
+                return workflow_batch_no
+
         if obj.batch_code:
             return obj.batch_code
-        if obj.stage == ProductionInventoryTransaction.Stage.BLEND_WIP:
-            source_batch = getattr(obj, "source_batch", None)
-            if source_batch is not None:
-                return str(getattr(source_batch, "batch_no", "") or "").strip()
         return ""
 
     def get_planned_weight(self, obj):

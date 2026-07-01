@@ -85,6 +85,7 @@ class ProductionOrderViewSet(viewsets.ModelViewSet):
             Q(extra_form_data__stage=stage)
             | Q(production_id__istartswith=stage)
             | Q(production_type__iexact=mapped_type)
+            | Q(batches__stage=stage)
         )
 
     def _get_source_available_quantity(self, order: ProductionOrder, target_stage: str) -> Decimal:
@@ -312,6 +313,7 @@ from .serializers import (
 from apps.inventory.models import ProductionInventoryTransaction
 from apps.inventory.services import (
     get_available_stage_quantity,
+    get_available_stage_quantity_for_context,
     move_ad_batch_to_blend_wip,
     move_bl_batch_to_granulation_work_center,
     move_gl_batch_to_connection_line,
@@ -2079,11 +2081,23 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
             else ""
         )
         if source_inventory_stage:
-            inventory_owner = linked_source_order or order
-            available_qty = get_available_stage_quantity(inventory_owner, source_inventory_stage)
+            available_qty = get_available_stage_quantity_for_context(
+                production_order=linked_source_order or order,
+                fallback_production_order=order,
+                stage=source_inventory_stage,
+                source_batch=getattr(batch, "parent_batch", None),
+                lineage_batch_code=str(batch.batch_no or "").strip() or None,
+            )
+            stage_label = source_inventory_stage.replace("_", " ").title()
+            if available_qty <= Decimal("0.000"):
+                return success_response(
+                    message=f"No available stock found in {stage_label} for the selected PRD ID and batch.",
+                    data={"available_qty": f"{available_qty:.3f}"},
+                    status_code=400,
+                )
             if weight_kg > available_qty:
                 return success_response(
-                    message=f"Captured weight exceeds available stock in {source_inventory_stage.replace('_', ' ').title()}.",
+                    message=f"Captured weight exceeds available stock in {stage_label}.",
                     data={"available_qty": f"{available_qty:.3f}"},
                     status_code=400,
                 )

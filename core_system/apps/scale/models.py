@@ -50,3 +50,28 @@ class ScaleBridgeReading(models.Model):
     def __str__(self) -> str:
         client_label = self.bridge_client_id or "legacy"
         return f"{self.device_id} @ {self.workstation_id} [{client_label}]"
+
+
+class ScaleBridgeDemandLease(models.Model):
+    workstation_id = models.CharField(max_length=100, db_index=True)
+    bridge_client_id = models.CharField(max_length=128, db_index=True)
+    expires_at = models.DateTimeField(db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workstation_id", "bridge_client_id"],
+                name="scale_bridge_demand_ws_client_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["workstation_id", "bridge_client_id", "expires_at"],
+                name="scale_dem_ws_cli_exp_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workstation_id} [{self.bridge_client_id}] until {self.expires_at.isoformat()}"
