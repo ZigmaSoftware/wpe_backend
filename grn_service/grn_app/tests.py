@@ -615,6 +615,94 @@ class GRNAPIViewTests(APITestCase):
         self.assertEqual(str(grn.grn_date), "2026-05-01")
         self.assertEqual(grn.req_date, "2026-04-30")
 
+    def test_grn_import_groups_same_grn_number_rows_into_single_record_with_multiple_items(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append([
+            "grn_no",
+            "grn_date",
+            "supplier_id",
+            "trade_name",
+            "item_id",
+            "item_serial_number",
+            "product_description",
+            "total_quantity",
+            "quantity",
+            "accepted_qty",
+            "rejected_qty",
+            "unit",
+            "total_amount",
+            "igst_amount",
+            "cgst_amount",
+            "sgst_amount",
+            "total_item_value",
+            "total_after_tax",
+        ])
+        sheet.append([
+            "GRN-MULTI-001",
+            date(2026, 5, 1),
+            "SUP-MULTI-001",
+            "Grouped Supplier",
+            "ITEM-MULTI-001",
+            1,
+            "Grouped Item 1",
+            10,
+            10,
+            10,
+            0,
+            "NOS",
+            1000,
+            180,
+            0,
+            0,
+            1180,
+            1180,
+        ])
+        sheet.append([
+            "GRN-MULTI-001",
+            date(2026, 5, 1),
+            "SUP-MULTI-001",
+            "Grouped Supplier",
+            "ITEM-MULTI-002",
+            2,
+            "Grouped Item 2",
+            5,
+            5,
+            5,
+            0,
+            "NOS",
+            1000,
+            180,
+            0,
+            0,
+            1180,
+            1180,
+        ])
+
+        file_buffer = BytesIO()
+        workbook.save(file_buffer)
+        upload = SimpleUploadedFile(
+            "grn-import-multi.xlsx",
+            file_buffer.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        response = self.client.post(self.import_url, {"file": upload}, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["processed_count"], 2)
+        self.assertEqual(response.data["created_count"], 1)
+
+        grn = GRN.objects.get(grn_no="GRN-MULTI-001")
+        self.assertEqual(grn.trade_name, "Grouped Supplier")
+        self.assertEqual(str(grn.total_quantity), "15.00")
+        self.assertEqual(str(grn.accepted_qty), "15.00")
+        self.assertEqual(str(grn.total_after_tax), "2360.00")
+        self.assertEqual(len(grn.raw_payload["items"]), 2)
+        self.assertEqual(grn.raw_payload["items"][0]["item_id"], "ITEM-MULTI-001")
+        self.assertEqual(grn.raw_payload["items"][1]["item_id"], "ITEM-MULTI-002")
+        self.assertEqual(grn.raw_payload["items"][1]["product_description"], "Grouped Item 2")
+
 
 @override_settings(INTERNAL_API_KEY="test-internal-key")
 class GRNQCRFlowTests(TestCase):
