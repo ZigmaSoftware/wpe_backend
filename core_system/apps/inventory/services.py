@@ -138,6 +138,7 @@ def _find_stage_stock_rows(
     *,
     stage: str,
     production_order: ProductionOrder | None,
+    fallback_production_order: ProductionOrder | None = None,
     source_batch: ProductionBatch | None,
     lineage_batch_code: str | None = None,
     for_update: bool = False,
@@ -156,25 +157,38 @@ def _find_stage_stock_rows(
     lineage_suffix = _extract_workflow_suffix(lineage_batch_code or getattr(source_batch, "batch_no", None))
     lineage_filters = _build_lineage_filters(lineage_suffix)
 
-    if production_order is not None and lineage_filters:
-        scoped_rows = list(queryset.filter(production_order=production_order).filter(lineage_filters))
-        if scoped_rows:
-            return scoped_rows
+    candidate_orders: list[ProductionOrder] = []
+    for candidate_order in (production_order, fallback_production_order):
+        if candidate_order is None:
+            continue
+        candidate_id = getattr(candidate_order, "pk", None)
+        if any(getattr(existing, "pk", None) == candidate_id for existing in candidate_orders):
+            continue
+        candidate_orders.append(candidate_order)
 
-    if production_order is not None:
-        scoped_rows = list(queryset.filter(production_order=production_order))
-        if scoped_rows and not lineage_filters:
-            return scoped_rows
+    if lineage_filters:
+        for candidate_order in candidate_orders:
+            scoped_rows = list(queryset.filter(production_order=candidate_order).filter(lineage_filters))
+            if scoped_rows:
+                return scoped_rows
 
-    if production_order is not None:
-        contextual_rows = []
-        for row in queryset.select_related("production_order", "source_batch"):
-            score = _inventory_context_match_score(getattr(row, "production_order", None), production_order)
-            if score >= 6:
-                contextual_rows.append((score, row))
-        if contextual_rows:
-            contextual_rows.sort(key=lambda entry: (-entry[0], entry[1].created_at, entry[1].id))
-            return [row for _score, row in contextual_rows]
+    if not lineage_filters:
+        for candidate_order in candidate_orders:
+            scoped_rows = list(queryset.filter(production_order=candidate_order))
+            if scoped_rows:
+                return scoped_rows
+
+    if candidate_orders:
+        inventory_rows = list(queryset.select_related("production_order", "source_batch"))
+        for candidate_order in candidate_orders:
+            contextual_rows = []
+            for row in inventory_rows:
+                score = _inventory_context_match_score(getattr(row, "production_order", None), candidate_order)
+                if score >= 6:
+                    contextual_rows.append((score, row))
+            if contextual_rows:
+                contextual_rows.sort(key=lambda entry: (-entry[0], entry[1].created_at, entry[1].id))
+                return [row for _score, row in contextual_rows]
 
     if lineage_filters:
         global_rows = list(queryset.filter(lineage_filters))
@@ -209,6 +223,7 @@ def _consume_stage_quantity(
     next_stage: str,
     quantity: Decimal,
     production_order: ProductionOrder,
+    fallback_production_order: ProductionOrder | None = None,
     source_batch: ProductionBatch | None,
     lineage_batch_code: str | None = None,
 ):
@@ -218,6 +233,7 @@ def _consume_stage_quantity(
     source_rows = _find_stage_stock_rows(
         stage=stage,
         production_order=production_order,
+        fallback_production_order=fallback_production_order,
         source_batch=source_batch,
         lineage_batch_code=lineage_batch_code,
         for_update=True,
@@ -268,12 +284,14 @@ def get_available_stage_quantity_for_context(
     *,
     production_order: ProductionOrder,
     stage: str,
+    fallback_production_order: ProductionOrder | None = None,
     source_batch: ProductionBatch | None = None,
     lineage_batch_code: str | None = None,
 ) -> Decimal:
     rows = _find_stage_stock_rows(
         stage=stage,
         production_order=production_order,
+        fallback_production_order=fallback_production_order,
         source_batch=source_batch,
         lineage_batch_code=lineage_batch_code,
         for_update=False,
@@ -493,6 +511,7 @@ def record_bl_final_capture(
         next_stage=ProductionInventoryTransaction.Stage.BLEND_STORE,
         quantity=quantity,
         production_order=source_order or bl_batch.production_order,
+        fallback_production_order=bl_batch.production_order,
         source_batch=source_batch,
         lineage_batch_code=str(bl_batch.batch_no or "").strip() or None,
     )
@@ -591,6 +610,7 @@ def record_gl_final_capture(
         next_stage=ProductionInventoryTransaction.Stage.GRANULATION_STORE,
         quantity=quantity,
         production_order=source_order or gl_batch.production_order,
+        fallback_production_order=gl_batch.production_order,
         source_batch=getattr(gl_batch, "parent_batch", None),
         lineage_batch_code=str(gl_batch.batch_no or "").strip() or None,
     )
