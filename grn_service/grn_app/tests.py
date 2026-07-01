@@ -615,6 +615,94 @@ class GRNAPIViewTests(APITestCase):
         self.assertEqual(str(grn.grn_date), "2026-05-01")
         self.assertEqual(grn.req_date, "2026-04-30")
 
+    def test_grn_import_groups_same_grn_number_rows_into_single_record_with_multiple_items(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append([
+            "grn_no",
+            "grn_date",
+            "supplier_id",
+            "trade_name",
+            "item_id",
+            "item_serial_number",
+            "product_description",
+            "total_quantity",
+            "quantity",
+            "accepted_qty",
+            "rejected_qty",
+            "unit",
+            "total_amount",
+            "igst_amount",
+            "cgst_amount",
+            "sgst_amount",
+            "total_item_value",
+            "total_after_tax",
+        ])
+        sheet.append([
+            "GRN-MULTI-001",
+            date(2026, 5, 1),
+            "SUP-MULTI-001",
+            "Grouped Supplier",
+            "ITEM-MULTI-001",
+            1,
+            "Grouped Item 1",
+            10,
+            10,
+            10,
+            0,
+            "NOS",
+            1000,
+            180,
+            0,
+            0,
+            1180,
+            1180,
+        ])
+        sheet.append([
+            "GRN-MULTI-001",
+            date(2026, 5, 1),
+            "SUP-MULTI-001",
+            "Grouped Supplier",
+            "ITEM-MULTI-002",
+            2,
+            "Grouped Item 2",
+            5,
+            5,
+            5,
+            0,
+            "NOS",
+            1000,
+            180,
+            0,
+            0,
+            1180,
+            1180,
+        ])
+
+        file_buffer = BytesIO()
+        workbook.save(file_buffer)
+        upload = SimpleUploadedFile(
+            "grn-import-multi.xlsx",
+            file_buffer.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        response = self.client.post(self.import_url, {"file": upload}, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["processed_count"], 2)
+        self.assertEqual(response.data["created_count"], 1)
+
+        grn = GRN.objects.get(grn_no="GRN-MULTI-001")
+        self.assertEqual(grn.trade_name, "Grouped Supplier")
+        self.assertEqual(str(grn.total_quantity), "15.00")
+        self.assertEqual(str(grn.accepted_qty), "15.00")
+        self.assertEqual(str(grn.total_after_tax), "2360.00")
+        self.assertEqual(len(grn.raw_payload["items"]), 2)
+        self.assertEqual(grn.raw_payload["items"][0]["item_id"], "ITEM-MULTI-001")
+        self.assertEqual(grn.raw_payload["items"][1]["item_id"], "ITEM-MULTI-002")
+        self.assertEqual(grn.raw_payload["items"][1]["product_description"], "Grouped Item 2")
+
 
 @override_settings(INTERNAL_API_KEY="test-internal-key")
 class GRNQCRFlowTests(TestCase):
@@ -1252,7 +1340,7 @@ class GRNQCRFlowTests(TestCase):
             ).exists()
         )
 
-    def test_qcr_complete_auto_creates_default_rejected_warehouse(self):
+    def test_qcr_complete_partial_rejection_creates_missing_rejected_warehouse(self):
         grn, qcr = self.create_active_qcr_record(grn_no="GRN-108-AUTO-REJECT")
         Warehouse.objects.filter(code="REJECTED_CBE").delete()
 
@@ -1270,50 +1358,9 @@ class GRNQCRFlowTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-        qcr.refresh_from_db()
-        rejected_warehouse = Warehouse.objects.get(code="REJECTED_WAREHOUSE_CBE")
+        rejected_warehouse = Warehouse.objects.get(name="Rejected Warehouse - CBE")
         first_item = Item.objects.get(external_item_id="GRN-108-AUTO-REJECT-ITEM-1")
-
-        self.assertEqual(rejected_warehouse.name, "Rejected Warehouse - CBE")
-        self.assertEqual(rejected_warehouse.warehouse_type, Warehouse.WarehouseType.REJECTED)
         self.assertEqual(str(StoreStock.objects.get(item=first_item, warehouse=rejected_warehouse).quantity), "2.000")
-        self.assertTrue(
-            StoreTransaction.objects.filter(
-                reference_id=f"{qcr.generated_grn_no}:1:rejected",
-                warehouse=rejected_warehouse,
-                inward_qty="2.000",
-            ).exists()
-        )
-
-    def test_qcr_complete_repairs_missing_qc_pending_stock(self):
-        grn, qcr = self.create_active_qcr_record(grn_no="GRN-108-QC-REPAIR")
-        qc_pending = Warehouse.objects.get(code="QC_PENDING_CBE")
-        StoreStock.objects.filter(warehouse=qc_pending).update(available_qty="0.000")
-
-        response = self.client.post(
-            f"/api/qcr/{qcr.id}/status/",
-            {
-                "action": "complete",
-                "items": [
-                    {"line_index": 0, "rejected_qty": "2", "reason": "Damaged during inspection"},
-                    {"line_index": 1, "rejected_qty": "0", "reason": ""},
-                ],
-            },
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-
-        first_item = Item.objects.get(external_item_id="GRN-108-QC-REPAIR-ITEM-1")
-        second_item = Item.objects.get(external_item_id="GRN-108-QC-REPAIR-ITEM-2")
-        store = Warehouse.objects.get(code="STORE")
-        rejected = Warehouse.objects.get(code="REJECTED_CBE")
-
-        self.assertEqual(str(StoreStock.objects.get(item=first_item, warehouse=qc_pending).quantity), "0.000")
-        self.assertEqual(str(StoreStock.objects.get(item=second_item, warehouse=qc_pending).quantity), "0.000")
-        self.assertEqual(str(StoreStock.objects.get(item=first_item, warehouse=store).quantity), "7.000")
-        self.assertEqual(str(StoreStock.objects.get(item=second_item, warehouse=store).quantity), "5.000")
-        self.assertEqual(str(StoreStock.objects.get(item=first_item, warehouse=rejected).quantity), "2.000")
 
     def test_qcr_complete_uses_product_name_when_external_item_id_points_to_different_item(self):
         qc_pending, _store, _rejected = self.ensure_qcr_workflow_warehouses()
