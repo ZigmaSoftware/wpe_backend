@@ -13,7 +13,7 @@ from rest_framework.test import APIClient, APITestCase
 
 from apps.items.models import Item
 from apps.store.models import StoreStock, StoreTransaction, Warehouse
-from .models import GRN, QCR
+from .models import GRN, GRNAuditLog, QCR
 
 
 MANUAL_GATE_ENTRY_FLAG = "_manual_gate_entry_entry"
@@ -1339,6 +1339,28 @@ class GRNQCRFlowTests(TestCase):
                 notes__icontains="Rejected Warehouse - CBE",
             ).exists()
         )
+
+    def test_qcr_complete_partial_rejection_creates_missing_rejected_warehouse(self):
+        grn, qcr = self.create_active_qcr_record(grn_no="GRN-108-AUTO-REJECT")
+        Warehouse.objects.filter(code="REJECTED_CBE").delete()
+
+        response = self.client.post(
+            f"/api/qcr/{qcr.id}/status/",
+            {
+                "action": "complete",
+                "items": [
+                    {"line_index": 0, "rejected_qty": "2", "reason": "Damaged during inspection"},
+                    {"line_index": 1, "rejected_qty": "0", "reason": ""},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        rejected_warehouse = Warehouse.objects.get(name="Rejected Warehouse - CBE")
+        first_item = Item.objects.get(external_item_id="GRN-108-AUTO-REJECT-ITEM-1")
+        self.assertEqual(str(StoreStock.objects.get(item=first_item, warehouse=rejected_warehouse).quantity), "2.000")
 
     def test_qcr_complete_uses_product_name_when_external_item_id_points_to_different_item(self):
         qc_pending, _store, _rejected = self.ensure_qcr_workflow_warehouses()

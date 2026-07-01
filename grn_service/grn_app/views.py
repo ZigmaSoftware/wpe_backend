@@ -22,7 +22,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.store.models import StoreTransaction, Warehouse
-from apps.store.services import add_stock_from_grn, get_store_warehouse, resolve_item_for_grn_line, transfer_stock
+from apps.store.services import add_stock_from_grn, get_store_warehouse, get_warehouse_by_name, resolve_item_for_grn_line, transfer_stock
 from .models import GRN, GRNAuditLog, QCR
 from .serializers import GRNAuditLogSerializer, GRNReadSerializer, GRNSerializer, QCRSerializer
 
@@ -1459,9 +1459,8 @@ def transfer_qcr_completion_stock(
 
         rejected_qty = parse_optional_decimal(qcr_item.get("rejected_qty"))
         if rejected_qty > 0:
-            destination_warehouse = resolve_configured_warehouse(
-                grn.rejected_warehouse or "Rejected Warehouse - CBE",
-                field_label="rejected_warehouse",
+            destination_warehouse = get_warehouse_by_name(
+                grn.rejected_warehouse or "Rejected Warehouse - CBE"
             )
             rejected_destination_warehouse_name = destination_warehouse.name
             rejected_reference_id = build_qcr_transfer_reference(
