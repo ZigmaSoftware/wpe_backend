@@ -9,6 +9,10 @@ from .views import (
     ScaleBridgeReadingIngestView,
 )
 
+# Some scale endpoints are not called directly by the React frontend. They may
+# be used by local bridge clients, hardware diagnostics, workstation/device
+# discovery, and deployment clients. Do not remove without checking bridge.py
+# and external scale integrations.
 urlpatterns = [
     path("weight/latest/", LatestWeightView.as_view(), name="scale-weight-latest"),
     path("ports/", ListPortsView.as_view(), name="scale-ports"),
