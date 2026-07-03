@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.urls import path
 
 from .views import (
@@ -21,18 +22,30 @@ from .views import (
 
 urlpatterns = [
     path("request-stock/", StoreStockRequestAPIView.as_view(), name="store-request-stock"),
-    path("request-stock", StoreStockRequestAPIView.as_view(), name="store-request-stock-no-slash"),
     path("requests/", StoreRequestApprovalListAPIView.as_view(), name="store-request-list"),
-    path("requests", StoreRequestApprovalListAPIView.as_view(), name="store-request-list-no-slash"),
     path("requests/<int:pk>/", StoreRequestDetailAPIView.as_view(), name="store-request-detail"),
-    path("requests/<int:pk>", StoreRequestDetailAPIView.as_view(), name="store-request-detail-no-slash"),
     path("requests/<int:pk>/approve/", ApproveStockRequestAPIView.as_view(), name="store-request-approve"),
-    path("requests/<int:pk>/approve", ApproveStockRequestAPIView.as_view(), name="store-request-approve-no-slash"),
     path("requests/<int:pk>/reject/", RejectStockRequestAPIView.as_view(), name="store-request-reject"),
-    path("requests/<int:pk>/reject", RejectStockRequestAPIView.as_view(), name="store-request-reject-no-slash"),
     path("requests/<int:pk>/release/", ReleaseStockRequestAPIView.as_view(), name="store-request-release"),
-    path("requests/<int:pk>/release", ReleaseStockRequestAPIView.as_view(), name="store-request-release-no-slash"),
     path("requests/<int:pk>/release-reject/", RejectReleaseStockRequestAPIView.as_view(), name="store-request-release-reject"),
+    path("dashboard/", StockDashboardAPIView.as_view(), name="store-dashboard"),
+    path("inventory/summary/", StoreInventorySummaryAPIView.as_view(), name="store-inventory-summary"),
+    path("inventory/<int:item_id>/history/", StoreInventoryHistoryAPIView.as_view(), name="store-inventory-history"),
+    path("stock/", StoreStockListAPIView.as_view(), name="store-stock-list"),
+    path("transactions/", StoreTransactionListAPIView.as_view(), name="store-transaction-list"),
+    path("stock/ledger/", StoreTransactionListAPIView.as_view(), name="store-stock-ledger"),
+    path("stock/manual-inward/", StockInwardAPIView.as_view(), name="store-stock-manual-inward"),
+    path("stock/manual-outward/", StockOutwardAPIView.as_view(), name="store-stock-manual-outward"),
+    path("stock/grn-inward/", GRNStockInwardAPIView.as_view(), name="store-grn-inward"),
+]
+
+legacy_urlpatterns = [
+    path("request-stock", StoreStockRequestAPIView.as_view(), name="store-request-stock-no-slash"),
+    path("requests", StoreRequestApprovalListAPIView.as_view(), name="store-request-list-no-slash"),
+    path("requests/<int:pk>", StoreRequestDetailAPIView.as_view(), name="store-request-detail-no-slash"),
+    path("requests/<int:pk>/approve", ApproveStockRequestAPIView.as_view(), name="store-request-approve-no-slash"),
+    path("requests/<int:pk>/reject", RejectStockRequestAPIView.as_view(), name="store-request-reject-no-slash"),
+    path("requests/<int:pk>/release", ReleaseStockRequestAPIView.as_view(), name="store-request-release-no-slash"),
     path("requests/<int:pk>/release-reject", RejectReleaseStockRequestAPIView.as_view(), name="store-request-release-reject-no-slash"),
     path("approve-request/<int:pk>/", ApproveStockRequestAPIView.as_view(), name="store-approve-request"),
     path("approve-request/<int:pk>", ApproveStockRequestAPIView.as_view(), name="store-approve-request-no-slash"),
@@ -42,22 +55,16 @@ urlpatterns = [
     path("release-request/<int:pk>", ReleaseStockRequestAPIView.as_view(), name="store-release-request-no-slash"),
     path("reject-release-request/<int:pk>/", RejectReleaseStockRequestAPIView.as_view(), name="store-reject-release-request"),
     path("reject-release-request/<int:pk>", RejectReleaseStockRequestAPIView.as_view(), name="store-reject-release-request-no-slash"),
-    path("dashboard/", StockDashboardAPIView.as_view(), name="store-dashboard"),
     path("dashboard", StockDashboardAPIView.as_view(), name="store-dashboard-no-slash"),
-    path("inventory/summary/", StoreInventorySummaryAPIView.as_view(), name="store-inventory-summary"),
     path("inventory/summary", StoreInventorySummaryAPIView.as_view(), name="store-inventory-summary-no-slash"),
-    path("inventory/<int:item_id>/history/", StoreInventoryHistoryAPIView.as_view(), name="store-inventory-history"),
     path("inventory/<int:item_id>/history", StoreInventoryHistoryAPIView.as_view(), name="store-inventory-history-no-slash"),
-    path("stock/", StoreStockListAPIView.as_view(), name="store-stock-list"),
     path("stock", StoreStockListAPIView.as_view(), name="store-stock-list-no-slash"),
-    path("transactions/", StoreTransactionListAPIView.as_view(), name="store-transaction-list"),
     path("transactions", StoreTransactionListAPIView.as_view(), name="store-transaction-list-no-slash"),
-    path("stock/ledger/", StoreTransactionListAPIView.as_view(), name="store-stock-ledger"),
     path("stock/ledger", StoreTransactionListAPIView.as_view(), name="store-stock-ledger-no-slash"),
-    path("stock/manual-inward/", StockInwardAPIView.as_view(), name="store-stock-manual-inward"),
     path("stock/manual-inward", StockInwardAPIView.as_view(), name="store-stock-manual-inward-no-slash"),
-    path("stock/manual-outward/", StockOutwardAPIView.as_view(), name="store-stock-manual-outward"),
     path("stock/manual-outward", StockOutwardAPIView.as_view(), name="store-stock-manual-outward-no-slash"),
-    path("stock/grn-inward/", GRNStockInwardAPIView.as_view(), name="store-grn-inward"),
     path("stock/grn-inward", GRNStockInwardAPIView.as_view(), name="store-grn-inward-no-slash"),
 ]
+
+if settings.ENABLE_LEGACY_ROUTE_ALIASES:
+    urlpatterns += legacy_urlpatterns

@@ -210,6 +210,12 @@ SIMPLE_JWT = {
 GRN_SERVICE_BASE_URL = os.getenv("GRN_SERVICE_BASE_URL", "").strip()
 GRN_SERVICE_API_KEY = os.getenv("GRN_SERVICE_API_KEY", "").strip()
 
+# Legacy compatibility flags default to True so existing clients keep working
+# until each legacy surface is explicitly retired.
+ENABLE_LEGACY_PRODUCTION_API = env_bool("ENABLE_LEGACY_PRODUCTION_API", True)
+ENABLE_LEGACY_GRN_API = env_bool("ENABLE_LEGACY_GRN_API", True)
+ENABLE_LEGACY_ROUTE_ALIASES = env_bool("ENABLE_LEGACY_ROUTE_ALIASES", True)
+
 # Point Digi Scale serial connection
 # Set SCALE_ENABLED=false to disable serial port probing and always return a disconnected payload.
 # Set SERIAL_PORT=AUTO to auto-detect CH340 by VID/PID, or use explicit port e.g. /dev/ttyUSB0
