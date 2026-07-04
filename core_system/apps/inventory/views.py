@@ -11,7 +11,7 @@ from apps.store.services import get_warehouse_by_name
 from common.drf import StandardResultsSetPagination, success_response
 
 from .models import ProductionInventoryTransaction
-from .serializers import ProductionInventoryTransactionSerializer
+from .serializers import ProductionInventorySummarySerializer, ProductionInventoryTransactionSerializer
 
 VALID_STAGES = {choice[0] for choice in ProductionInventoryTransaction.Stage.choices}
 ACTIVE_PRODUCTION_INVENTORY_STAGES = [
@@ -24,6 +24,7 @@ ACTIVE_PRODUCTION_INVENTORY_STAGES = [
     ProductionInventoryTransaction.Stage.LINE_WORK_CENTER,
     ProductionInventoryTransaction.Stage.DISCONNECTION_FROM_LINE,
 ]
+SUMMARY_PRODUCTION_INVENTORY_STAGES = set(ACTIVE_PRODUCTION_INVENTORY_STAGES)
 
 
 class ProductionInventoryListAPIView(generics.ListAPIView):
@@ -51,10 +52,21 @@ class ProductionInventoryListAPIView(generics.ListAPIView):
     ]
     ordering_fields = ["created_at", "batch_code", "stage", "status", "id"]
 
+    def _get_group_by(self):
+        group_by = str(self.request.query_params.get("group_by") or "").strip().lower()
+        if not group_by:
+            return ""
+        if group_by != "production_id":
+            raise ValidationError({"group_by": "Invalid group_by. Supported values: production_id."})
+        return group_by
+
+    def _get_requested_stage(self):
+        return (self.request.query_params.get("stage") or "").strip().upper()
+
     def get_queryset(self):
         params = self.request.query_params
 
-        stage = (params.get("stage") or "").strip().upper()
+        stage = self._get_requested_stage()
         if not stage:
             raise ValidationError({"stage": "The 'stage' query parameter is required."})
         if stage != "ALL" and stage not in VALID_STAGES:
@@ -88,6 +100,10 @@ class ProductionInventoryListAPIView(generics.ListAPIView):
         if work_center:
             queryset = queryset.filter(work_center=work_center)
 
+        production_id = (params.get("production_id") or "").strip()
+        if production_id:
+            queryset = queryset.filter(production_id__iexact=production_id)
+
         from_date_raw = (params.get("from_date") or "").strip()
         to_date_raw = (params.get("to_date") or "").strip()
         from_date = parse_date(from_date_raw) if from_date_raw else None
@@ -106,6 +122,74 @@ class ProductionInventoryListAPIView(generics.ListAPIView):
             queryset = queryset.filter(created_at__date__lte=to_date)
 
         return queryset
+
+    def _build_summary_rows(self, serialized_rows):
+        summary_by_production_id = {}
+
+        for row in serialized_rows:
+            production_id = str(row.get("production_id") or "").strip() or "-"
+            batch_id = (
+                str(row.get("batch_no") or "").strip()
+                or str(row.get("batch_code") or "").strip()
+                or str(row.get("reference_no") or "").strip()
+            )
+            recipe = str(row.get("recipe_no") or "").strip()
+            production_type = str(row.get("production_type") or "").strip()
+            created_by = str(row.get("created_by") or "").strip() or "System"
+            created_at = row.get("created_at")
+            total_weight = Decimal(str(row.get("captured_weight") or row.get("inward_qty") or 0))
+
+            summary = summary_by_production_id.get(production_id)
+            if summary is None:
+                summary = {
+                    "id": production_id,
+                    "production_id": production_id,
+                    "production_order_id": row.get("production_order_id"),
+                    "batch_count": 0,
+                    "recipe": recipe,
+                    "production_type": production_type,
+                    "total_weight": Decimal("0.000"),
+                    "planned_weight": str(row.get("planned_weight") or "0.000"),
+                    "uom": str(row.get("uom") or "").strip(),
+                    "created_by": created_by,
+                    "created_at": created_at,
+                    "_batch_ids": set(),
+                }
+                summary_by_production_id[production_id] = summary
+
+            summary["total_weight"] += total_weight
+            if batch_id:
+                summary["_batch_ids"].add(batch_id)
+            if not summary["recipe"] and recipe:
+                summary["recipe"] = recipe
+            if not summary["production_type"] and production_type:
+                summary["production_type"] = production_type
+            if not summary["uom"] and row.get("uom"):
+                summary["uom"] = str(row.get("uom") or "").strip()
+            if created_at and (not summary["created_at"] or created_at < summary["created_at"]):
+                summary["created_at"] = created_at
+                summary["created_by"] = created_by
+
+        summary_rows = []
+        for summary in summary_by_production_id.values():
+            summary_rows.append(
+                {
+                    "id": summary["id"],
+                    "production_id": summary["production_id"],
+                    "production_order_id": summary["production_order_id"],
+                    "batch_count": len(summary["_batch_ids"]),
+                    "recipe": summary["recipe"],
+                    "production_type": summary["production_type"],
+                    "total_weight": f"{summary['total_weight']:.3f}",
+                    "planned_weight": summary["planned_weight"],
+                    "uom": summary["uom"],
+                    "created_by": summary["created_by"],
+                    "created_at": summary["created_at"],
+                }
+            )
+
+        summary_rows.sort(key=lambda row: row.get("created_at") or "", reverse=True)
+        return summary_rows
 
     def _build_totals(self, queryset):
         totals = queryset.aggregate(
@@ -141,9 +225,22 @@ class ProductionInventoryListAPIView(generics.ListAPIView):
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
         totals = self._build_totals(queryset)
-        page = self.paginate_queryset(queryset)
-        rows = list(page) if page is not None else list(queryset)
-        serializer = self.get_serializer(rows, many=True)
+        group_by = self._get_group_by()
+
+        if group_by == "production_id":
+            stage = self._get_requested_stage()
+            if stage == "ALL" or stage not in SUMMARY_PRODUCTION_INVENTORY_STAGES:
+                raise ValidationError({"group_by": "Grouping by production_id is only supported for store-specific stages."})
+
+            serialized_rows = self.get_serializer(queryset, many=True).data
+            summary_rows = self._build_summary_rows(serialized_rows)
+            page = self.paginate_queryset(summary_rows)
+            rows = list(page) if page is not None else list(summary_rows)
+            serializer = ProductionInventorySummarySerializer(rows, many=True)
+        else:
+            page = self.paginate_queryset(queryset)
+            rows = list(page) if page is not None else list(queryset)
+            serializer = self.get_serializer(rows, many=True)
 
         if page is not None:
             paginated_data = self.paginator.get_paginated_data(serializer.data)
