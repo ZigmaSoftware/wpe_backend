@@ -3,12 +3,17 @@ from decimal import Decimal
 from rest_framework import serializers
 from apps.wpe_masters.models import ProductionTypeMaster
 from .models import (
+    BOMVariant,
+    BOMVariantComponent,
+    BatchWeightEntry,
     ProductionOrder,
     MaterialMovement,
     ProductionTransaction,
     ProductionSummary,
     ProductionBatch,
+    ProductionOutputCapture,
     ProductionOrderMaterialPlan,
+    RegrindMaterialEntry,
     BagCreationMaster,
     BinCreationMaster,
     BOMCreationMaster,
@@ -190,7 +195,6 @@ class ProductionOrderDetailSerializer(serializers.ModelSerializer):
             "extra_form_data",
             "created_by",
             "updated_by",
-            "extra_form_data",
             "created_at",
             "updated_at",
             "material_movements",
@@ -334,10 +338,7 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
         if rows:
             ProductionOrderMaterialPlan.objects.bulk_create(rows)
 
-
 # ===== RECIPE / BOM AND PRODUCTION MASTER SERIALIZERS =====
-
-from .models import BOMVariant, BOMVariantComponent, ProductionBatch, ProductionOutputCapture, BatchWeightEntry, RegrindMaterialEntry
 
 
 class ProductionCodeMasterSerializer(serializers.ModelSerializer):

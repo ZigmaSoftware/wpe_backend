@@ -44,9 +44,8 @@ class LogoutAPIView(APIView):
             token = RefreshToken(refresh_token)
             token.blacklist()
         except TokenError:
-            return Response(
-                {"detail": "Invalid refresh token."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            # Logout should be idempotent for the client. A rotated, expired, or
+            # already-blacklisted refresh token still means the local session can end.
+            return Response({"detail": "Logged out successfully."}, status=status.HTTP_200_OK)
 
         return Response({"detail": "Logged out successfully."}, status=status.HTTP_200_OK)
