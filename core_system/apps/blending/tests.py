@@ -6,7 +6,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.test import APIClient, APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from apps.admin_master.models import Staff, UserCreation, UserType
+from apps.admin_master.models import MainScreen, ScreenSection, Staff, UserCreation, UserScreen, UserType, UserTypePermission
 from apps.items.models import Item
 from apps.store.models import StockRequest, StoreTransaction
 from apps.store.services import apply_inward_stock, apply_outward_stock, get_blending_warehouse, get_store_warehouse
@@ -30,6 +30,62 @@ class BlendingStoreRequestTests(APITestCase):
         client = APIClient()
         client.credentials(HTTP_AUTHORIZATION=f"Bearer {access_token}")
         return client
+
+    def grant_screen_permission(
+        self,
+        *,
+        user,
+        screen_code: str,
+        screen_name: str,
+        section_code: str,
+        section_name: str,
+        folder_name: str,
+    ):
+        profile = user.admin_profile
+        main_screen, _ = MainScreen.objects.get_or_create(
+            code="workspace",
+            defaults={"name": "WPE Workspace", "order_no": 1, "status": True},
+        )
+        section, _ = ScreenSection.objects.get_or_create(
+            code=section_code,
+            defaults={
+                "main_screen": main_screen,
+                "name": section_name,
+                "order_no": 1,
+                "is_active": True,
+            },
+        )
+        screen, _ = UserScreen.objects.get_or_create(
+            code=screen_code,
+            defaults={
+                "main_screen": main_screen,
+                "screen_section": section,
+                "screen_name": screen_name,
+                "folder_name": folder_name,
+                "order_no": 1,
+                "is_active": True,
+                "available_actions": ["list", "view"],
+            },
+        )
+        UserTypePermission.objects.update_or_create(
+            user_type=profile.user_type,
+            main_screen=main_screen,
+            screen_section=section,
+            user_screen=screen,
+            scope_type=UserTypePermission.ScopeType.SCREEN,
+            defaults={
+                "action_permissions": {
+                    "all": False,
+                    "add": False,
+                    "update": False,
+                    "list": True,
+                    "delete": False,
+                    "view": True,
+                    "print": False,
+                },
+                "status": True,
+            },
+        )
 
     def setUp(self):
         self.blending_user = self.create_role_user(
@@ -726,6 +782,61 @@ class BlendingStoreRequestTests(APITestCase):
         self.assertEqual(latest_row["reference_no"], "BLEND-HIST-IN-2")
         self.assertEqual(latest_row["module"], "MANUAL")
         self.assertEqual(latest_row["created_by"], self.store_user.username)
+
+    def test_blending_inventory_summary_allows_user_type_screen_access_without_blending_role(self):
+        inventory_viewer = self.create_role_user(
+            username="blending-inventory-viewer",
+            role_name="Inventory Analyst",
+        )
+        self.grant_screen_permission(
+            user=inventory_viewer,
+            screen_code="blending-stock-workspace",
+            screen_name="Blending Stock",
+            section_code="blending-workspace",
+            section_name="Blending Workspace",
+            folder_name="/app/blending/stock",
+        )
+        viewer_client = self.make_auth_client(inventory_viewer)
+        item = Item.objects.create(
+            category="Additive",
+            group="blend",
+            sub_group="stabilizer",
+            item_name="Viewer Blending Item",
+            unit="kg",
+        )
+        apply_inward_stock(
+            item=item,
+            warehouse=self.blending_warehouse,
+            quantity="4.000",
+            transaction_type=StoreTransaction.TransactionType.MANUAL_INWARD,
+            reference_type=StoreTransaction.ReferenceType.MANUAL,
+            reference_id="BLEND-VIEW-1",
+            created_by=self.store_user,
+        )
+
+        response = viewer_client.get("/api/blending/inventory/summary/?page=1&page_size=10")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["count"], 1)
+
+    def test_blending_head_approvals_allow_screen_access_without_head_role(self):
+        head_viewer = self.create_role_user(
+            username="head-viewer",
+            role_name="Request Analyst",
+        )
+        self.grant_screen_permission(
+            user=head_viewer,
+            screen_code="blending-head-approval-workspace",
+            screen_name="Head Approval",
+            section_code="requests-workspace",
+            section_name="Requests Workspace",
+            folder_name="/app/requests/head-approval",
+        )
+        viewer_client = self.make_auth_client(head_viewer)
+
+        response = viewer_client.get("/api/blending/head-approvals/")
+
+        self.assertEqual(response.status_code, 200)
 
     def test_blending_inventory_legacy_monitoring_endpoints_are_removed(self):
         response = self.client.get("/api/blending/stock/current/")

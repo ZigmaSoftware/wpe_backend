@@ -8,7 +8,7 @@ from common.drf import QueryParamFilterMixin, StandardResultsSetPagination, succ
 
 from .inventory_monitoring import BaseInventoryHistoryAPIView, BaseInventorySummaryAPIView
 from .models import StockRequest, StoreStock, StoreTransaction
-from .permissions import IsStoreUser
+from .permissions import IsStoreDashboardViewer, IsStoreInventoryViewer, IsStoreRequestViewer, IsStoreUser
 from .selectors import (
     availability_map_for_requests,
     current_stock_queryset,
@@ -98,7 +98,7 @@ class StoreStockRequestAPIView(generics.GenericAPIView):
 
 
 class StoreRequestApprovalListAPIView(WrappedListAPIView):
-    permission_classes = [IsAuthenticated, IsStoreUser]
+    permission_classes = [IsAuthenticated, IsStoreRequestViewer]
     serializer_class = StockRequestSerializer
     search_fields = ("request_no", "requested_by__username", "items__item__item_name", "items__item__item_code")
     ordering_fields = ("requested_at", "request_no", "status", "id")
@@ -152,7 +152,7 @@ class StoreRequestApprovalListAPIView(WrappedListAPIView):
 
 
 class StoreRequestDetailAPIView(generics.RetrieveAPIView):
-    permission_classes = [IsAuthenticated, IsStoreUser]
+    permission_classes = [IsAuthenticated, IsStoreRequestViewer]
     serializer_class = StockRequestSerializer
     lookup_field = "pk"
 
@@ -387,7 +387,7 @@ class StoreTransactionListAPIView(WrappedListAPIView):
 
 
 class StockDashboardAPIView(generics.GenericAPIView):
-    permission_classes = [IsAuthenticated, IsStoreUser]
+    permission_classes = [IsAuthenticated, IsStoreDashboardViewer]
 
     def get(self, request, *args, **kwargs):
         data = {
@@ -406,7 +406,7 @@ class StockDashboardAPIView(generics.GenericAPIView):
 
 
 class StoreInventorySummaryAPIView(BaseInventorySummaryAPIView):
-    permission_classes = [IsAuthenticated, IsStoreUser]
+    permission_classes = [IsAuthenticated, IsStoreInventoryViewer]
     list_message = "Store inventory summary fetched successfully."
 
     def get_warehouse(self):
@@ -414,7 +414,7 @@ class StoreInventorySummaryAPIView(BaseInventorySummaryAPIView):
 
 
 class StoreInventoryHistoryAPIView(BaseInventoryHistoryAPIView):
-    permission_classes = [IsAuthenticated, IsStoreUser]
+    permission_classes = [IsAuthenticated, IsStoreInventoryViewer]
     list_message = "Store inventory history fetched successfully."
 
     def get_warehouse(self):
