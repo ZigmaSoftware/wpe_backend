@@ -18,7 +18,12 @@ from apps.store.serializers import (
 )
 from apps.store.services import request_stock
 
-from .permissions import IsBlendingHeadUser, IsBlendingUser
+from .permissions import (
+    IsBlendingHeadApprovalViewer,
+    IsBlendingHeadUser,
+    IsBlendingInventoryViewer,
+    IsBlendingUser,
+)
 from .serializers import (
     BlendingAdditiveRequestSerializer,
     BlendingStockSerializer,
@@ -228,7 +233,7 @@ class BlendingStoreRequestListCreateAPIView(WrappedBlendingListAPIView, generics
 
 
 class BlendingHeadApprovalListAPIView(WrappedBlendingListAPIView):
-    permission_classes = [IsAuthenticated, IsBlendingHeadUser]
+    permission_classes = [IsAuthenticated, IsBlendingHeadApprovalViewer]
     serializer_class = StockRequestSerializer
     search_fields = ("request_no", "requested_by__username", "items__item__item_name", "items__item__item_code")
     ordering_fields = ("requested_at", "request_no", "id")
@@ -377,7 +382,7 @@ class CancelBlendingStoreRequestAPIView(generics.GenericAPIView):
 
 
 class BlendingInventorySummaryAPIView(BaseInventorySummaryAPIView):
-    permission_classes = [IsAuthenticated, IsBlendingUser]
+    permission_classes = [IsAuthenticated, IsBlendingInventoryViewer]
     list_message = "Blending inventory summary fetched successfully."
 
     def get_warehouse(self):
@@ -385,7 +390,7 @@ class BlendingInventorySummaryAPIView(BaseInventorySummaryAPIView):
 
 
 class BlendingInventoryHistoryAPIView(BaseInventoryHistoryAPIView):
-    permission_classes = [IsAuthenticated, IsBlendingUser]
+    permission_classes = [IsAuthenticated, IsBlendingInventoryViewer]
     list_message = "Blending inventory history fetched successfully."
 
     def get_warehouse(self):
