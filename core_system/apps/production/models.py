@@ -799,6 +799,169 @@ class ProductionLineMaster(ProductionCodeTrackedModel):
         verbose_name_plural = "Production Lines"
 
 
+class ProductionLineConnection(models.Model):
+    class ConnectionStatus(models.TextChoices):
+        ON = "ON", "ON"
+        OFF = "OFF", "OFF"
+
+    source_inventory_transaction = models.ForeignKey(
+        "inventory.ProductionInventoryTransaction",
+        on_delete=models.PROTECT,
+        related_name="line_connections",
+    )
+    source_production_order = models.ForeignKey(
+        "production.ProductionOrder",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="source_line_connections",
+    )
+    production_order = models.ForeignKey(
+        "production.ProductionOrder",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="line_connections",
+    )
+    production_line = models.ForeignKey(
+        "production.ProductionLineMaster",
+        on_delete=models.PROTECT,
+        related_name="connections",
+    )
+    machine = models.ForeignKey(
+        "production.ProductionMachine",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="line_connections",
+    )
+    item = models.ForeignKey(
+        "Items.Item",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="line_connections",
+    )
+    item_code = models.CharField(max_length=100, blank=True)
+    item_name = models.CharField(max_length=255, blank=True)
+    baglot = models.CharField(max_length=100, db_index=True)
+    scancode = models.CharField(max_length=200, db_index=True)
+    reference_no = models.CharField(max_length=100, blank=True)
+    weight = models.DecimalField(max_digits=14, decimal_places=3, default=ZERO_DECIMAL)
+    line_name = models.CharField(max_length=200)
+    machine_name = models.CharField(max_length=200, blank=True)
+    status = models.CharField(
+        max_length=8,
+        choices=ConnectionStatus.choices,
+        default=ConnectionStatus.ON,
+        db_index=True,
+    )
+    connected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="production_line_connections_on",
+    )
+    disconnected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="production_line_connections_off",
+    )
+    connected_at = models.DateTimeField(default=timezone.now, db_index=True)
+    disconnected_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-connected_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["scancode"],
+                condition=Q(status="ON"),
+                name="prod_line_conn_active_scancode_uq",
+            ),
+            models.UniqueConstraint(
+                fields=["production_line"],
+                condition=Q(status="ON"),
+                name="prod_line_conn_active_line_uq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["baglot", "status"], name="prod_line_conn_bag_status_idx"),
+            models.Index(fields=["production_line", "status"], name="prod_line_conn_line_status_idx"),
+        ]
+
+    def clean(self):
+        super().clean()
+        self.item_code = str(self.item_code or "").strip()
+        self.item_name = str(self.item_name or "").strip()
+        self.baglot = str(self.baglot or "").strip().upper()
+        self.scancode = str(self.scancode or "").strip().upper()
+        self.reference_no = str(self.reference_no or "").strip()
+        self.line_name = str(self.line_name or "").strip()
+        self.machine_name = str(self.machine_name or "").strip()
+        self.notes = str(self.notes or "").strip()
+
+    @property
+    def duration_seconds(self) -> int | None:
+        end_time = self.disconnected_at or timezone.now()
+        if not self.connected_at:
+            return None
+        return max(int((end_time - self.connected_at).total_seconds()), 0)
+
+    def __str__(self):
+        return f"{self.baglot or self.scancode} -> {self.line_name} ({self.status})"
+
+
+def release_production_line_if_idle(
+    production_line: ProductionLineMaster | None,
+    *,
+    exclude_connection_id: int | None = None,
+) -> None:
+    if production_line is None:
+        return
+
+    active_connections = ProductionLineConnection.objects.filter(
+        production_line=production_line,
+        status=ProductionLineConnection.ConnectionStatus.ON,
+    )
+    if exclude_connection_id is not None:
+        active_connections = active_connections.exclude(pk=exclude_connection_id)
+
+    if active_connections.exists():
+        return
+
+    if production_line.status == ProductionLineMaster.LineStatus.RUNNING:
+        production_line.status = ProductionLineMaster.LineStatus.FREE
+        production_line.save(update_fields=["status", "updated_at"])
+
+
+def disconnect_production_line_connection(
+    connection: ProductionLineConnection,
+    *,
+    disconnected_at=None,
+    disconnected_by=None,
+) -> ProductionLineConnection:
+    if connection.status == ProductionLineConnection.ConnectionStatus.OFF:
+        return connection
+
+    connection.status = ProductionLineConnection.ConnectionStatus.OFF
+    connection.disconnected_at = disconnected_at or timezone.now()
+    if disconnected_by is not None:
+        connection.disconnected_by = disconnected_by
+    connection.save(update_fields=["status", "disconnected_at", "disconnected_by", "updated_at"])
+
+    release_production_line_if_idle(
+        connection.production_line,
+        exclude_connection_id=connection.pk,
+    )
+    return connection
+
+
 class BinCreationMaster(ProductionCodeTrackedModel):
     class CapacityUom(models.TextChoices):
         KG = "KG", "KG"

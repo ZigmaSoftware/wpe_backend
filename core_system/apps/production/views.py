@@ -44,6 +44,7 @@ from .models import (
     PackingMaterialMaster,
     PackingTypeMaster,
     ProductionBatch,
+    ProductionLineConnection,
     ProductionLineMaster,
     ProductionMachine,
     ProductionOrder,
@@ -58,6 +59,7 @@ from .models import (
     WEIGHT_MIN_GRAMS,
     build_alpha_running_code,
     build_prefixed_running_number,
+    disconnect_production_line_connection,
     get_connected_lineage_batches,
     resolve_workflow_batch_no,
 )
@@ -75,6 +77,8 @@ from .serializers import (
     PackingMaterialMasterSerializer,
     PackingTypeMasterSerializer,
     ProductionBatchSerializer,
+    ProductionLineConnectRequestSerializer,
+    ProductionLineConnectionSerializer,
     ProductionLineMasterSerializer,
     ProductionMachineSerializer,
     ProductionOrderCreateUpdateSerializer,
@@ -578,6 +582,297 @@ class PackingMaterialMasterViewSet(ProductionCodeMasterViewSet):
         "is_active": "is_active",
     }
     next_code_prefix = "PM"
+
+
+def _normalize_line_connect_token(value: str | None) -> str:
+    return str(value or "").strip().upper()
+
+
+def _format_line_connect_weight(value) -> str:
+    numeric = Decimal(str(value or 0))
+    return f"{numeric:.3f}"
+
+
+def _resolve_line_connect_baglot(row: ProductionInventoryTransaction | None) -> str:
+    if row is None:
+        return ""
+    output_capture = getattr(row, "output_capture", None)
+    if output_capture is not None and str(output_capture.binlot or "").strip():
+        return str(output_capture.binlot or "").strip().upper()
+    return str(row.batch_code or row.reference_no or "").strip().upper()
+
+
+def _resolve_line_connect_scancode(row: ProductionInventoryTransaction | None) -> str:
+    if row is None:
+        return ""
+    output_capture = getattr(row, "output_capture", None)
+    if output_capture is not None and str(output_capture.scancode_id or "").strip():
+        return str(output_capture.scancode_id or "").strip().upper()
+    return str(row.scan_code or "").strip().upper()
+
+
+def _line_connect_inventory_queryset(*, available_only: bool = True, for_update: bool = False):
+    queryset = ProductionInventoryTransaction.objects.filter(
+        stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+    ).select_related(
+        "production_order",
+        "source_batch",
+        "output_capture",
+        "item",
+    )
+    if available_only:
+        queryset = queryset.filter(balance_qty__gt=Decimal("0"))
+    if for_update:
+        queryset = queryset.select_for_update()
+    return queryset
+
+
+def _get_line_connect_inventory_row(scan_token: str, *, available_only: bool = True, for_update: bool = False):
+    normalized = _normalize_line_connect_token(scan_token)
+    if not normalized:
+        return None
+
+    return (
+        _line_connect_inventory_queryset(available_only=available_only, for_update=for_update)
+        .filter(
+            Q(scan_code__iexact=normalized)
+            | Q(output_capture__scancode_id__iexact=normalized)
+            | Q(output_capture__binlot__iexact=normalized)
+            | Q(batch_code__iexact=normalized)
+            | Q(reference_no__iexact=normalized)
+        )
+        .order_by("-created_at", "-id")
+        .first()
+    )
+
+
+def _serialize_line_connect_lookup(row: ProductionInventoryTransaction, *, request):
+    scancode = _resolve_line_connect_scancode(row)
+    baglot = _resolve_line_connect_baglot(row)
+    history_queryset = (
+        ProductionLineConnection.objects.filter(scancode__iexact=scancode)
+        .select_related(
+            "production_line",
+            "machine",
+            "source_production_order",
+            "production_order",
+            "item",
+        )
+        .order_by("-connected_at", "-id")
+    )
+    active_connection = next(
+        (record for record in history_queryset if record.status == ProductionLineConnection.ConnectionStatus.ON),
+        None,
+    )
+    occupied_lines = [
+        {
+            "production_line_id": record.production_line_id,
+            "line_name": record.line_name,
+            "machine_name": record.machine_name,
+            "baglot": record.baglot,
+            "scancode": record.scancode,
+        }
+        for record in ProductionLineConnection.objects.filter(
+            status=ProductionLineConnection.ConnectionStatus.ON,
+        )
+        .exclude(scancode__iexact=scancode)
+        .select_related("production_line")
+        .order_by("line_name", "id")
+    ]
+    serializer_context = {"request": request}
+
+    return {
+        "inventory_transaction_id": row.id,
+        "source_production_order_id": row.production_order_id,
+        "source_production_id": str(getattr(row.production_order, "production_id", "") or row.production_id or "").strip(),
+        "source_batch_id": row.source_batch_id,
+        "source_batch_no": str(getattr(row.source_batch, "batch_no", "") or row.batch_code or row.reference_no or "").strip(),
+        "reference_no": str(row.reference_no or row.batch_code or "").strip(),
+        "baglot": baglot,
+        "scancode": scancode,
+        "available_weight": _format_line_connect_weight(row.balance_qty),
+        "connected_weight": _format_line_connect_weight(row.inward_qty),
+        "uom": str(row.uom or getattr(row.item, "unit", "") or "").strip(),
+        "item": {
+            "id": row.item_id,
+            "item_code": str(row.item_code or getattr(row.item, "item_code", "") or "").strip(),
+            "item_name": str(row.item_name or getattr(row.item, "item_name", "") or "").strip(),
+        },
+        "status": "ON" if active_connection is not None else "AVAILABLE",
+        "current_connection": (
+            ProductionLineConnectionSerializer(active_connection, context=serializer_context).data
+            if active_connection is not None
+            else None
+        ),
+        "history": ProductionLineConnectionSerializer(history_queryset, many=True, context=serializer_context).data,
+        "occupied_lines": occupied_lines,
+    }
+
+
+class ProductionLineConnectionLookupAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        scan_token = _normalize_line_connect_token(
+            request.query_params.get("scan") or request.query_params.get("scancode")
+        )
+        if not scan_token:
+            return success_response(
+                message="Scan a GL scancode or baglot to continue.",
+                data={},
+                status_code=400,
+            )
+
+        inventory_row = _get_line_connect_inventory_row(scan_token)
+        if inventory_row is None:
+            return success_response(
+                message="The scanned GL bag is not available in Connection to Line stock.",
+                data={},
+                status_code=400,
+            )
+
+        return success_response(
+            message="Line connect details loaded.",
+            data=_serialize_line_connect_lookup(inventory_row, request=request),
+        )
+
+
+class ProductionLineConnectionConnectAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProductionLineConnectRequestSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        scan_token = serializer.validated_data["scan_code"]
+        production_line = serializer.validated_data["production_line"]
+        production_order = serializer.validated_data.get("production_order")
+
+        with transaction.atomic():
+            inventory_row = _get_line_connect_inventory_row(scan_token, for_update=True)
+            if inventory_row is None:
+                return success_response(
+                    message="The scanned GL bag is not available in Connection to Line stock.",
+                    data={},
+                    status_code=400,
+                )
+
+            scancode = _resolve_line_connect_scancode(inventory_row)
+            baglot = _resolve_line_connect_baglot(inventory_row)
+            production_line = ProductionLineMaster.objects.select_related("machine").select_for_update().get(
+                pk=production_line.pk
+            )
+
+            active_connection = (
+                ProductionLineConnection.objects.select_related("production_line")
+                .select_for_update()
+                .filter(scancode__iexact=scancode, status=ProductionLineConnection.ConnectionStatus.ON)
+                .first()
+            )
+            if active_connection is not None:
+                return success_response(
+                    message=f"Bag {baglot} is already connected to {active_connection.line_name}.",
+                    data={},
+                    status_code=400,
+                )
+
+            if production_line.status == ProductionLineMaster.LineStatus.MAINTENANCE:
+                return success_response(
+                    message=f"{production_line.name} is under maintenance.",
+                    data={},
+                    status_code=400,
+                )
+
+            occupied_connection = (
+                ProductionLineConnection.objects.select_related("production_line")
+                .select_for_update()
+                .filter(
+                    production_line=production_line,
+                    status=ProductionLineConnection.ConnectionStatus.ON,
+                )
+                .first()
+            )
+            if occupied_connection is not None:
+                return success_response(
+                    message=f"{production_line.name} is already connected with another bag.",
+                    data={},
+                    status_code=400,
+                )
+
+            if production_line.status == ProductionLineMaster.LineStatus.RUNNING:
+                return success_response(
+                    message=f"{production_line.name} is not available for a new connection right now.",
+                    data={},
+                    status_code=400,
+                )
+
+            machine = production_line.machine
+            created_connection = ProductionLineConnection.objects.create(
+                source_inventory_transaction=inventory_row,
+                source_production_order=inventory_row.production_order,
+                production_order=production_order,
+                production_line=production_line,
+                machine=machine,
+                item=inventory_row.item,
+                item_code=str(
+                    inventory_row.item_code or getattr(inventory_row.item, "item_code", "") or ""
+                ).strip(),
+                item_name=str(
+                    inventory_row.item_name or getattr(inventory_row.item, "item_name", "") or ""
+                ).strip(),
+                baglot=baglot,
+                scancode=scancode,
+                reference_no=str(inventory_row.reference_no or inventory_row.batch_code or "").strip(),
+                weight=Decimal(str(inventory_row.balance_qty or 0)),
+                line_name=str(production_line.name or "").strip(),
+                machine_name=str(getattr(machine, "name", "") or "").strip(),
+                connected_by=request.user,
+            )
+
+            if production_line.status != ProductionLineMaster.LineStatus.RUNNING:
+                production_line.status = ProductionLineMaster.LineStatus.RUNNING
+                production_line.save(update_fields=["status", "updated_at"])
+
+        return success_response(
+            message=f"Bag {baglot} connected to {production_line.name}.",
+            data={
+                "connection": ProductionLineConnectionSerializer(
+                    created_connection,
+                    context={"request": request},
+                ).data
+            },
+        )
+
+
+class ProductionLineConnectionDisconnectAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk=None, *args, **kwargs):
+        with transaction.atomic():
+            connection = get_object_or_404(
+                ProductionLineConnection.objects.select_related("production_line").select_for_update(),
+                pk=pk,
+            )
+            if connection.status != ProductionLineConnection.ConnectionStatus.ON:
+                return success_response(
+                    message="This bag is already disconnected.",
+                    data={},
+                    status_code=400,
+                )
+
+            disconnect_production_line_connection(connection, disconnected_by=request.user)
+            connection.refresh_from_db()
+
+        return success_response(
+            message=f"Bag {connection.baglot} disconnected from {connection.line_name}.",
+            data={
+                "connection": ProductionLineConnectionSerializer(
+                    connection,
+                    context={"request": request},
+                ).data
+            },
+        )
 
 
 def bom_component_queryset():

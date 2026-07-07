@@ -9,8 +9,10 @@ from rest_framework.exceptions import ValidationError
 from apps.production.models import (
     BatchWeightEntry,
     ProductionBatch,
+    ProductionLineConnection,
     ProductionOrder,
     ProductionOutputCapture,
+    disconnect_production_line_connection,
 )
 
 from .models import ProductionInventoryTransaction
@@ -748,6 +750,16 @@ def move_pr_batch_to_line_work_center(
             else ProductionInventoryTransaction.Status.IN_PROGRESS
         )
         row.save(update_fields=["outward_qty", "balance_qty", "to_stage", "status", "updated_at"])
+
+        if row.balance_qty <= ZERO:
+            active_connections = list(
+                ProductionLineConnection.objects.filter(
+                    source_inventory_transaction=row,
+                    status=ProductionLineConnection.ConnectionStatus.ON,
+                ).select_related("production_line")
+            )
+            for active_connection in active_connections:
+                disconnect_production_line_connection(active_connection, disconnected_by=created_by)
 
         moved_rows.append(
             upsert_inventory_transaction(

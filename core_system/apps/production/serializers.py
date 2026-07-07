@@ -22,6 +22,7 @@ from .models import (
     PackingMaterialMaster,
     PackingTypeMaster,
     ProductionLineMaster,
+    ProductionLineConnection,
     ProfileCreationMaster,
     ProfileSizeMaster,
     ProductionMachine,
@@ -464,6 +465,92 @@ class ProductionLineMasterSerializer(ProductionCodeMasterSerializer):
             "capacity_uom",
             "status",
         )
+
+
+class ProductionLineConnectionSerializer(serializers.ModelSerializer):
+    production_line_code = serializers.CharField(source="production_line.code", read_only=True, default=None)
+    production_line_name = serializers.CharField(source="line_name", read_only=True)
+    machine_code = serializers.CharField(source="machine.machine_code", read_only=True, default=None)
+    machine_name = serializers.CharField(read_only=True)
+    source_production_id = serializers.CharField(source="source_production_order.production_id", read_only=True, default=None)
+    production_id = serializers.CharField(source="production_order.production_id", read_only=True, default=None)
+    duration = serializers.SerializerMethodField()
+    duration_seconds = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = ProductionLineConnection
+        fields = (
+            "id",
+            "source_inventory_transaction",
+            "source_production_order",
+            "source_production_id",
+            "production_order",
+            "production_id",
+            "production_line",
+            "production_line_code",
+            "production_line_name",
+            "machine",
+            "machine_code",
+            "machine_name",
+            "item",
+            "item_code",
+            "item_name",
+            "baglot",
+            "scancode",
+            "reference_no",
+            "weight",
+            "status",
+            "connected_at",
+            "disconnected_at",
+            "duration",
+            "duration_seconds",
+        )
+        read_only_fields = fields
+
+    def get_duration(self, obj):
+        total_seconds = obj.duration_seconds
+        if total_seconds is None:
+            return ""
+
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours > 0:
+            return f"{hours}h {minutes}m"
+        if minutes > 0:
+            return f"{minutes}m {seconds}s"
+        return f"{seconds}s"
+
+
+class ProductionLineConnectRequestSerializer(serializers.Serializer):
+    scan_code = serializers.CharField()
+    production_line_id = serializers.PrimaryKeyRelatedField(
+        source="production_line",
+        queryset=ProductionLineMaster.objects.filter(is_active=True),
+        write_only=True,
+    )
+    production_order_id = serializers.PrimaryKeyRelatedField(
+        source="production_order",
+        queryset=ProductionOrder.objects.all(),
+        required=False,
+        allow_null=True,
+        write_only=True,
+    )
+
+    def validate_scan_code(self, value):
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise serializers.ValidationError("Scan code is required.")
+        return normalized.upper()
+
+    def validate_production_order_id(self, value):
+        if value is None:
+            return None
+
+        extra = getattr(value, "extra_form_data", {}) or {}
+        stage = str(extra.get("stage") or "").strip().upper()
+        if stage and stage != "PR":
+            raise serializers.ValidationError("Only PR production orders can be linked during line connect.")
+        return value
 
 
 class BinCreationMasterSerializer(ProductionCodeMasterSerializer):
