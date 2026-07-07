@@ -1,5 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.admin_master.models import Staff, UserCreation, UserType
 from apps.auth.serializers import CurrentUserSerializer
@@ -25,3 +27,24 @@ class CurrentUserSerializerTests(TestCase):
         self.assertEqual(data["department_name"], "Compounding")
         self.assertIsNone(data["role"])
         self.assertIsNone(data["role_name"])
+
+
+class LogoutAPIViewTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="logout-user", password="test-pass-123")
+        refresh = RefreshToken.for_user(self.user)
+        self.client = APIClient()
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh.access_token}")
+        self.refresh_token = str(refresh)
+
+    def test_logout_accepts_valid_refresh_token(self):
+        response = self.client.post("/api/auth/logout/", {"refresh": self.refresh_token}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["detail"], "Logged out successfully.")
+
+    def test_logout_is_idempotent_for_invalid_refresh_token(self):
+        response = self.client.post("/api/auth/logout/", {"refresh": "not-a-valid-token"}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["detail"], "Logged out successfully.")

@@ -1,5 +1,6 @@
-from django.urls import path, include
-from rest_framework.routers import DefaultRouter
+from django.conf import settings
+from django.urls import include, path
+from rest_framework.routers import DefaultRouter, SimpleRouter
 
 from .views import (
     BagCreationMasterViewSet,
@@ -41,9 +42,6 @@ from .views import (
 
 router = DefaultRouter()
 router.register(r"production", ProductionOrderViewSet, basename="production-order")
-router.register(r"material-movements", MaterialMovementViewSet, basename="material-movement")
-router.register(r"production-transactions", ProductionTransactionViewSet, basename="production-transaction")
-router.register(r"production-summaries", ProductionSummaryViewSet, basename="production-summary")
 router.register(r"profile-creations", ProfileCreationMasterViewSet, basename="production-profile-creation")
 router.register(r"profile-sizes", ProfileSizeMasterViewSet, basename="production-profile-size")
 router.register(r"color-creations", ColorCreationMasterViewSet, basename="production-color-creation")
@@ -57,6 +55,11 @@ router.register(r"packing-materials", PackingMaterialMasterViewSet, basename="pr
 router.register(r"recipes", RecipeMasterViewSet, basename="production-recipe")
 router.register(r"bom-creations", BOMCreationMasterViewSet, basename="production-bom-creation")
 router.register(r"bom-item-creations", BOMItemCreationMasterViewSet, basename="production-bom-item-creation")
+
+legacy_router = SimpleRouter()
+legacy_router.register(r"material-movements", MaterialMovementViewSet, basename="material-movement")
+legacy_router.register(r"production-transactions", ProductionTransactionViewSet, basename="production-transaction")
+legacy_router.register(r"production-summaries", ProductionSummaryViewSet, basename="production-summary")
 
 app_name = "production"
 
@@ -98,3 +101,13 @@ urlpatterns = [
     path("dashboard/", ProductionDashboardAPIView.as_view(), name="production-dashboard"),
     path("dashboard", ProductionDashboardAPIView.as_view(), name="production-dashboard-ns"),
 ]
+
+# Standalone legacy production APIs remain available behind a feature flag while
+# older clients are being retired. The per-order compatibility actions exposed
+# by ProductionOrderViewSet are gated inside the view module.
+legacy_urlpatterns = [
+    path("", include(legacy_router.urls)),
+]
+
+if settings.ENABLE_LEGACY_PRODUCTION_API:
+    urlpatterns += legacy_urlpatterns
