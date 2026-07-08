@@ -748,6 +748,10 @@ def move_pr_batch_to_line_work_center(
             else ProductionInventoryTransaction.Status.IN_PROGRESS
         )
         row.save(update_fields=["outward_qty", "balance_qty", "to_stage", "status", "updated_at"])
+        if row.balance_qty <= ZERO:
+            from apps.production.services import auto_disconnect_line_connection_for_inventory_row
+
+            auto_disconnect_line_connection_for_inventory_row(row, user=created_by)
 
         moved_rows.append(
             upsert_inventory_transaction(
