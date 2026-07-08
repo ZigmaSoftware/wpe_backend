@@ -18,13 +18,34 @@ def _normalize_scan_code(value: str | None) -> str:
     return str(value or "").strip()
 
 
-def _serial_no_from_inventory(row: ProductionInventoryTransaction, fallback: str = "") -> str:
+def _parse_positive_int(value) -> int:
+    try:
+        parsed = int(str(value or "").strip())
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def resolve_inventory_baglot(row: ProductionInventoryTransaction | None, fallback: str = "") -> str:
+    if row is None:
+        return str(fallback or "").strip()
+
+    output_capture = getattr(row, "output_capture", None)
+    if output_capture is not None:
+        resolved_baglot = str(getattr(output_capture, "binlot", "") or "").strip()
+        if resolved_baglot:
+            return resolved_baglot
+
     return (
-        str(row.batch_code or "").strip()
-        or str(row.reference_no or "").strip()
+        str(row.reference_no or "").strip()
+        or str(row.batch_code or "").strip()
         or str(row.scan_code or "").strip()
         or str(fallback or "").strip()
     )
+
+
+def _serial_no_from_inventory(row: ProductionInventoryTransaction, fallback: str = "") -> str:
+    return resolve_inventory_baglot(row, fallback=fallback)
 
 
 def _reference_no_from_inventory(row: ProductionInventoryTransaction, fallback: str = "") -> str:
@@ -66,6 +87,8 @@ def _connection_queryset():
         "disconnected_by",
         "source_inventory_transaction__production_order",
         "source_inventory_transaction__item",
+        "source_inventory_transaction__output_capture",
+        "source_inventory_transaction__source_batch",
     )
 
 
@@ -79,7 +102,12 @@ def get_line_connection_inventory_row(
     if not normalized_scan:
         raise ValidationError("scan_code is required.")
 
-    queryset = ProductionInventoryTransaction.objects.select_related("item", "production_order", "source_batch")
+    queryset = ProductionInventoryTransaction.objects.select_related(
+        "item",
+        "production_order",
+        "source_batch",
+        "output_capture",
+    )
     if for_update:
         queryset = queryset.select_for_update()
 
@@ -192,6 +220,30 @@ def get_active_line_connection_for_machine(
         .filter(query)
         .order_by("-connected_at", "-id")
         .first()
+    )
+
+
+def get_active_line_connection_for_order(
+    order: ProductionOrder | None,
+    *,
+    for_update: bool = False,
+) -> ProductionLineConnection | None:
+    if order is None:
+        return None
+
+    extra = getattr(order, "extra_form_data", {}) or {}
+    machine_id = _parse_positive_int(extra.get("line_machine_id"))
+    machine_code = str(getattr(order, "line_number", "") or "").strip()
+    machine_name = str(getattr(order, "line_name", "") or "").strip()
+
+    if not machine_id and not machine_code and not machine_name:
+        return None
+
+    return get_active_line_connection_for_machine(
+        machine_id=machine_id or None,
+        machine_code=machine_code or None,
+        machine_name=machine_name or None,
+        for_update=for_update,
     )
 
 

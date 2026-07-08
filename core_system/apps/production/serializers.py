@@ -1,7 +1,9 @@
 from decimal import Decimal
 
+from django.db.models import Q
 from rest_framework import serializers
 from django.utils import timezone
+from apps.inventory.models import ProductionInventoryTransaction
 from apps.wpe_masters.models import ProductionTypeMaster
 from .models import (
     BOMVariant,
@@ -31,7 +33,12 @@ from .models import (
     get_connected_lineage_batches,
     resolve_workflow_batch_no,
 )
-from .services import get_active_line_connection_for_machine, resolve_production_machine
+from .services import (
+    get_active_line_connection_for_machine,
+    get_active_line_connection_for_order,
+    resolve_inventory_baglot,
+    resolve_production_machine,
+)
 
 
 class MaterialMovementSerializer(serializers.ModelSerializer):
@@ -1020,6 +1027,7 @@ class ProductionBatchSerializer(serializers.ModelSerializer):
 
 
 class ProductionOutputCaptureSerializer(serializers.ModelSerializer):
+    binlot = serializers.SerializerMethodField()
     source_batch_no = serializers.CharField(source="source_batch.batch_no", read_only=True)
     source_batch_display_batch_no = serializers.SerializerMethodField()
     source_batch_display_status = serializers.SerializerMethodField()
@@ -1055,6 +1063,108 @@ class ProductionOutputCaptureSerializer(serializers.ModelSerializer):
             "updated_at",
         )
         read_only_fields = fields
+
+    @staticmethod
+    def _parse_positive_int(value):
+        try:
+            parsed = int(str(value or "").strip())
+        except (TypeError, ValueError):
+            return 0
+        return parsed if parsed > 0 else 0
+
+    def _resolve_pr_capture_baglot(self, obj):
+        source_batch = getattr(obj, "source_batch", None)
+        production_order = getattr(obj, "production_order", None)
+        if source_batch is None or production_order is None:
+            return str(obj.binlot or "").strip()
+
+        extra = production_order.extra_form_data or {}
+
+        connection_id = self._parse_positive_int(extra.get("line_connection_id"))
+        if connection_id:
+            connection = (
+                ProductionLineConnection.objects.select_related("source_inventory_transaction__output_capture")
+                .filter(pk=connection_id)
+                .first()
+            )
+            if connection is not None:
+                resolved_baglot = resolve_inventory_baglot(
+                    getattr(connection, "source_inventory_transaction", None),
+                    fallback=str(connection.serial_no or "").strip(),
+                )
+                if resolved_baglot:
+                    return resolved_baglot
+
+        scan_code = str(extra.get("line_connection_scan_code") or "").strip()
+        if scan_code:
+            connection_row = (
+                ProductionInventoryTransaction.objects.select_related("output_capture")
+                .filter(
+                    stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+                    scan_code__iexact=scan_code,
+                )
+                .order_by("-updated_at", "-created_at", "-id")
+                .first()
+            )
+            resolved_baglot = resolve_inventory_baglot(connection_row)
+            if resolved_baglot:
+                return resolved_baglot
+
+        machine_filters = Q()
+        machine_id = self._parse_positive_int(extra.get("line_machine_id"))
+        if machine_id:
+            machine_filters |= Q(machine_id=machine_id) | Q(production_line__machine_id=machine_id)
+
+        line_number = str(getattr(production_order, "line_number", "") or "").strip()
+        if line_number:
+            machine_filters |= (
+                Q(machine__machine_code__iexact=line_number)
+                | Q(production_line__machine__machine_code__iexact=line_number)
+            )
+
+        line_name = str(getattr(production_order, "line_name", "") or "").strip()
+        if line_name:
+            machine_filters |= (
+                Q(machine__name__iexact=line_name)
+                | Q(machine_name__iexact=line_name)
+                | Q(production_line__machine__name__iexact=line_name)
+            )
+
+        if machine_filters:
+            historical_connection = (
+                ProductionLineConnection.objects.select_related("source_inventory_transaction__output_capture")
+                .filter(machine_filters, connected_at__lte=obj.captured_at)
+                .filter(Q(disconnected_at__isnull=True) | Q(disconnected_at__gte=obj.captured_at))
+                .order_by("-connected_at", "-id")
+                .first()
+            )
+            if historical_connection is not None:
+                resolved_baglot = resolve_inventory_baglot(
+                    getattr(historical_connection, "source_inventory_transaction", None),
+                    fallback=str(historical_connection.serial_no or "").strip(),
+                )
+                if resolved_baglot:
+                    return resolved_baglot
+
+        active_connection = get_active_line_connection_for_order(production_order, for_update=False)
+        if active_connection is not None:
+            resolved_baglot = resolve_inventory_baglot(
+                getattr(active_connection, "source_inventory_transaction", None),
+                fallback=str(active_connection.serial_no or "").strip(),
+            )
+            if resolved_baglot:
+                return resolved_baglot
+
+        saved_baglot = str(extra.get("line_connection_baglot") or "").strip()
+        if saved_baglot:
+            return saved_baglot
+
+        return str(obj.binlot or "").strip()
+
+    def get_binlot(self, obj):
+        if obj.source_batch.stage == ProductionBatch.Stage.PR:
+            return self._resolve_pr_capture_baglot(obj)
+        return str(obj.binlot or "").strip()
 
     def get_source_batch_display_batch_no(self, obj):
         return resolve_workflow_batch_no(obj.source_batch)

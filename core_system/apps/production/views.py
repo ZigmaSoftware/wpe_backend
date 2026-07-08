@@ -19,6 +19,7 @@ from apps.admin_master.models import UserCreation
 from apps.inventory.models import ProductionInventoryTransaction
 from apps.inventory.services import (
     get_available_stage_quantity,
+    get_available_pr_connection_quantity,
     get_available_stage_quantity_for_context,
     move_ad_batch_to_blend_wip,
     move_bl_batch_to_granulation_work_center,
@@ -96,7 +97,12 @@ from .serializers import (
     RegrindMaterialEntrySerializer,
     WorkCentreCreationMasterSerializer,
 )
-from .services import connect_scan_to_line, disconnect_line_connection, lookup_line_connection_scan
+from .services import (
+    connect_scan_to_line,
+    disconnect_line_connection,
+    get_active_line_connection_for_order,
+    lookup_line_connection_scan,
+)
 
 
 def _legacy_production_api_enabled() -> bool:
@@ -377,8 +383,58 @@ def resolve_linked_source_order(order: ProductionOrder | None) -> ProductionOrde
     try:
         source_order_id = int(extra.get("source_order_id") or 0)
     except (TypeError, ValueError):
-        return None
+        source_order_id = 0
     if source_order_id <= 0:
+        try:
+            connection_id = int(extra.get("line_connection_id") or 0)
+        except (TypeError, ValueError):
+            connection_id = 0
+        if connection_id > 0:
+            connection = (
+                ProductionLineConnection.objects.select_related(
+                    "source_production_order",
+                    "source_inventory_transaction__production_order",
+                )
+                .filter(pk=connection_id)
+                .first()
+            )
+            if connection is not None:
+                if connection.source_production_order_id:
+                    return connection.source_production_order
+                source_row_order = getattr(getattr(connection, "source_inventory_transaction", None), "production_order", None)
+                if source_row_order is not None:
+                    return source_row_order
+
+        scan_code = str(extra.get("line_connection_scan_code") or "").strip()
+        baglot = str(extra.get("line_connection_baglot") or "").strip()
+        if scan_code or baglot:
+            identity_filters = Q()
+            if scan_code:
+                identity_filters |= Q(scan_code__iexact=scan_code)
+            if baglot:
+                identity_filters |= (
+                    Q(batch_code__iexact=baglot)
+                    | Q(reference_no__iexact=baglot)
+                    | Q(output_capture__binlot__iexact=baglot)
+                )
+
+            row = (
+                ProductionInventoryTransaction.objects.select_related("production_order", "output_capture")
+                .filter(stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE)
+                .filter(identity_filters)
+                .order_by("-updated_at", "-created_at", "-id")
+                .first()
+            )
+            if row is not None:
+                return getattr(row, "production_order", None)
+
+        active_connection = get_active_line_connection_for_order(order, for_update=False)
+        if active_connection is not None:
+            if active_connection.source_production_order_id:
+                return active_connection.source_production_order
+            active_row_order = getattr(getattr(active_connection, "source_inventory_transaction", None), "production_order", None)
+            if active_row_order is not None:
+                return active_row_order
         return None
     return ProductionOrder.objects.filter(pk=source_order_id).first()
 
@@ -1543,6 +1599,11 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
         ProductionBatch.Stage.GL: ProductionBatch.Stage.BL,
         ProductionBatch.Stage.PR: ProductionBatch.Stage.GL,
     }
+    SOURCE_INVENTORY_STAGE_BY_STAGE = {
+        ProductionBatch.Stage.BL: ProductionInventoryTransaction.Stage.BLEND_WIP,
+        ProductionBatch.Stage.GL: ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
+        ProductionBatch.Stage.PR: ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+    }
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -1594,6 +1655,50 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
             .first()
         )
 
+    def _get_existing_open_stage_batch(self, order: ProductionOrder, stage: str):
+        return (
+            ProductionBatch.objects.select_related("production_order", "machine", "bom_variant", "operator", "output_capture")
+            .prefetch_related(
+                "weight_entries__item",
+                "weight_entries__bom_component__item",
+                "weight_entries__bom_component__product_subtype__category",
+                "regrind_entries__item",
+            )
+            .filter(
+                production_order=order,
+                stage=stage,
+                status__in=[
+                    ProductionBatch.BatchStatus.PENDING,
+                    ProductionBatch.BatchStatus.IN_PROGRESS,
+                ],
+            )
+            .order_by("-created_at", "-id")
+            .first()
+        )
+
+    def _get_available_source_stock_for_stage(self, order: ProductionOrder, stage: str) -> Decimal | None:
+        source_inventory_stage = self.SOURCE_INVENTORY_STAGE_BY_STAGE.get(stage)
+        if not source_inventory_stage:
+            return None
+
+        linked_source_order = resolve_linked_source_order(order)
+        linked_source_batch = self._resolve_linked_source_batch(order, stage)
+
+        if stage == ProductionBatch.Stage.PR:
+            probe_batch = ProductionBatch(production_order=order, stage=ProductionBatch.Stage.PR)
+            return get_available_pr_connection_quantity(
+                probe_batch,
+                source_order=linked_source_order,
+            )
+
+        return get_available_stage_quantity_for_context(
+            production_order=linked_source_order or order,
+            fallback_production_order=order,
+            stage=source_inventory_stage,
+            source_batch=linked_source_batch,
+            lineage_batch_code=str(getattr(linked_source_batch, "batch_no", "") or "").strip() or None,
+        )
+
     def post(self, request, *args, **kwargs):
         stage = request.data.get("stage")
         valid_stages = [s[0] for s in ProductionBatch.Stage.choices]
@@ -1609,6 +1714,27 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
                 ProductionOrder.objects.select_for_update(),
                 pk=self.kwargs["order_pk"],
             )
+
+            existing_open_batch = self._get_existing_open_stage_batch(order, stage)
+            if existing_open_batch is not None:
+                status_label = existing_open_batch.get_status_display().replace("_", " ")
+                return success_response(
+                    message=(
+                        f"{stage} batch {existing_open_batch.batch_no} is still {status_label}. "
+                        "Complete the current batch before creating another batch."
+                    ),
+                    data=ProductionBatchSerializer(existing_open_batch, context=self.get_serializer_context()).data,
+                    status_code=400,
+                )
+
+            available_source_stock = self._get_available_source_stock_for_stage(order, stage)
+            if available_source_stock is not None and available_source_stock <= Decimal("0.000"):
+                stage_label = self.SOURCE_INVENTORY_STAGE_BY_STAGE[stage].replace("_", " ").title()
+                return success_response(
+                    message=f"No available stock found in {stage_label} for the selected PRD ID and batch.",
+                    data={"available_qty": f"{available_source_stock:.3f}"},
+                    status_code=400,
+                )
 
             batch = ProductionBatch.objects.create(
                 production_order=order,
@@ -2166,6 +2292,29 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
             return "invalid"
         return parsed if parsed > 0 else "invalid"
 
+    @staticmethod
+    def _complete_pr_batch_after_capture(
+        batch: ProductionBatch,
+        capture: ProductionOutputCapture,
+        *,
+        completed_at,
+        created_by,
+        source_order: ProductionOrder | None,
+    ):
+        if batch.stage != ProductionBatch.Stage.PR or batch.status == ProductionBatch.BatchStatus.COMPLETED:
+            return batch
+
+        batch.status = ProductionBatch.BatchStatus.COMPLETED
+        batch.completed_at = completed_at
+        batch.save(update_fields=["status", "completed_at", "updated_at"])
+        move_pr_batch_to_line_work_center(
+            batch,
+            output_capture=capture,
+            created_by=created_by,
+            source_order=source_order,
+        )
+        return batch
+
     def get(self, request, order_pk, *args, **kwargs):
         get_object_or_404(ProductionOrder, pk=order_pk)
         source_batch_id = self._parse_source_batch_id(request.query_params.get("source_batch"))
@@ -2222,13 +2371,19 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
             else ""
         )
         if source_inventory_stage:
-            available_qty = get_available_stage_quantity_for_context(
-                production_order=linked_source_order or order,
-                fallback_production_order=order,
-                stage=source_inventory_stage,
-                source_batch=getattr(batch, "parent_batch", None),
-                lineage_batch_code=str(batch.batch_no or "").strip() or None,
-            )
+            if batch.stage == ProductionBatch.Stage.PR:
+                available_qty = get_available_pr_connection_quantity(
+                    batch,
+                    source_order=linked_source_order,
+                )
+            else:
+                available_qty = get_available_stage_quantity_for_context(
+                    production_order=linked_source_order or order,
+                    fallback_production_order=order,
+                    stage=source_inventory_stage,
+                    source_batch=getattr(batch, "parent_batch", None),
+                    lineage_batch_code=str(batch.batch_no or "").strip() or None,
+                )
             stage_label = source_inventory_stage.replace("_", " ").title()
             if available_qty <= Decimal("0.000"):
                 return success_response(
@@ -2322,9 +2477,23 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
                         )
                 capture = self._ensure_capture_scancode_format(capture)
 
+            self._complete_pr_batch_after_capture(
+                batch,
+                capture,
+                completed_at=captured_at,
+                created_by=request.user,
+                source_order=linked_source_order,
+            )
+
         capture = self._get_capture_queryset(order_pk, source_batch_id=source_batch_id).get(pk=capture.pk)
         return success_response(
-            message="Output capture saved." if created else "Output capture already exists for this batch.",
+            message=(
+                "PR captured output saved and moved to Line Work Center."
+                if batch.stage == ProductionBatch.Stage.PR
+                else "Output capture saved."
+                if created
+                else "Output capture already exists for this batch."
+            ),
             data=ProductionOutputCaptureSerializer(capture).data,
             status_code=201 if created else 200,
         )
