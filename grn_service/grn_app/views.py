@@ -21,7 +21,7 @@ from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.store.models import StoreTransaction, Warehouse
+from apps.store.models import StoreStock, StoreTransaction, Warehouse
 from apps.store.services import add_stock_from_grn, get_store_warehouse, get_warehouse_by_name, resolve_item_for_grn_line, transfer_stock
 from .models import GRN, GRNAuditLog, QCR
 from .serializers import GRNAuditLogSerializer, GRNReadSerializer, GRNSerializer, QCRSerializer
