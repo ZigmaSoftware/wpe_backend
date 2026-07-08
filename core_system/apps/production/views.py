@@ -10,6 +10,7 @@ from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -44,6 +45,7 @@ from .models import (
     PackingMaterialMaster,
     PackingTypeMaster,
     ProductionBatch,
+    ProductionLineConnection,
     ProductionLineMaster,
     ProductionMachine,
     ProductionOrder,
@@ -71,10 +73,13 @@ from .serializers import (
     BOMVariantListSerializer,
     BatchWeightEntrySerializer,
     ColorCreationMasterSerializer,
+    GlScancodeDetailsSerializer,
     MaterialMovementSerializer,
     PackingMaterialMasterSerializer,
     PackingTypeMasterSerializer,
     ProductionBatchSerializer,
+    ProductionLineConnectionConnectSerializer,
+    ProductionLineConnectionSerializer,
     ProductionLineMasterSerializer,
     ProductionMachineSerializer,
     ProductionOrderCreateUpdateSerializer,
@@ -91,6 +96,7 @@ from .serializers import (
     RegrindMaterialEntrySerializer,
     WorkCentreCreationMasterSerializer,
 )
+from .services import connect_scan_to_line, disconnect_line_connection, lookup_line_connection_scan
 
 
 def _legacy_production_api_enabled() -> bool:
@@ -102,6 +108,21 @@ def _legacy_production_api_disabled_response() -> Response:
         {"detail": "Legacy production API is disabled."},
         status=status.HTTP_404_NOT_FOUND,
     )
+
+
+def _validation_message(exc: ValidationError, default: str) -> str:
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, list) and detail:
+        return str(detail[0])
+    if isinstance(detail, dict):
+        for value in detail.values():
+            if isinstance(value, list) and value:
+                return str(value[0])
+            if value:
+                return str(value)
+    if detail:
+        return str(detail)
+    return default
 
 
 class ProductionOrderViewSet(viewsets.ModelViewSet):
@@ -951,6 +972,118 @@ class ProductionMachineDetailAPIView(generics.GenericAPIView):
         machine.is_active = False
         machine.save()
         return success_response(message="Machine deactivated.", data={})
+
+
+class ProductionLineConnectionListAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProductionLineConnectionSerializer
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        queryset = ProductionLineConnection.objects.select_related(
+            "production_line",
+            "machine",
+            "production_order",
+            "source_production_order",
+            "connected_by",
+            "disconnected_by",
+        ).all()
+        status_filter = str(self.request.query_params.get("status", "")).strip().upper()
+        if status_filter in {ProductionLineConnection.Status.ON, ProductionLineConnection.Status.OFF}:
+            queryset = queryset.filter(status=status_filter)
+        production_line_id = self.request.query_params.get("production_line") or self.request.query_params.get("production_line_id")
+        if production_line_id:
+            queryset = queryset.filter(production_line_id=production_line_id)
+        return queryset.order_by("-connected_at", "-id")
+
+    def get(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        page = self.paginate_queryset(queryset)
+        rows = page if page is not None else queryset
+        serializer = self.get_serializer(rows, many=True)
+        if page is not None:
+            return success_response(
+                message="Line connections fetched.",
+                data=self.paginator.get_paginated_data(serializer.data),
+            )
+        return success_response(
+            message="Line connections fetched.",
+            data={
+                "count": queryset.count(),
+                "next": None,
+                "previous": None,
+                "results": serializer.data,
+            },
+        )
+
+
+class ProductionLineConnectionScanAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = GlScancodeDetailsSerializer
+
+    def get(self, request, *args, **kwargs):
+        scan_code = str(request.query_params.get("scan_code") or "").strip()
+        if not scan_code:
+            return success_response(message="scan_code is required.", data={}, status_code=400)
+        try:
+            details = lookup_line_connection_scan(scan_code)
+        except ValidationError as exc:
+            return success_response(
+                message=_validation_message(exc, "The scanned GL bag is not available in Connection to Line stock."),
+                data={},
+                status_code=400,
+            )
+        return success_response(message="GL scancode fetched.", data=self.get_serializer(details).data)
+
+
+class ProductionLineConnectionConnectAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProductionLineConnectionConnectSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return success_response(
+                message=_validation_message(ValidationError(serializer.errors), "Invalid line connection payload."),
+                data=serializer.errors,
+                status_code=400,
+            )
+        try:
+            connection = connect_scan_to_line(
+                scan_code=serializer.validated_data["scan_code"],
+                production_line_id=serializer.validated_data["production_line_id"],
+                production_order_id=serializer.validated_data.get("production_order_id"),
+                user=request.user,
+            )
+        except ValidationError as exc:
+            return success_response(
+                message=_validation_message(exc, "Failed to connect the scanned GL bag."),
+                data={},
+                status_code=400,
+            )
+        return success_response(
+            message="GL bag connected to production line.",
+            data=ProductionLineConnectionSerializer(connection).data,
+        )
+
+
+class ProductionLineConnectionDisconnectAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, *args, **kwargs):
+        connection = get_object_or_404(ProductionLineConnection, pk=pk)
+        try:
+            disconnected = disconnect_line_connection(connection, user=request.user)
+        except ValidationError as exc:
+            return success_response(
+                message=_validation_message(exc, "Failed to disconnect the line connection."),
+                data={},
+                status_code=400,
+            )
+        return success_response(
+            message="Line connection disconnected.",
+            data=ProductionLineConnectionSerializer(disconnected).data,
+        )
 
 
 class BOMVariantListAPIView(generics.ListAPIView):

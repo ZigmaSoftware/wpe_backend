@@ -18,6 +18,10 @@ from .views import (
     ProductionMachineListAPIView,
     ProductionMachineDetailAPIView,
     ProductionMachineMasterViewSet,
+    ProductionLineConnectionConnectAPIView,
+    ProductionLineConnectionDisconnectAPIView,
+    ProductionLineConnectionListAPIView,
+    ProductionLineConnectionScanAPIView,
     ProfileCreationMasterViewSet,
     ProfileSizeMasterViewSet,
     RecipeMasterViewSet,
@@ -65,6 +69,24 @@ app_name = "production"
 
 urlpatterns = [
     path("", include(router.urls)),
+    path("line-connections/", ProductionLineConnectionListAPIView.as_view(), name="line-connections"),
+    path("line-connections", ProductionLineConnectionListAPIView.as_view(), name="line-connections-ns"),
+    path("line-connections/scan/", ProductionLineConnectionScanAPIView.as_view(), name="line-connections-scan"),
+    path("line-connections/scan", ProductionLineConnectionScanAPIView.as_view(), name="line-connections-scan-ns"),
+    path("line-connections/lookup/", ProductionLineConnectionScanAPIView.as_view(), name="line-connections-lookup"),
+    path("line-connections/lookup", ProductionLineConnectionScanAPIView.as_view(), name="line-connections-lookup-ns"),
+    path("line-connections/connect/", ProductionLineConnectionConnectAPIView.as_view(), name="line-connections-connect"),
+    path("line-connections/connect", ProductionLineConnectionConnectAPIView.as_view(), name="line-connections-connect-ns"),
+    path(
+        "line-connections/<int:pk>/disconnect/",
+        ProductionLineConnectionDisconnectAPIView.as_view(),
+        name="line-connections-disconnect",
+    ),
+    path(
+        "line-connections/<int:pk>/disconnect",
+        ProductionLineConnectionDisconnectAPIView.as_view(),
+        name="line-connections-disconnect-ns",
+    ),
     # Machines
     path("machines/", ProductionMachineListAPIView.as_view(), name="machines"),
     path("machines", ProductionMachineListAPIView.as_view(), name="machines-ns"),
