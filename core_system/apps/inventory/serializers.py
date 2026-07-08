@@ -454,3 +454,17 @@ class ProductionInventoryTransactionSerializer(serializers.ModelSerializer):
         extra = getattr(production_order, "extra_form_data", {}) or {}
         finished_goods = extra.get("finished_goods")
         return finished_goods if isinstance(finished_goods, dict) else None
+
+
+class ProductionInventorySummarySerializer(serializers.Serializer):
+    id = serializers.CharField()
+    production_id = serializers.CharField()
+    production_order_id = serializers.IntegerField(allow_null=True)
+    batch_count = serializers.IntegerField()
+    recipe = serializers.CharField(allow_blank=True)
+    production_type = serializers.CharField(allow_blank=True)
+    total_weight = serializers.CharField()
+    planned_weight = serializers.CharField()
+    uom = serializers.CharField(allow_blank=True)
+    created_by = serializers.CharField()
+    created_at = serializers.CharField(allow_blank=True, allow_null=True)

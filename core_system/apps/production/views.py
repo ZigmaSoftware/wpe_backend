@@ -1,25 +1,128 @@
 import re
 from decimal import Decimal
-from rest_framework import viewsets, status
-from rest_framework.decorators import action
-from rest_framework.response import Response
-from rest_framework.filters import SearchFilter, OrderingFilter
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from django.conf import settings
+from django.db import transaction
+from django.db.models import Count, Prefetch, ProtectedError, Q
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework import generics, status, viewsets
+from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
+from rest_framework.filters import OrderingFilter, SearchFilter
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+from apps.admin_master.models import UserCreation
+from apps.inventory.models import ProductionInventoryTransaction
+from apps.inventory.services import (
+    get_available_stage_quantity,
+    get_available_stage_quantity_for_context,
+    move_ad_batch_to_blend_wip,
+    move_bl_batch_to_granulation_work_center,
+    move_gl_batch_to_connection_line,
+    move_pr_batch_to_line_work_center,
+    record_bl_final_capture,
+    record_gl_final_capture,
+    sync_ad_save_weight,
+)
+from apps.items.models import Item
+from apps.wpe_masters.models import ProductTypeSubtype
+from common.drf import QueryParamFilterMixin, StandardResultsSetPagination, success_response
 
 from .models import (
-    ProductionOrder,
+    BagCreationMaster,
+    BinCreationMaster,
+    BOMCreationMaster,
+    BOMItemCreationMaster,
+    BOMVariant,
+    BOMVariantComponent,
+    BatchWeightEntry,
+    ColorCreationMaster,
     MaterialMovement,
-    ProductionTransaction,
+    PackingMaterialMaster,
+    PackingTypeMaster,
+    ProductionBatch,
+    ProductionLineConnection,
+    ProductionLineMaster,
+    ProductionMachine,
+    ProductionOrder,
+    ProductionOutputCapture,
     ProductionSummary,
+    ProductionTransaction,
+    ProfileCreationMaster,
+    ProfileSizeMaster,
+    RegrindMaterialEntry,
+    WorkCentreCreationMaster,
+    WEIGHT_MAX_GRAMS,
+    WEIGHT_MIN_GRAMS,
+    build_alpha_running_code,
+    build_prefixed_running_number,
+    get_connected_lineage_batches,
+    resolve_workflow_batch_no,
 )
 from .serializers import (
-    ProductionOrderListSerializer,
-    ProductionOrderDetailSerializer,
-    ProductionOrderCreateUpdateSerializer,
+    BagCreationMasterSerializer,
+    BinCreationMasterSerializer,
+    BOMCreationMasterSerializer,
+    BOMItemCreationMasterSerializer,
+    BOMVariantComponentSerializer,
+    BOMVariantDetailSerializer,
+    BOMVariantListSerializer,
+    BatchWeightEntrySerializer,
+    ColorCreationMasterSerializer,
+    GlScancodeDetailsSerializer,
     MaterialMovementSerializer,
-    ProductionTransactionSerializer,
+    PackingMaterialMasterSerializer,
+    PackingTypeMasterSerializer,
+    ProductionBatchSerializer,
+    ProductionLineConnectionConnectSerializer,
+    ProductionLineConnectionSerializer,
+    ProductionLineMasterSerializer,
+    ProductionMachineSerializer,
+    ProductionOrderCreateUpdateSerializer,
+    ProductionOrderDetailSerializer,
+    ProductionOrderListSerializer,
+    ProductionOutputCaptureSerializer,
+    ProductionStageRecordSerializer,
     ProductionSummarySerializer,
+    ProductionTransactionSerializer,
+    ProfileCreationMasterSerializer,
+    ProfileSizeMasterSerializer,
+    RecipeMasterDetailSerializer,
+    RecipeMasterSerializer,
+    RegrindMaterialEntrySerializer,
+    WorkCentreCreationMasterSerializer,
 )
+from .services import connect_scan_to_line, disconnect_line_connection, lookup_line_connection_scan
+
+
+def _legacy_production_api_enabled() -> bool:
+    return getattr(settings, "ENABLE_LEGACY_PRODUCTION_API", True)
+
+
+def _legacy_production_api_disabled_response() -> Response:
+    return Response(
+        {"detail": "Legacy production API is disabled."},
+        status=status.HTTP_404_NOT_FOUND,
+    )
+
+
+def _validation_message(exc: ValidationError, default: str) -> str:
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, list) and detail:
+        return str(detail[0])
+    if isinstance(detail, dict):
+        for value in detail.values():
+            if isinstance(value, list) and value:
+                return str(value[0])
+            if value:
+                return str(value)
+    if detail:
+        return str(detail)
+    return default
 
 
 class ProductionOrderViewSet(viewsets.ModelViewSet):
@@ -128,6 +231,8 @@ class ProductionOrderViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def material_movements(self, request, pk=None):
         """Get all material movements for a production order"""
+        if not _legacy_production_api_enabled():
+            return _legacy_production_api_disabled_response()
         production_order = self.get_object()
         movements = production_order.material_movements.all()
         serializer = MaterialMovementSerializer(movements, many=True)
@@ -136,6 +241,8 @@ class ProductionOrderViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def transactions(self, request, pk=None):
         """Get all transactions for a production order"""
+        if not _legacy_production_api_enabled():
+            return _legacy_production_api_disabled_response()
         production_order = self.get_object()
         transactions = production_order.transactions.all()
         serializer = ProductionTransactionSerializer(transactions, many=True)
@@ -144,6 +251,8 @@ class ProductionOrderViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def summary(self, request, pk=None):
         """Get summary for a production order"""
+        if not _legacy_production_api_enabled():
+            return _legacy_production_api_disabled_response()
         production_order = self.get_object()
         try:
             summary = production_order.summary
@@ -158,6 +267,8 @@ class ProductionOrderViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def close(self, request, pk=None):
         """Close a production order (change status to CLOSED)"""
+        if not _legacy_production_api_enabled():
+            return _legacy_production_api_disabled_response()
         production_order = self.get_object()
         production_order.status = 'CLOSED'
         production_order.save()
@@ -167,6 +278,8 @@ class ProductionOrderViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def cost_breakdown(self, request, pk=None):
         """Get cost breakdown for a production order"""
+        if not _legacy_production_api_enabled():
+            return _legacy_production_api_disabled_response()
         production_order = self.get_object()
 
         return Response({
@@ -244,84 +357,7 @@ class ProductionSummaryViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(summary)
         return Response(serializer.data)
 
-
 # ===== RECIPE / BOM AND PRODUCTION MASTER VIEWS =====
-
-import re
-from decimal import Decimal
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from django.conf import settings
-from django.db import transaction
-from django.db.models import Count, Prefetch, ProtectedError, Q
-from django.shortcuts import get_object_or_404
-from django.utils import timezone
-from rest_framework import generics
-from rest_framework import status as drf_status
-from rest_framework.permissions import IsAuthenticated
-
-from common.drf import QueryParamFilterMixin, StandardResultsSetPagination, success_response
-
-from .models import (
-    BagCreationMaster,
-    BinCreationMaster,
-    BOMCreationMaster,
-    BOMItemCreationMaster,
-    BOMVariant,
-    BOMVariantComponent,
-    BatchWeightEntry,
-    ColorCreationMaster,
-    PackingMaterialMaster,
-    PackingTypeMaster,
-    ProductionBatch,
-    ProductionOutputCapture,
-    ProductionLineMaster,
-    ProductionMachine,
-    ProfileCreationMaster,
-    ProfileSizeMaster,
-    RegrindMaterialEntry,
-    WorkCentreCreationMaster,
-    WEIGHT_MIN_GRAMS, WEIGHT_MAX_GRAMS,
-    build_alpha_running_code,
-    build_prefixed_running_number,
-    get_connected_lineage_batches,
-    resolve_workflow_batch_no,
-)
-from .serializers import (
-    BagCreationMasterSerializer,
-    BinCreationMasterSerializer,
-    BOMCreationMasterSerializer,
-    BOMItemCreationMasterSerializer,
-    ProductionMachineSerializer,
-    BOMVariantComponentSerializer,
-    BOMVariantListSerializer,
-    BOMVariantDetailSerializer,
-    RecipeMasterSerializer,
-    RecipeMasterDetailSerializer,
-    ProductionBatchSerializer,
-    ProductionOutputCaptureSerializer,
-    BatchWeightEntrySerializer,
-    ColorCreationMasterSerializer,
-    PackingMaterialMasterSerializer,
-    PackingTypeMasterSerializer,
-    ProductionLineMasterSerializer,
-    ProfileCreationMasterSerializer,
-    ProfileSizeMasterSerializer,
-    ProductionStageRecordSerializer,
-    RegrindMaterialEntrySerializer,
-    WorkCentreCreationMasterSerializer,
-)
-from apps.inventory.models import ProductionInventoryTransaction
-from apps.inventory.services import (
-    get_available_stage_quantity,
-    get_available_stage_quantity_for_context,
-    move_ad_batch_to_blend_wip,
-    move_bl_batch_to_granulation_work_center,
-    move_gl_batch_to_connection_line,
-    move_pr_batch_to_line_work_center,
-    record_bl_final_capture,
-    record_gl_final_capture,
-    sync_ad_save_weight,
-)
 
 
 def _next_code_response(model_cls, *, field_name: str, prefix: str, width: int = 3, alpha: bool = False):
@@ -387,7 +423,7 @@ class ProductionBaseMasterViewSet(QueryParamFilterMixin, viewsets.ModelViewSet):
         except Exception:
             return Response(
                 {"detail": "Record not found. It may have been deleted — please refresh the list."},
-                status=drf_status.HTTP_404_NOT_FOUND,
+                status=status.HTTP_404_NOT_FOUND,
             )
         instance.is_active = not instance.is_active
         instance.save(update_fields=["is_active", "updated_at"])
@@ -397,11 +433,11 @@ class ProductionBaseMasterViewSet(QueryParamFilterMixin, viewsets.ModelViewSet):
         instance = self.get_object()
         try:
             self.perform_destroy(instance)
-            return Response(status=drf_status.HTTP_204_NO_CONTENT)
+            return Response(status=status.HTTP_204_NO_CONTENT)
         except ProtectedError:
             return Response(
                 {"detail": "Cannot delete: this record is referenced by other data."},
-                status=drf_status.HTTP_400_BAD_REQUEST,
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
 
@@ -415,7 +451,7 @@ class ProductionCodeMasterViewSet(ProductionBaseMasterViewSet):
     @action(detail=False, methods=["get"], url_path="next-code")
     def next_code(self, request):
         if not self.next_code_prefix:
-            return Response({"detail": "Next code preview is not configured for this resource."}, status=drf_status.HTTP_404_NOT_FOUND)
+            return Response({"detail": "Next code preview is not configured for this resource."}, status=status.HTTP_404_NOT_FOUND)
         return _next_code_response(
             self.get_queryset().model,
             field_name="code",
@@ -579,9 +615,6 @@ def bom_variant_queryset():
 
 
 def resolve_bom_component_source(component_data):
-    from apps.items.models import Item
-    from apps.wpe_masters.models import ProductTypeSubtype
-
     item_id = component_data.get("item")
     product_subtype_id = component_data.get("product_subtype")
 
@@ -789,8 +822,6 @@ class RecipeMasterViewSet(ProductionBaseMasterViewSet):
 
     @action(detail=False, methods=["get"], url_path="approver-options")
     def approver_options(self, request):
-        from apps.admin_master.models import UserCreation
-
         queryset = (
             UserCreation.objects.select_related("user", "staff")
             .filter(is_active=True, user__isnull=False)
@@ -821,17 +852,17 @@ class RecipeMasterViewSet(ProductionBaseMasterViewSet):
 
         components = request.data.get("components", [])
         if not isinstance(components, list):
-            return Response({"detail": "components must be a list."}, status=drf_status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "components must be a list."}, status=status.HTTP_400_BAD_REQUEST)
 
         component_specs, error = validate_bom_component_payloads(components)
         if error:
-            return Response({"detail": error}, status=drf_status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
             error = sync_bom_variant_components(recipe, component_specs)
             if error:
                 transaction.set_rollback(True)
-                return Response({"detail": error}, status=drf_status.HTTP_400_BAD_REQUEST)
+                return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
 
         refreshed = bom_variant_queryset().annotate(component_count=Count("components", distinct=True)).get(pk=recipe.pk)
         return Response(RecipeMasterDetailSerializer(refreshed).data)
@@ -844,7 +875,7 @@ class RecipeMasterViewSet(ProductionBaseMasterViewSet):
         recipe.is_active = False
         recipe.status = BOMVariant.RecipeStatus.INACTIVE
         recipe.save(update_fields=["is_active", "status", "updated_at"])
-        return Response(status=drf_status.HTTP_204_NO_CONTENT)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class BOMCreationMasterViewSet(ProductionCodeMasterViewSet):
@@ -943,6 +974,118 @@ class ProductionMachineDetailAPIView(generics.GenericAPIView):
         return success_response(message="Machine deactivated.", data={})
 
 
+class ProductionLineConnectionListAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProductionLineConnectionSerializer
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        queryset = ProductionLineConnection.objects.select_related(
+            "production_line",
+            "machine",
+            "production_order",
+            "source_production_order",
+            "connected_by",
+            "disconnected_by",
+        ).all()
+        status_filter = str(self.request.query_params.get("status", "")).strip().upper()
+        if status_filter in {ProductionLineConnection.Status.ON, ProductionLineConnection.Status.OFF}:
+            queryset = queryset.filter(status=status_filter)
+        production_line_id = self.request.query_params.get("production_line") or self.request.query_params.get("production_line_id")
+        if production_line_id:
+            queryset = queryset.filter(production_line_id=production_line_id)
+        return queryset.order_by("-connected_at", "-id")
+
+    def get(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        page = self.paginate_queryset(queryset)
+        rows = page if page is not None else queryset
+        serializer = self.get_serializer(rows, many=True)
+        if page is not None:
+            return success_response(
+                message="Line connections fetched.",
+                data=self.paginator.get_paginated_data(serializer.data),
+            )
+        return success_response(
+            message="Line connections fetched.",
+            data={
+                "count": queryset.count(),
+                "next": None,
+                "previous": None,
+                "results": serializer.data,
+            },
+        )
+
+
+class ProductionLineConnectionScanAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = GlScancodeDetailsSerializer
+
+    def get(self, request, *args, **kwargs):
+        scan_code = str(request.query_params.get("scan_code") or "").strip()
+        if not scan_code:
+            return success_response(message="scan_code is required.", data={}, status_code=400)
+        try:
+            details = lookup_line_connection_scan(scan_code)
+        except ValidationError as exc:
+            return success_response(
+                message=_validation_message(exc, "The scanned GL bag is not available in Connection to Line stock."),
+                data={},
+                status_code=400,
+            )
+        return success_response(message="GL scancode fetched.", data=self.get_serializer(details).data)
+
+
+class ProductionLineConnectionConnectAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProductionLineConnectionConnectSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return success_response(
+                message=_validation_message(ValidationError(serializer.errors), "Invalid line connection payload."),
+                data=serializer.errors,
+                status_code=400,
+            )
+        try:
+            connection = connect_scan_to_line(
+                scan_code=serializer.validated_data["scan_code"],
+                production_line_id=serializer.validated_data["production_line_id"],
+                production_order_id=serializer.validated_data.get("production_order_id"),
+                user=request.user,
+            )
+        except ValidationError as exc:
+            return success_response(
+                message=_validation_message(exc, "Failed to connect the scanned GL bag."),
+                data={},
+                status_code=400,
+            )
+        return success_response(
+            message="GL bag connected to production line.",
+            data=ProductionLineConnectionSerializer(connection).data,
+        )
+
+
+class ProductionLineConnectionDisconnectAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, *args, **kwargs):
+        connection = get_object_or_404(ProductionLineConnection, pk=pk)
+        try:
+            disconnected = disconnect_line_connection(connection, user=request.user)
+        except ValidationError as exc:
+            return success_response(
+                message=_validation_message(exc, "Failed to disconnect the line connection."),
+                data={},
+                status_code=400,
+            )
+        return success_response(
+            message="Line connection disconnected.",
+            data=ProductionLineConnectionSerializer(disconnected).data,
+        )
+
+
 class BOMVariantListAPIView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = BOMVariantListSerializer
@@ -972,7 +1115,6 @@ class BOMVariantListAPIView(generics.ListAPIView):
         if BOMVariant.objects.filter(variant_code=data["variant_code"]).exists():
             return success_response(message="Variant code already exists.", data={}, status_code=400)
 
-        from apps.items.models import Item
         product_item = None
         if data.get("product_item"):
             product_item = get_object_or_404(Item, pk=data["product_item"])
@@ -1046,7 +1188,6 @@ class BOMVariantDetailAPIView(generics.GenericAPIView):
         if "approved_by" in data:
             bom.approved_by_id = data.get("approved_by") or None
         if data.get("product_item"):
-            from apps.items.models import Item
             bom.product_item = get_object_or_404(Item, pk=data["product_item"])
         bom.save()
         refreshed = bom_variant_queryset().annotate(component_count=Count("components", distinct=True)).get(pk=bom.pk)
@@ -2245,7 +2386,6 @@ class RegrindEntryListCreateAPIView(generics.GenericAPIView):
         except Exception:
             return success_response(message="quantity_grams must be a valid number.", data={}, status_code=400)
 
-        from apps.items.models import Item
         item = get_object_or_404(Item, pk=item_id)
 
         errors = []

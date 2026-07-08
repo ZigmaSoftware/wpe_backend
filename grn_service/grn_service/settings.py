@@ -167,3 +167,7 @@ SIMPLE_JWT = {
     "UPDATE_LAST_LOGIN": True,
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
+
+# Default to True so older GRN clients keep working until the legacy routes are
+# intentionally disabled in deployment config.
+ENABLE_LEGACY_GRN_API = env_bool("ENABLE_LEGACY_GRN_API", True)

@@ -1,5 +1,6 @@
-from django.urls import path, include
-from rest_framework.routers import DefaultRouter
+from django.conf import settings
+from django.urls import include, path
+from rest_framework.routers import DefaultRouter, SimpleRouter
 
 from .views import (
     BagCreationMasterViewSet,
@@ -17,6 +18,10 @@ from .views import (
     ProductionMachineListAPIView,
     ProductionMachineDetailAPIView,
     ProductionMachineMasterViewSet,
+    ProductionLineConnectionConnectAPIView,
+    ProductionLineConnectionDisconnectAPIView,
+    ProductionLineConnectionListAPIView,
+    ProductionLineConnectionScanAPIView,
     ProfileCreationMasterViewSet,
     ProfileSizeMasterViewSet,
     RecipeMasterViewSet,
@@ -41,9 +46,6 @@ from .views import (
 
 router = DefaultRouter()
 router.register(r"production", ProductionOrderViewSet, basename="production-order")
-router.register(r"material-movements", MaterialMovementViewSet, basename="material-movement")
-router.register(r"production-transactions", ProductionTransactionViewSet, basename="production-transaction")
-router.register(r"production-summaries", ProductionSummaryViewSet, basename="production-summary")
 router.register(r"profile-creations", ProfileCreationMasterViewSet, basename="production-profile-creation")
 router.register(r"profile-sizes", ProfileSizeMasterViewSet, basename="production-profile-size")
 router.register(r"color-creations", ColorCreationMasterViewSet, basename="production-color-creation")
@@ -58,10 +60,33 @@ router.register(r"recipes", RecipeMasterViewSet, basename="production-recipe")
 router.register(r"bom-creations", BOMCreationMasterViewSet, basename="production-bom-creation")
 router.register(r"bom-item-creations", BOMItemCreationMasterViewSet, basename="production-bom-item-creation")
 
+legacy_router = SimpleRouter()
+legacy_router.register(r"material-movements", MaterialMovementViewSet, basename="material-movement")
+legacy_router.register(r"production-transactions", ProductionTransactionViewSet, basename="production-transaction")
+legacy_router.register(r"production-summaries", ProductionSummaryViewSet, basename="production-summary")
+
 app_name = "production"
 
 urlpatterns = [
     path("", include(router.urls)),
+    path("line-connections/", ProductionLineConnectionListAPIView.as_view(), name="line-connections"),
+    path("line-connections", ProductionLineConnectionListAPIView.as_view(), name="line-connections-ns"),
+    path("line-connections/scan/", ProductionLineConnectionScanAPIView.as_view(), name="line-connections-scan"),
+    path("line-connections/scan", ProductionLineConnectionScanAPIView.as_view(), name="line-connections-scan-ns"),
+    path("line-connections/lookup/", ProductionLineConnectionScanAPIView.as_view(), name="line-connections-lookup"),
+    path("line-connections/lookup", ProductionLineConnectionScanAPIView.as_view(), name="line-connections-lookup-ns"),
+    path("line-connections/connect/", ProductionLineConnectionConnectAPIView.as_view(), name="line-connections-connect"),
+    path("line-connections/connect", ProductionLineConnectionConnectAPIView.as_view(), name="line-connections-connect-ns"),
+    path(
+        "line-connections/<int:pk>/disconnect/",
+        ProductionLineConnectionDisconnectAPIView.as_view(),
+        name="line-connections-disconnect",
+    ),
+    path(
+        "line-connections/<int:pk>/disconnect",
+        ProductionLineConnectionDisconnectAPIView.as_view(),
+        name="line-connections-disconnect-ns",
+    ),
     # Machines
     path("machines/", ProductionMachineListAPIView.as_view(), name="machines"),
     path("machines", ProductionMachineListAPIView.as_view(), name="machines-ns"),
@@ -98,3 +123,13 @@ urlpatterns = [
     path("dashboard/", ProductionDashboardAPIView.as_view(), name="production-dashboard"),
     path("dashboard", ProductionDashboardAPIView.as_view(), name="production-dashboard-ns"),
 ]
+
+# Standalone legacy production APIs remain available behind a feature flag while
+# older clients are being retired. The per-order compatibility actions exposed
+# by ProductionOrderViewSet are gated inside the view module.
+legacy_urlpatterns = [
+    path("", include(legacy_router.urls)),
+]
+
+if settings.ENABLE_LEGACY_PRODUCTION_API:
+    urlpatterns += legacy_urlpatterns
