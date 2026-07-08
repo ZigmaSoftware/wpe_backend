@@ -9,6 +9,7 @@ from rest_framework.exceptions import ValidationError
 from apps.production.models import (
     BatchWeightEntry,
     ProductionBatch,
+    ProductionLineConnection,
     ProductionOrder,
     ProductionOutputCapture,
 )
@@ -87,6 +88,14 @@ def _build_lineage_filters(lineage_suffix: str) -> Q:
 
 def _normalize_context_token(value) -> str:
     return str(value or "").strip().casefold()
+
+
+def _parse_positive_int(value) -> int:
+    try:
+        parsed = int(str(value or "").strip())
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
 
 
 def _extract_inventory_context(order: ProductionOrder | None) -> dict[str, str]:
@@ -217,6 +226,80 @@ def _resolve_lineage_batch_code(
     return lineage_batch_code
 
 
+def _select_pr_connection_stage_rows(
+    *,
+    pr_batch: ProductionBatch,
+    source_order: ProductionOrder | None = None,
+    for_update: bool = False,
+) -> list[ProductionInventoryTransaction]:
+    queryset = ProductionInventoryTransaction.objects
+    if for_update:
+        queryset = queryset.select_for_update()
+
+    queryset = (
+        queryset.filter(
+            stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+            balance_qty__gt=ZERO,
+        )
+        .select_related("item", "production_order", "source_batch", "output_capture")
+        .order_by("created_at", "id")
+    )
+
+    order = getattr(pr_batch, "production_order", None)
+    extra = getattr(order, "extra_form_data", {}) or {}
+    connection_id = _parse_positive_int(extra.get("line_connection_id"))
+    scan_code = str(extra.get("line_connection_scan_code") or "").strip()
+    baglot = str(extra.get("line_connection_baglot") or "").strip()
+
+    if connection_id:
+        connection_queryset = ProductionLineConnection.objects.select_related(
+            "source_inventory_transaction",
+            "source_production_order",
+        )
+        if for_update:
+            connection_queryset = connection_queryset.select_for_update()
+        connection = connection_queryset.filter(pk=connection_id).first()
+        if connection is not None and connection.source_inventory_transaction_id:
+            return list(queryset.filter(pk=connection.source_inventory_transaction_id))
+
+    identity_filters = Q()
+    if scan_code:
+        identity_filters |= Q(scan_code__iexact=scan_code)
+    if baglot:
+        identity_filters |= (
+            Q(batch_code__iexact=baglot)
+            | Q(reference_no__iexact=baglot)
+            | Q(output_capture__binlot__iexact=baglot)
+        )
+    if identity_filters:
+        matched_rows = list(queryset.filter(identity_filters))
+        if source_order is not None:
+            scoped_rows = [row for row in matched_rows if row.production_order_id == source_order.id]
+            if scoped_rows:
+                return scoped_rows
+        if matched_rows:
+            return matched_rows
+
+    if order is not None:
+        from apps.production.services import get_active_line_connection_for_order
+
+        active_connection = get_active_line_connection_for_order(order, for_update=for_update)
+        if active_connection is not None and active_connection.source_inventory_transaction_id:
+            return list(queryset.filter(pk=active_connection.source_inventory_transaction_id))
+
+    if connection_id or scan_code or baglot:
+        return []
+
+    if source_order is not None:
+        scoped_rows = list(queryset.filter(production_order=source_order))
+        if scoped_rows:
+            return scoped_rows
+
+    if order is None:
+        return []
+    return list(queryset.filter(production_order=order))
+
+
 def _consume_stage_quantity(
     *,
     stage: str,
@@ -294,6 +377,19 @@ def get_available_stage_quantity_for_context(
         fallback_production_order=fallback_production_order,
         source_batch=source_batch,
         lineage_batch_code=lineage_batch_code,
+        for_update=False,
+    )
+    return sum((Decimal(str(row.balance_qty or ZERO)) for row in rows), ZERO)
+
+
+def get_available_pr_connection_quantity(
+    pr_batch: ProductionBatch,
+    *,
+    source_order: ProductionOrder | None = None,
+) -> Decimal:
+    rows = _select_pr_connection_stage_rows(
+        pr_batch=pr_batch,
+        source_order=source_order,
         for_update=False,
     )
     return sum((Decimal(str(row.balance_qty or ZERO)) for row in rows), ZERO)
@@ -723,15 +819,25 @@ def move_pr_batch_to_line_work_center(
     source_order: ProductionOrder | None = None,
 ) -> list[ProductionInventoryTransaction]:
     moved_rows: list[ProductionInventoryTransaction] = []
-    connection_rows = list(
-        ProductionInventoryTransaction.objects.filter(
-            stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
-            production_order=source_order or pr_batch.production_order,
-            balance_qty__gt=ZERO,
-        ).select_related("item", "production_order", "source_batch")
-    )
-
     remaining_to_consume = Decimal(str(output_capture.weight_kg if output_capture is not None else ZERO))
+    if remaining_to_consume <= ZERO:
+        return moved_rows
+
+    connection_rows = _select_pr_connection_stage_rows(
+        pr_batch=pr_batch,
+        source_order=source_order,
+        for_update=True,
+    )
+    if not connection_rows:
+        raise ValidationError("No available Connection to Line stock found for the linked PR bag.")
+
+    available_qty = sum((Decimal(str(row.balance_qty or ZERO)) for row in connection_rows), ZERO)
+    if available_qty < remaining_to_consume:
+        raise ValidationError(
+            f"Cannot move {remaining_to_consume:.3f} from Connection to Line. "
+            f"Available stock is {available_qty:.3f}."
+        )
+
     for row in connection_rows:
         if remaining_to_consume <= ZERO:
             break
