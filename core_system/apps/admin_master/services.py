@@ -52,6 +52,8 @@ def sync_staff_contact_details(
     email: str | None = None,
     department=None,
     designation: str | None = None,
+    department_master=None,
+    role_master=None,
 ) -> Staff:
     update_fields: list[str] = []
 
@@ -71,6 +73,19 @@ def sync_staff_contact_details(
     if designation is not None and staff.designation != designation:
         staff.designation = designation or None
         update_fields.append("designation")
+
+    # Keep the Staff record's operational department in step with the
+    # department attached to the login's User Type, so a user who is
+    # provisioned as e.g. "Production - Production Incharge" is immediately
+    # eligible for department-scoped pickers (such as Shift Incharge)
+    # without requiring a separate edit on the Staff Creation screen.
+    if department_master is not None and staff.department_master_id != getattr(department_master, "id", department_master):
+        staff.department_master = department_master
+        update_fields.append("department_master")
+
+    if role_master is not None and staff.role_master_id != getattr(role_master, "id", role_master):
+        staff.role_master = role_master
+        update_fields.append("role_master")
 
     if update_fields:
         staff.save(update_fields=update_fields)
@@ -171,6 +186,8 @@ def upsert_user_creation(
         email=email,
         department=department,
         designation=designation,
+        department_master=getattr(user_type, "department", None),
+        role_master=getattr(user_type, "role", None),
     )
 
     user = _get_or_prepare_auth_user(instance=instance, username=username.strip())
