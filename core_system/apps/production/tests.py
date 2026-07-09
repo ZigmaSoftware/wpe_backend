@@ -2686,9 +2686,11 @@ class ProductionLineConnectApiTests(APITestCase):
         scan_code: str,
         batch_code: str,
         balance_qty: str = "75.000",
+        inward_qty: str | None = None,
         movement_key: str | None = None,
         baglot: str | None = None,
     ) -> ProductionInventoryTransaction:
+        resolved_inward_qty = inward_qty or balance_qty
         gl_batch = ProductionBatch.objects.create(
             production_order=self.gl_order,
             stage=ProductionBatch.Stage.GL,
@@ -2702,8 +2704,8 @@ class ProductionLineConnectApiTests(APITestCase):
             source_batch=gl_batch,
             sequence=ProductionOutputCapture.objects.filter(production_order=self.gl_order).count() + 1,
             scancode_id=scan_code,
-            quantity_kg=balance_qty,
-            weight_kg=balance_qty,
+            quantity_kg=resolved_inward_qty,
+            weight_kg=resolved_inward_qty,
             binlot=baglot or f"BAG-{self.unique_suffix.upper()}-{gl_batch.id}",
             captured_at=timezone.now(),
         )
@@ -2719,7 +2721,7 @@ class ProductionLineConnectApiTests(APITestCase):
             item=self.item,
             item_code=self.item.item_code,
             item_name=self.item.item_name,
-            inward_qty=balance_qty,
+            inward_qty=resolved_inward_qty,
             outward_qty="0.000",
             balance_qty=balance_qty,
             reference_no=batch_code,
@@ -2731,6 +2733,8 @@ class ProductionLineConnectApiTests(APITestCase):
         row = self._create_connection_inventory_row(
             scan_code=f"GL01{self.unique_suffix.upper()}SCAN01",
             batch_code=f"BATCHGL-{self.unique_suffix.upper()}01",
+            inward_qty="120.000",
+            balance_qty="75.000",
         )
 
         response = self.client.get("/api/production/line-connections/scan/", {"scan_code": row.scan_code})
@@ -2742,6 +2746,7 @@ class ProductionLineConnectApiTests(APITestCase):
         self.assertEqual(payload["item_code"], self.item.item_code)
         self.assertEqual(payload["item_name"], self.item.item_name)
         self.assertEqual(payload["weight_kg"], "75.000")
+        self.assertEqual(payload["total_weight_kg"], "120.000")
         self.assertFalse(payload["is_connected"])
         self.assertIsNone(payload["active_connection"])
 

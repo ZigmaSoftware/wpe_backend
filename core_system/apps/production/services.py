@@ -152,6 +152,9 @@ def lookup_line_connection_scan(scan_code: str) -> dict:
     row = get_line_connection_inventory_row(scan_code, require_available_balance=True, for_update=False)
     active_connection = get_active_line_connection_for_row(row, scan_code=scan_code, for_update=False)
     resolved_scan_code = _normalize_scan_code(row.scan_code) or _normalize_scan_code(scan_code)
+    total_weight = Decimal(str(row.inward_qty or ZERO))
+    if total_weight <= ZERO:
+        total_weight = Decimal(str(row.balance_qty or ZERO))
     return {
         "scan_code": resolved_scan_code,
         "serial_no": _serial_no_from_inventory(row, fallback=resolved_scan_code),
@@ -159,6 +162,7 @@ def lookup_line_connection_scan(scan_code: str) -> dict:
         "item_code": str(row.item_code or "").strip(),
         "item_name": str(row.item_name or "").strip(),
         "weight_kg": row.balance_qty,
+        "total_weight_kg": total_weight,
         "production_id": _production_id_from_inventory(row) or None,
         "is_connected": active_connection is not None,
         "active_connection": active_connection,

@@ -683,6 +683,7 @@ class GlScancodeDetailsSerializer(serializers.Serializer):
     item_code = serializers.CharField(allow_blank=True)
     item_name = serializers.CharField(allow_blank=True)
     weight_kg = serializers.DecimalField(max_digits=14, decimal_places=3)
+    total_weight_kg = serializers.DecimalField(max_digits=14, decimal_places=3)
     production_id = serializers.CharField(allow_blank=True, allow_null=True)
     is_connected = serializers.BooleanField()
     active_connection = ProductionLineConnectionSerializer(allow_null=True)
