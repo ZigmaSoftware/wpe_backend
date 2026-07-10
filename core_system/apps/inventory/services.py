@@ -267,58 +267,24 @@ def _select_pr_connection_stage_rows(
     )
 
     order = getattr(pr_batch, "production_order", None)
-    extra = getattr(order, "extra_form_data", {}) or {}
-    connection_id = _parse_positive_int(extra.get("line_connection_id"))
-    scan_code = str(extra.get("line_connection_scan_code") or "").strip()
-    baglot = str(extra.get("line_connection_baglot") or "").strip()
-
-    if connection_id:
-        connection_queryset = ProductionLineConnection.objects.select_related(
-            "source_inventory_transaction",
-            "source_production_order",
-        )
-        if for_update:
-            connection_queryset = connection_queryset.select_for_update()
-        connection = connection_queryset.filter(pk=connection_id).first()
-        if connection is not None and connection.source_inventory_transaction_id:
-            return list(queryset.filter(pk=connection.source_inventory_transaction_id))
-
-    identity_filters = Q()
-    if scan_code:
-        identity_filters |= Q(scan_code__iexact=scan_code)
-    if baglot:
-        identity_filters |= (
-            Q(batch_code__iexact=baglot)
-            | Q(reference_no__iexact=baglot)
-            | Q(output_capture__binlot__iexact=baglot)
-        )
-    if identity_filters:
-        matched_rows = list(queryset.filter(identity_filters))
-        if source_order is not None:
-            scoped_rows = [row for row in matched_rows if row.production_order_id == source_order.id]
-            if scoped_rows:
-                return scoped_rows
-        if matched_rows:
-            return matched_rows
-
-    if order is not None:
-        from apps.production.services import get_active_line_connection_for_order
-
-        active_connection = get_active_line_connection_for_order(order, for_update=for_update)
-        if active_connection is not None and active_connection.source_inventory_transaction_id:
-            return list(queryset.filter(pk=active_connection.source_inventory_transaction_id))
-
-    if connection_id or scan_code or baglot:
-        return []
-
-    if source_order is not None:
-        scoped_rows = list(queryset.filter(production_order=source_order))
-        if scoped_rows:
-            return scoped_rows
-
     if order is None:
         return []
-    return list(queryset.filter(production_order=order))
+
+    from apps.production.services import get_active_line_connection_for_order
+
+    active_connection = get_active_line_connection_for_order(order, for_update=for_update)
+    if active_connection is None or not active_connection.source_inventory_transaction_id:
+        return []
+
+    active_row = queryset.filter(pk=active_connection.source_inventory_transaction_id)
+    if source_order is not None:
+        scoped_row = active_row.filter(production_order=source_order).first()
+        if scoped_row is not None:
+            return [scoped_row]
+        return []
+
+    row = active_row.first()
+    return [row] if row is not None else []
 
 
 def _consume_stage_quantity(

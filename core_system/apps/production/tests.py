@@ -3369,6 +3369,91 @@ class ProductionLineConnectApiTests(APITestCase):
         self.assertEqual(str(line_work_center_row.inward_qty), "4.300")
         self.assertEqual(line_work_center_row.batch_code, row.batch_code)
 
+    def test_pr_final_capture_rejects_when_line_connection_is_disconnected(self):
+        row = self._create_connection_inventory_row(
+            scan_code=f"GL01{self.unique_suffix.upper()}SCAN10",
+            batch_code=f"BATCHGL-{self.unique_suffix.upper()}10",
+            balance_qty="4.400",
+        )
+        connect_response = self.client.post(
+            "/api/production/line-connections/connect/",
+            {"scan_code": row.scan_code, "production_line": self.line.id},
+            format="json",
+        )
+        self.assertEqual(connect_response.status_code, status.HTTP_200_OK)
+        connection = ProductionLineConnection.objects.get(pk=connect_response.data["data"]["id"])
+
+        create_response = self.client.post(
+            "/api/production/production/",
+            {
+                "production_id": f"PR-LC-DISCONNECT-{self.unique_suffix.upper()}",
+                "production_for": "HSN - PR Disconnect Check",
+                "production_type": "WPE Production Line",
+                "status": "PLANNED",
+                "production_date": str(date.today()),
+                "shift": "Shift 1 (6:00 am - 2:00 pm)",
+                "planned_quantity": "0.000",
+                "planned_weight": "0.000",
+                "start_date_time": f"{date.today()}T06:00:00Z",
+                "line_name": self.machine.name,
+                "line_number": self.machine.machine_code,
+                "material_cost": "0.00",
+                "total_cost": "0.00",
+                "extra_form_data": {
+                    "stage": "PR",
+                    "next_workflow_stage": "-",
+                    "line_machine_id": str(self.machine.id),
+                    "bom_multiplier": "1",
+                    "work_center": "PR-LINE-WC",
+                    "production_facility": "PR-UNIT",
+                },
+            },
+            format="json",
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        order = ProductionOrder.objects.get(production_id=f"PR-LC-DISCONNECT-{self.unique_suffix.upper()}")
+
+        batch_response = self.client.post(
+            f"/api/production/orders/{order.id}/batches/",
+            {
+                "stage": "PR",
+                "machine": self.machine.id,
+            },
+            format="json",
+        )
+        self.assertEqual(batch_response.status_code, status.HTTP_201_CREATED)
+        batch_id = batch_response.data["data"]["id"]
+
+        start_response = self.client.post(
+            f"/api/production/orders/{order.id}/batches/{batch_id}/start/",
+            format="json",
+        )
+        self.assertEqual(start_response.status_code, status.HTTP_200_OK)
+
+        disconnect_response = self.client.post(
+            f"/api/production/line-connections/{connection.id}/disconnect/",
+            format="json",
+        )
+        self.assertEqual(disconnect_response.status_code, status.HTTP_200_OK)
+
+        capture_response = self.client.post(
+            f"/api/production/orders/{order.id}/output-captures/",
+            {
+                "source_batch": batch_id,
+                "weight_kg": "4.300",
+            },
+            format="json",
+        )
+        self.assertEqual(capture_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("No available stock found in Connection To Line", capture_response.data["message"])
+
+        row.refresh_from_db()
+        batch = ProductionBatch.objects.get(pk=batch_id)
+        self.assertEqual(str(row.balance_qty), "4.400")
+        self.assertEqual(str(row.outward_qty), "0.000")
+        self.assertEqual(batch.status, ProductionBatch.BatchStatus.IN_PROGRESS)
+        self.assertEqual(ProductionOutputCapture.objects.filter(source_batch=batch).count(), 0)
+
     def test_pr_final_capture_completes_existing_saved_capture_row(self):
         row = self._create_connection_inventory_row(
             scan_code=f"GL01{self.unique_suffix.upper()}SCAN09",
