@@ -131,6 +131,33 @@ def _validation_message(exc: ValidationError, default: str) -> str:
     return default
 
 
+def _resolve_upstream_stage(stage: str | None) -> str | None:
+    return {
+        ProductionBatch.Stage.BL: ProductionBatch.Stage.AD,
+        ProductionBatch.Stage.GL: ProductionBatch.Stage.BL,
+        ProductionBatch.Stage.PR: ProductionBatch.Stage.GL,
+    }.get(str(stage or "").strip().upper())
+
+
+def _infer_upstream_production_id(order: ProductionOrder | None) -> str:
+    if order is None:
+        return ""
+
+    stage = str((order.extra_form_data or {}).get("stage") or "").strip().upper()
+    upstream_stage = _resolve_upstream_stage(stage)
+    production_id = str(order.production_id or "").strip()
+    if not upstream_stage or not production_id:
+        return ""
+
+    if production_id.upper().startswith(stage):
+        return f"{upstream_stage}{production_id[len(stage):]}"
+
+    match = re.match(r"^[A-Z]{2}(.*)$", production_id, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    return f"{upstream_stage}{match.group(1)}"
+
+
 class ProductionOrderViewSet(viewsets.ModelViewSet):
     """
     API ViewSet for Production Orders.
@@ -380,63 +407,91 @@ def resolve_linked_source_order(order: ProductionOrder | None) -> ProductionOrde
         return None
 
     extra = order.extra_form_data or {}
+    current_stage = str(extra.get("stage") or "").strip().upper()
     try:
         source_order_id = int(extra.get("source_order_id") or 0)
     except (TypeError, ValueError):
         source_order_id = 0
     if source_order_id <= 0:
-        try:
-            connection_id = int(extra.get("line_connection_id") or 0)
-        except (TypeError, ValueError):
-            connection_id = 0
-        if connection_id > 0:
-            connection = (
-                ProductionLineConnection.objects.select_related(
-                    "source_production_order",
-                    "source_inventory_transaction__production_order",
+        if current_stage == ProductionBatch.Stage.PR:
+            try:
+                connection_id = int(extra.get("line_connection_id") or 0)
+            except (TypeError, ValueError):
+                connection_id = 0
+            if connection_id > 0:
+                connection = (
+                    ProductionLineConnection.objects.select_related(
+                        "source_production_order",
+                        "source_inventory_transaction__production_order",
+                    )
+                    .filter(pk=connection_id)
+                    .first()
                 )
-                .filter(pk=connection_id)
+                if connection is not None:
+                    if connection.source_production_order_id:
+                        return connection.source_production_order
+                    source_row_order = getattr(getattr(connection, "source_inventory_transaction", None), "production_order", None)
+                    if source_row_order is not None:
+                        return source_row_order
+
+            scan_code = str(extra.get("line_connection_scan_code") or "").strip()
+            baglot = str(extra.get("line_connection_baglot") or "").strip()
+            if scan_code or baglot:
+                identity_filters = Q()
+                if scan_code:
+                    identity_filters |= Q(scan_code__iexact=scan_code)
+                if baglot:
+                    identity_filters |= (
+                        Q(batch_code__iexact=baglot)
+                        | Q(reference_no__iexact=baglot)
+                        | Q(output_capture__binlot__iexact=baglot)
+                    )
+
+                row = (
+                    ProductionInventoryTransaction.objects.select_related("production_order", "output_capture")
+                    .filter(stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE)
+                    .filter(identity_filters)
+                    .order_by("-updated_at", "-created_at", "-id")
+                    .first()
+                )
+                if row is not None:
+                    return getattr(row, "production_order", None)
+
+            active_connection = get_active_line_connection_for_order(order, for_update=False)
+            if active_connection is not None:
+                if active_connection.source_production_order_id:
+                    return active_connection.source_production_order
+                active_row_order = getattr(getattr(active_connection, "source_inventory_transaction", None), "production_order", None)
+                if active_row_order is not None:
+                    return active_row_order
+
+        inferred_source_production_id = _infer_upstream_production_id(order)
+        if inferred_source_production_id:
+            return (
+                ProductionOrder.objects.filter(production_id__iexact=inferred_source_production_id)
+                .order_by("-created_at", "-id")
                 .first()
             )
-            if connection is not None:
-                if connection.source_production_order_id:
-                    return connection.source_production_order
-                source_row_order = getattr(getattr(connection, "source_inventory_transaction", None), "production_order", None)
-                if source_row_order is not None:
-                    return source_row_order
-
-        scan_code = str(extra.get("line_connection_scan_code") or "").strip()
-        baglot = str(extra.get("line_connection_baglot") or "").strip()
-        if scan_code or baglot:
-            identity_filters = Q()
-            if scan_code:
-                identity_filters |= Q(scan_code__iexact=scan_code)
-            if baglot:
-                identity_filters |= (
-                    Q(batch_code__iexact=baglot)
-                    | Q(reference_no__iexact=baglot)
-                    | Q(output_capture__binlot__iexact=baglot)
-                )
-
-            row = (
-                ProductionInventoryTransaction.objects.select_related("production_order", "output_capture")
-                .filter(stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE)
-                .filter(identity_filters)
-                .order_by("-updated_at", "-created_at", "-id")
-                .first()
-            )
-            if row is not None:
-                return getattr(row, "production_order", None)
-
-        active_connection = get_active_line_connection_for_order(order, for_update=False)
-        if active_connection is not None:
-            if active_connection.source_production_order_id:
-                return active_connection.source_production_order
-            active_row_order = getattr(getattr(active_connection, "source_inventory_transaction", None), "production_order", None)
-            if active_row_order is not None:
-                return active_row_order
         return None
     return ProductionOrder.objects.filter(pk=source_order_id).first()
+
+
+def resolve_linked_source_batch(order: ProductionOrder | None, stage: str) -> ProductionBatch | None:
+    source_stage = _resolve_upstream_stage(stage)
+    if not source_stage:
+        return None
+
+    source_order = resolve_linked_source_order(order)
+    if source_order is None:
+        return None
+
+    return (
+        source_order.batches.select_related("output_capture")
+        .filter(stage=source_stage)
+        .exclude(status=ProductionBatch.BatchStatus.FAILED)
+        .order_by("-completed_at", "-created_at", "-id")
+        .first()
+    )
 
 
 class ProductionMasterPagination(StandardResultsSetPagination):
@@ -1631,29 +1686,7 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
         return success_response(message="Batches fetched.", data=list(serializer.data))
 
     def _resolve_linked_source_batch(self, order: ProductionOrder, stage: str):
-        source_stage = self.SOURCE_STAGE_BY_STAGE.get(stage)
-        if not source_stage:
-            return None
-
-        extra = order.extra_form_data or {}
-        try:
-            source_order_id = int(extra.get("source_order_id") or 0)
-        except (TypeError, ValueError):
-            return None
-        if source_order_id <= 0:
-            return None
-
-        source_order = ProductionOrder.objects.filter(pk=source_order_id).first()
-        if source_order is None:
-            return None
-
-        return (
-            source_order.batches.select_related("output_capture")
-            .filter(stage=source_stage)
-            .exclude(status=ProductionBatch.BatchStatus.FAILED)
-            .order_by("-completed_at", "-created_at", "-id")
-            .first()
-        )
+        return resolve_linked_source_batch(order, stage)
 
     def _get_existing_open_stage_batch(self, order: ProductionOrder, stage: str):
         return (
@@ -1696,7 +1729,9 @@ class ProductionBatchListCreateAPIView(QueryParamFilterMixin, generics.ListAPIVi
             fallback_production_order=order,
             stage=source_inventory_stage,
             source_batch=linked_source_batch,
+            fallback_source_batch=linked_source_batch,
             lineage_batch_code=str(getattr(linked_source_batch, "batch_no", "") or "").strip() or None,
+            use_global_stage_pool=stage in {ProductionBatch.Stage.BL, ProductionBatch.Stage.GL},
         )
 
     def post(self, request, *args, **kwargs):
@@ -2339,7 +2374,7 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
             return success_response(message="source_batch must be a valid batch identifier.", data={}, status_code=400)
 
         batch = get_object_or_404(
-            ProductionBatch.objects.select_related("production_order", "bom_variant"),
+            ProductionBatch.objects.select_related("production_order", "bom_variant", "parent_batch"),
             pk=source_batch_id,
             production_order_id=order_pk,
         )
@@ -2361,6 +2396,21 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
             return success_response(message="weight_kg must be greater than zero.", data={}, status_code=400)
 
         captured_at = timezone.now()
+        linked_source_batch = resolve_linked_source_batch(order, batch.stage)
+        if batch.parent_batch_id is None and linked_source_batch is not None:
+            batch.parent_batch = linked_source_batch
+            batch.save(update_fields=["parent_batch", "updated_at"])
+
+        capture_source_batch = getattr(batch, "parent_batch", None)
+        capture_lineage_batch_code = (
+            str(
+                getattr(capture_source_batch, "batch_no", "")
+                or getattr(linked_source_batch, "batch_no", "")
+                or batch.batch_no
+                or ""
+            ).strip()
+            or None
+        )
         source_inventory_stage = (
             ProductionInventoryTransaction.Stage.BLEND_WIP
             if batch.stage == ProductionBatch.Stage.BL
@@ -2381,8 +2431,10 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
                     production_order=linked_source_order or order,
                     fallback_production_order=order,
                     stage=source_inventory_stage,
-                    source_batch=getattr(batch, "parent_batch", None),
-                    lineage_batch_code=str(batch.batch_no or "").strip() or None,
+                    source_batch=capture_source_batch,
+                    fallback_source_batch=linked_source_batch,
+                    lineage_batch_code=capture_lineage_batch_code,
+                    use_global_stage_pool=batch.stage in {ProductionBatch.Stage.BL, ProductionBatch.Stage.GL},
                 )
             stage_label = source_inventory_stage.replace("_", " ").title()
             if available_qty <= Decimal("0.000"):
@@ -2453,9 +2505,23 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
                 )
                 created = True
                 if batch.stage == ProductionBatch.Stage.BL:
-                    record_bl_final_capture(batch, capture, created_by=request.user, source_order=linked_source_order)
+                    record_bl_final_capture(
+                        batch,
+                        capture,
+                        created_by=request.user,
+                        source_order=linked_source_order,
+                        fallback_source_batch=linked_source_batch,
+                        lineage_batch_code=capture_lineage_batch_code,
+                    )
                 elif batch.stage == ProductionBatch.Stage.GL:
-                    record_gl_final_capture(batch, capture, created_by=request.user, source_order=linked_source_order)
+                    record_gl_final_capture(
+                        batch,
+                        capture,
+                        created_by=request.user,
+                        source_order=linked_source_order,
+                        fallback_source_batch=linked_source_batch,
+                        lineage_batch_code=capture_lineage_batch_code,
+                    )
             else:
                 capture = existing_capture
                 created = False

@@ -114,19 +114,29 @@ def get_line_connection_inventory_row(
     queryset = queryset.filter(
         stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
     )
+    identity_filters = (
+        Q(scan_code__iexact=normalized_scan)
+        | Q(batch_code__iexact=normalized_scan)
+        | Q(reference_no__iexact=normalized_scan)
+    )
+    available_queryset = queryset
     if require_available_balance:
-        queryset = queryset.filter(balance_qty__gt=ZERO)
+        available_queryset = available_queryset.filter(balance_qty__gt=ZERO)
 
     row = (
-        queryset.filter(
-            Q(scan_code__iexact=normalized_scan)
-            | Q(batch_code__iexact=normalized_scan)
-            | Q(reference_no__iexact=normalized_scan)
-        )
+        available_queryset.filter(identity_filters)
         .order_by("-updated_at", "-created_at", "-id")
         .first()
     )
     if row is None:
+        if require_available_balance:
+            exhausted_row = (
+                queryset.filter(identity_filters)
+                .order_by("-updated_at", "-created_at", "-id")
+                .first()
+            )
+            if exhausted_row is not None and Decimal(str(exhausted_row.balance_qty or ZERO)) <= ZERO:
+                raise ValidationError("The scanned GL bag has no remaining balance in Connection to Line stock.")
         raise ValidationError("The scanned GL bag is not available in Connection to Line stock.")
     return row
 
@@ -149,7 +159,7 @@ def get_active_line_connection_for_row(
 
 
 def lookup_line_connection_scan(scan_code: str) -> dict:
-    row = get_line_connection_inventory_row(scan_code, require_available_balance=True, for_update=False)
+    row = get_line_connection_inventory_row(scan_code, require_available_balance=False, for_update=False)
     active_connection = get_active_line_connection_for_row(row, scan_code=scan_code, for_update=False)
     resolved_scan_code = _normalize_scan_code(row.scan_code) or _normalize_scan_code(scan_code)
     total_weight = Decimal(str(row.inward_qty or ZERO))
@@ -259,7 +269,7 @@ def connect_scan_to_line(
     user=None,
     production_order_id: int | None = None,
 ) -> ProductionLineConnection:
-    row = get_line_connection_inventory_row(scan_code, require_available_balance=True, for_update=True)
+    row = get_line_connection_inventory_row(scan_code, require_available_balance=False, for_update=True)
     active_connection = get_active_line_connection_for_row(row, scan_code=scan_code, for_update=True)
     if active_connection is not None:
         raise ValidationError(
