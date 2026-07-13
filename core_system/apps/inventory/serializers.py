@@ -244,10 +244,15 @@ class ProductionInventoryTransactionSerializer(serializers.ModelSerializer):
         if obj.stage in {
             ProductionInventoryTransaction.Stage.GRANULATION_STORE,
             ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
-            ProductionInventoryTransaction.Stage.LINE_WORK_CENTER,
             ProductionInventoryTransaction.Stage.DISCONNECTION_FROM_LINE,
         }:
             return self._get_capture_lot(obj)
+        if obj.stage == ProductionInventoryTransaction.Stage.LINE_WORK_CENTER:
+            current_lot = self._get_capture_lot(obj)
+            if current_lot:
+                return current_lot
+            source_row = self._find_connection_source_row(obj)
+            return self.get_baglot(source_row) if source_row is not None else ""
         return ""
 
     def get_scancode(self, obj):
@@ -275,6 +280,15 @@ class ProductionInventoryTransactionSerializer(serializers.ModelSerializer):
         if matched is not None:
             return matched
         return queryset.first()
+
+    def _find_connection_source_row(self, obj):
+        match = re.search(r":(\d+)$", str(obj.movement_key or ""))
+        if not match:
+            return None
+        return ProductionInventoryTransaction.objects.filter(
+            pk=int(match.group(1)),
+            stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+        ).select_related("output_capture").first()
 
     def _status_from_connection(self, obj):
         balance = Decimal(str(obj.balance_qty or 0))
@@ -406,6 +420,20 @@ class ProductionInventoryTransactionSerializer(serializers.ModelSerializer):
     def get_consumed_scancode(self, obj):
         if obj.stage == ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER:
             return self.get_scancode(obj)
+        if obj.stage == ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE:
+            rows = ProductionInventoryTransaction.objects.filter(
+                stage=ProductionInventoryTransaction.Stage.LINE_WORK_CENTER,
+                from_stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+                production_order=obj.production_order,
+                movement_key__endswith=f":{obj.id}",
+                inward_qty__gt=0,
+            ).select_related("output_capture").order_by("created_at", "id")
+            scancodes = []
+            for row in rows:
+                scancode = self.get_scancode(row)
+                if scancode and scancode not in scancodes:
+                    scancodes.append(scancode)
+            return ", ".join(scancodes)
         return ""
 
     def get_captured_stage_at(self, obj):
@@ -424,6 +452,9 @@ class ProductionInventoryTransactionSerializer(serializers.ModelSerializer):
         if obj.stage == ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER:
             next_row = self._find_next_stage_row(obj, ProductionInventoryTransaction.Stage.GRANULATION_STORE)
             return self.get_scancode(next_row) if next_row is not None else ""
+        if obj.stage == ProductionInventoryTransaction.Stage.LINE_WORK_CENTER:
+            source_row = self._find_connection_source_row(obj)
+            return self.get_scancode(source_row) if source_row is not None else ""
         return ""
 
     def get_captured_stage_weight(self, obj):

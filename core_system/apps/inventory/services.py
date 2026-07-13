@@ -149,7 +149,9 @@ def _find_stage_stock_rows(
     production_order: ProductionOrder | None,
     fallback_production_order: ProductionOrder | None = None,
     source_batch: ProductionBatch | None,
+    fallback_source_batch: ProductionBatch | None = None,
     lineage_batch_code: str | None = None,
+    use_global_stage_pool: bool = False,
     for_update: bool = False,
 ) -> list[ProductionInventoryTransaction]:
     queryset = ProductionInventoryTransaction.objects
@@ -157,14 +159,6 @@ def _find_stage_stock_rows(
         queryset = queryset.select_for_update()
 
     queryset = queryset.filter(stage=stage, balance_qty__gt=ZERO).order_by("created_at", "id")
-
-    if source_batch is not None:
-        direct_rows = list(queryset.filter(source_batch=source_batch))
-        if direct_rows:
-            return direct_rows
-
-    lineage_suffix = _extract_workflow_suffix(lineage_batch_code or getattr(source_batch, "batch_no", None))
-    lineage_filters = _build_lineage_filters(lineage_suffix)
 
     candidate_orders: list[ProductionOrder] = []
     for candidate_order in (production_order, fallback_production_order):
@@ -175,17 +169,44 @@ def _find_stage_stock_rows(
             continue
         candidate_orders.append(candidate_order)
 
+    prioritized_rows: list[ProductionInventoryTransaction] = []
+    prioritized_row_ids: set[int] = set()
+
+    def append_unique(rows: list[ProductionInventoryTransaction]):
+        for row in rows:
+            row_id = getattr(row, "pk", None)
+            if row_id is None or row_id in prioritized_row_ids:
+                continue
+            prioritized_row_ids.add(row_id)
+            prioritized_rows.append(row)
+
+    if source_batch is not None:
+        append_unique(list(queryset.filter(source_batch=source_batch)))
+
+    if fallback_source_batch is not None and getattr(fallback_source_batch, "pk", None) != getattr(source_batch, "pk", None):
+        append_unique(list(queryset.filter(source_batch=fallback_source_batch)))
+
+    lineage_suffix = _extract_workflow_suffix(
+        lineage_batch_code
+        or getattr(source_batch, "batch_no", None)
+        or getattr(fallback_source_batch, "batch_no", None)
+    )
+    lineage_filters = _build_lineage_filters(lineage_suffix)
+
     if lineage_filters:
         for candidate_order in candidate_orders:
-            scoped_rows = list(queryset.filter(production_order=candidate_order).filter(lineage_filters))
-            if scoped_rows:
-                return scoped_rows
+            append_unique(list(queryset.filter(production_order=candidate_order).filter(lineage_filters)))
 
-    if not lineage_filters:
-        for candidate_order in candidate_orders:
-            scoped_rows = list(queryset.filter(production_order=candidate_order))
-            if scoped_rows:
-                return scoped_rows
+    for candidate_order in candidate_orders:
+        append_unique(list(queryset.filter(production_order=candidate_order)))
+
+    if use_global_stage_pool:
+        append_unique(list(queryset))
+        if prioritized_rows:
+            return prioritized_rows
+
+    if prioritized_rows:
+        return prioritized_rows
 
     if candidate_orders:
         inventory_rows = list(queryset.select_related("production_order", "source_batch"))
@@ -246,58 +267,24 @@ def _select_pr_connection_stage_rows(
     )
 
     order = getattr(pr_batch, "production_order", None)
-    extra = getattr(order, "extra_form_data", {}) or {}
-    connection_id = _parse_positive_int(extra.get("line_connection_id"))
-    scan_code = str(extra.get("line_connection_scan_code") or "").strip()
-    baglot = str(extra.get("line_connection_baglot") or "").strip()
-
-    if connection_id:
-        connection_queryset = ProductionLineConnection.objects.select_related(
-            "source_inventory_transaction",
-            "source_production_order",
-        )
-        if for_update:
-            connection_queryset = connection_queryset.select_for_update()
-        connection = connection_queryset.filter(pk=connection_id).first()
-        if connection is not None and connection.source_inventory_transaction_id:
-            return list(queryset.filter(pk=connection.source_inventory_transaction_id))
-
-    identity_filters = Q()
-    if scan_code:
-        identity_filters |= Q(scan_code__iexact=scan_code)
-    if baglot:
-        identity_filters |= (
-            Q(batch_code__iexact=baglot)
-            | Q(reference_no__iexact=baglot)
-            | Q(output_capture__binlot__iexact=baglot)
-        )
-    if identity_filters:
-        matched_rows = list(queryset.filter(identity_filters))
-        if source_order is not None:
-            scoped_rows = [row for row in matched_rows if row.production_order_id == source_order.id]
-            if scoped_rows:
-                return scoped_rows
-        if matched_rows:
-            return matched_rows
-
-    if order is not None:
-        from apps.production.services import get_active_line_connection_for_order
-
-        active_connection = get_active_line_connection_for_order(order, for_update=for_update)
-        if active_connection is not None and active_connection.source_inventory_transaction_id:
-            return list(queryset.filter(pk=active_connection.source_inventory_transaction_id))
-
-    if connection_id or scan_code or baglot:
-        return []
-
-    if source_order is not None:
-        scoped_rows = list(queryset.filter(production_order=source_order))
-        if scoped_rows:
-            return scoped_rows
-
     if order is None:
         return []
-    return list(queryset.filter(production_order=order))
+
+    from apps.production.services import get_active_line_connection_for_order
+
+    active_connection = get_active_line_connection_for_order(order, for_update=for_update)
+    if active_connection is None or not active_connection.source_inventory_transaction_id:
+        return []
+
+    active_row = queryset.filter(pk=active_connection.source_inventory_transaction_id)
+    if source_order is not None:
+        scoped_row = active_row.filter(production_order=source_order).first()
+        if scoped_row is not None:
+            return [scoped_row]
+        return []
+
+    row = active_row.first()
+    return [row] if row is not None else []
 
 
 def _consume_stage_quantity(
@@ -308,7 +295,9 @@ def _consume_stage_quantity(
     production_order: ProductionOrder,
     fallback_production_order: ProductionOrder | None = None,
     source_batch: ProductionBatch | None,
+    fallback_source_batch: ProductionBatch | None = None,
     lineage_batch_code: str | None = None,
+    use_global_stage_pool: bool = False,
 ):
     if quantity <= ZERO:
         return []
@@ -318,7 +307,9 @@ def _consume_stage_quantity(
         production_order=production_order,
         fallback_production_order=fallback_production_order,
         source_batch=source_batch,
+        fallback_source_batch=fallback_source_batch,
         lineage_batch_code=lineage_batch_code,
+        use_global_stage_pool=use_global_stage_pool,
         for_update=True,
     )
 
@@ -369,14 +360,18 @@ def get_available_stage_quantity_for_context(
     stage: str,
     fallback_production_order: ProductionOrder | None = None,
     source_batch: ProductionBatch | None = None,
+    fallback_source_batch: ProductionBatch | None = None,
     lineage_batch_code: str | None = None,
+    use_global_stage_pool: bool = False,
 ) -> Decimal:
     rows = _find_stage_stock_rows(
         stage=stage,
         production_order=production_order,
         fallback_production_order=fallback_production_order,
         source_batch=source_batch,
+        fallback_source_batch=fallback_source_batch,
         lineage_batch_code=lineage_batch_code,
+        use_global_stage_pool=use_global_stage_pool,
         for_update=False,
     )
     return sum((Decimal(str(row.balance_qty or ZERO)) for row in rows), ZERO)
@@ -597,11 +592,23 @@ def record_bl_final_capture(
     *,
     created_by=None,
     source_order: ProductionOrder | None = None,
+    fallback_source_batch: ProductionBatch | None = None,
+    lineage_batch_code: str | None = None,
 ) -> ProductionInventoryTransaction:
     production_code, production_name = _resolve_production_item_fields(bl_batch.production_order)
     quantity = Decimal(str(output_capture.weight_kg or ZERO))
 
     source_batch = getattr(bl_batch, "parent_batch", None)
+    resolved_lineage_batch_code = (
+        str(
+            lineage_batch_code
+            or getattr(source_batch, "batch_no", "")
+            or getattr(fallback_source_batch, "batch_no", "")
+            or bl_batch.batch_no
+            or ""
+        ).strip()
+        or None
+    )
     source_rows = _consume_stage_quantity(
         stage=ProductionInventoryTransaction.Stage.BLEND_WIP,
         next_stage=ProductionInventoryTransaction.Stage.BLEND_STORE,
@@ -609,11 +616,13 @@ def record_bl_final_capture(
         production_order=source_order or bl_batch.production_order,
         fallback_production_order=bl_batch.production_order,
         source_batch=source_batch,
-        lineage_batch_code=str(bl_batch.batch_no or "").strip() or None,
+        fallback_source_batch=fallback_source_batch,
+        lineage_batch_code=resolved_lineage_batch_code,
+        use_global_stage_pool=True,
     )
     lineage_batch_code = _resolve_lineage_batch_code(
         source_rows,
-        fallback_batch_code=str(bl_batch.batch_no or "").strip(),
+        fallback_batch_code=resolved_lineage_batch_code or str(bl_batch.batch_no or "").strip(),
     )
 
     return upsert_inventory_transaction(
@@ -697,22 +706,37 @@ def record_gl_final_capture(
     *,
     created_by=None,
     source_order: ProductionOrder | None = None,
+    fallback_source_batch: ProductionBatch | None = None,
+    lineage_batch_code: str | None = None,
 ) -> ProductionInventoryTransaction:
     production_code, production_name = _resolve_production_item_fields(gl_batch.production_order)
     quantity = Decimal(str(output_capture.weight_kg or ZERO))
 
+    source_batch = getattr(gl_batch, "parent_batch", None)
+    resolved_lineage_batch_code = (
+        str(
+            lineage_batch_code
+            or getattr(source_batch, "batch_no", "")
+            or getattr(fallback_source_batch, "batch_no", "")
+            or gl_batch.batch_no
+            or ""
+        ).strip()
+        or None
+    )
     source_rows = _consume_stage_quantity(
         stage=ProductionInventoryTransaction.Stage.GRANULATION_WORK_CENTER,
         next_stage=ProductionInventoryTransaction.Stage.GRANULATION_STORE,
         quantity=quantity,
         production_order=source_order or gl_batch.production_order,
         fallback_production_order=gl_batch.production_order,
-        source_batch=getattr(gl_batch, "parent_batch", None),
-        lineage_batch_code=str(gl_batch.batch_no or "").strip() or None,
+        source_batch=source_batch,
+        fallback_source_batch=fallback_source_batch,
+        lineage_batch_code=resolved_lineage_batch_code,
+        use_global_stage_pool=True,
     )
     lineage_batch_code = _resolve_lineage_batch_code(
         source_rows,
-        fallback_batch_code=str(gl_batch.batch_no or "").strip(),
+        fallback_batch_code=resolved_lineage_batch_code or str(gl_batch.batch_no or "").strip(),
     )
 
     return upsert_inventory_transaction(
@@ -854,11 +878,6 @@ def move_pr_batch_to_line_work_center(
             else ProductionInventoryTransaction.Status.IN_PROGRESS
         )
         row.save(update_fields=["outward_qty", "balance_qty", "to_stage", "status", "updated_at"])
-        if row.balance_qty <= ZERO:
-            from apps.production.services import auto_disconnect_line_connection_for_inventory_row
-
-            auto_disconnect_line_connection_for_inventory_row(row, user=created_by)
-
         moved_rows.append(
             upsert_inventory_transaction(
                 movement_key=f"pr-out:line-work-center:{pr_batch.id}:{row.id}",
