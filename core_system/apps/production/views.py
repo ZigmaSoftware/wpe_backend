@@ -36,6 +36,7 @@ from common.drf import QueryParamFilterMixin, StandardResultsSetPagination, succ
 from .models import (
     BagCreationMaster,
     BinCreationMaster,
+    TareMaster,
     BOMCreationMaster,
     BOMItemCreationMaster,
     BOMVariant,
@@ -67,6 +68,7 @@ from .models import (
 from .serializers import (
     BagCreationMasterSerializer,
     BinCreationMasterSerializer,
+    TareMasterSerializer,
     BOMCreationMasterSerializer,
     BOMItemCreationMasterSerializer,
     BOMVariantComponentSerializer,
@@ -691,6 +693,17 @@ class BagCreationMasterViewSet(ProductionCodeMasterViewSet):
         "is_active": "is_active",
     }
     next_code_prefix = "BAG"
+
+
+class TareMasterViewSet(ProductionCodeMasterViewSet):
+    queryset = TareMaster.objects.all()
+    serializer_class = TareMasterSerializer
+    search_fields = ["name", "code", "stage"]
+    filterset_map = {
+        "stage": "stage",
+        "is_active": "is_active",
+    }
+    next_code_prefix = "TARE"
 
 
 class PackingTypeMasterViewSet(ProductionCodeMasterViewSet):

@@ -986,6 +986,36 @@ class PackingMaterialMaster(ProductionCodeTrackedModel):
         verbose_name_plural = "Packing Materials"
 
 
+class TareMaster(ProductionCodeTrackedModel):
+    class Stage(models.TextChoices):
+        AD = "AD", "Additive"
+        BL = "BL", "Blending"
+        GL = "GL", "Granulation"
+        PR = "PR", "Production"
+
+    class Uom(models.TextChoices):
+        KG = "KG", "KG"
+
+    code_prefix = "TARE"
+    code_width = 3
+
+    stage = models.CharField(max_length=10, choices=Stage.choices, unique=True, db_index=True)
+    tare_weight = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        default=ZERO_DECIMAL,
+        validators=[MinValueValidator(Decimal("0"))],
+    )
+    uom = models.CharField(max_length=16, choices=Uom.choices, default=Uom.KG)
+
+    class Meta(ProductionCodeTrackedModel.Meta):
+        verbose_name = "Tare Master"
+        verbose_name_plural = "Tare Masters"
+
+    def __str__(self) -> str:
+        return f"{self.get_stage_display()} — {self.tare_weight} {self.uom}"
+
+
 class BOMCreationMaster(ProductionCodeTrackedModel):
     class OutputUom(models.TextChoices):
         NOS = "NOS", "Nos"
@@ -1635,3 +1665,8 @@ class RegrindMaterialEntry(models.Model):
 
     def __str__(self):
         return f"{self.batch} — {self.item.item_code}: {self.quantity_grams}g"
+
+
+# Extrusion Production / Packing / Weight Verification / Sticker / Scrap KPI module.
+# Kept in a dedicated sibling file so this file never has to be touched again by that module.
+from .extrusion_models import *  # noqa: E402,F401,F403

@@ -25,6 +25,7 @@ from .views import (
     ProfileCreationMasterViewSet,
     ProfileSizeMasterViewSet,
     RecipeMasterViewSet,
+    TareMasterViewSet,
     WorkCentreCreationMasterViewSet,
     BOMVariantListAPIView,
     BOMVariantDetailAPIView,
@@ -54,6 +55,7 @@ router.register(r"work-centre-creations", WorkCentreCreationMasterViewSet, basen
 router.register(r"production-lines", ProductionLineMasterViewSet, basename="production-line")
 router.register(r"bin-creations", BinCreationMasterViewSet, basename="production-bin")
 router.register(r"bag-creations", BagCreationMasterViewSet, basename="production-bag")
+router.register(r"tare-masters", TareMasterViewSet, basename="production-tare")
 router.register(r"packing-types", PackingTypeMasterViewSet, basename="production-packing-type")
 router.register(r"packing-materials", PackingMaterialMasterViewSet, basename="production-packing-material")
 router.register(r"recipes", RecipeMasterViewSet, basename="production-recipe")
@@ -69,6 +71,7 @@ app_name = "production"
 
 urlpatterns = [
     path("", include(router.urls)),
+    path("extrusion/", include("apps.production.extrusion_urls")),
     path("line-connections/", ProductionLineConnectionListAPIView.as_view(), name="line-connections"),
     path("line-connections", ProductionLineConnectionListAPIView.as_view(), name="line-connections-ns"),
     path("line-connections/scan/", ProductionLineConnectionScanAPIView.as_view(), name="line-connections-scan"),
