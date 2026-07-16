@@ -423,7 +423,9 @@ class UserCreationViewSet(StandardizedModelViewSet):
         )
         department = request.query_params.get("department") or request.query_params.get("department_name")
         if department:
-            queryset = queryset.filter(department_master__name__iexact=department)
+            queryset = queryset.filter(
+                Q(department_master__name__iexact=department) | Q(department_master__name__iexact="Admin")
+            )
         department_id = request.query_params.get("department_id")
         if department_id:
             queryset = queryset.filter(department_master_id=department_id)

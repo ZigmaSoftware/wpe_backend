@@ -33,6 +33,53 @@ PRODUCTION_ROLE_TOKENS = {
     "operator",
 }
 
+# Extrusion Production / Packing / Weight Verification / Sticker / Scrap KPI module
+# (Extrusion_Scrap_Packing_KPI_FRD_V1_0). Additive role tokens — do not remove or
+# repurpose the sets above for this module.
+EXTRUSION_PRODUCTION_ROLE_TOKENS = PRODUCTION_ROLE_TOKENS | {
+    "extrusion_production_user",
+    "extrusion_production",
+}
+EXTRUSION_QUALITY_INSPECTOR_ROLE_TOKENS = {
+    "quality_inspector",
+    "extrusion_quality_inspector",
+    "qc_inspector",
+    "qc",
+}
+EXTRUSION_PACKING_OPERATOR_ROLE_TOKENS = {
+    "packing_operator",
+    "extrusion_packing_operator",
+    "packing",
+}
+EXTRUSION_WEIGHING_OPERATOR_ROLE_TOKENS = {
+    "weighing_operator",
+    "extrusion_weighing_operator",
+    "weighing",
+}
+EXTRUSION_QC_APPROVER_ROLE_TOKENS = {
+    "qc_approver",
+    "extrusion_qc_approver",
+}
+EXTRUSION_WAREHOUSE_ROLE_TOKENS = {
+    "warehouse_user",
+    "extrusion_warehouse_user",
+    "warehouse",
+}
+EXTRUSION_SUPERVISOR_ROLE_TOKENS = {
+    "supervisor",
+    "extrusion_supervisor",
+    "administrator",
+}
+EXTRUSION_ALL_ROLE_TOKENS = (
+    EXTRUSION_PRODUCTION_ROLE_TOKENS
+    | EXTRUSION_QUALITY_INSPECTOR_ROLE_TOKENS
+    | EXTRUSION_PACKING_OPERATOR_ROLE_TOKENS
+    | EXTRUSION_WEIGHING_OPERATOR_ROLE_TOKENS
+    | EXTRUSION_QC_APPROVER_ROLE_TOKENS
+    | EXTRUSION_WAREHOUSE_ROLE_TOKENS
+    | EXTRUSION_SUPERVISOR_ROLE_TOKENS
+)
+
 
 def _normalize_role_token(value) -> str | None:
     if value in (None, ""):
