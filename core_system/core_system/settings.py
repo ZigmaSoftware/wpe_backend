@@ -62,6 +62,8 @@ CORS_ALLOWED_ORIGINS = env_list(
     ],
 )
 CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS", CORS_ALLOWED_ORIGINS)
+CORS_EXPOSE_HEADERS = ensure_list_values(env_list("CORS_EXPOSE_HEADERS"), ["X-CSRFToken"])
+CORS_ALLOW_CREDENTIALS = True
 
 ALLOWED_HOSTS = ensure_list_values(ALLOWED_HOSTS, [LIVE_SERVER_HOST])
 CORS_ALLOWED_ORIGINS = ensure_list_values(CORS_ALLOWED_ORIGINS, [LIVE_FRONTEND_ORIGIN])
@@ -92,6 +94,8 @@ INSTALLED_APPS = [
     "apps.wpe_masters.apps.WpeMastersConfig",
     "apps.scale.apps.ScaleConfig",
     "apps.inventory.apps.InventoryConfig",
+    "apps.task_tracker.apps.TaskTrackerConfig",
+    "apps.drive.apps.DriveConfig",
     "grn_app.apps.PurchasesIwardsConfig",
     "apps.weighscale.apps.WeighscaleConfig",
 ]
@@ -175,6 +179,16 @@ PASSWORD_HASHERS = [
 
 API_PATH_PREFIX = "/api/"
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
+API_CSRF_PROTECTED_PATHS = env_list("API_CSRF_PROTECTED_PATHS", ["/api/task-tracker", "/api/drive"])
+GOOGLE_KEY_PATH = os.getenv("GOOGLE_KEY_PATH", str(PROJECT_ROOT.parent / "service-account.json")).strip()
+TASK_TRACKER_SPREADSHEET_ID = os.getenv(
+    "TASK_TRACKER_SPREADSHEET_ID",
+    "1A4xw_aqFagx1hWyI8bCrqwlZkL1rqZmv3cHbDAs2sUk",
+).strip()
+TASK_TRACKER_SHEET_TAB = os.getenv("TASK_TRACKER_SHEET_TAB", "Sheet1").strip()
+TASK_TRACKER_SHEET_GID = int(os.getenv("TASK_TRACKER_SHEET_GID", "0"))
+GOOGLE_DRIVE_KEY_PATH = os.getenv("GOOGLE_DRIVE_KEY_PATH", str(PROJECT_ROOT.parent / "drive-service-account.json")).strip()
+GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "0AJU2AJhNQbniUk9PVA").strip()
 
 default_api_auth_exempt_paths = [
     "/api/token/",

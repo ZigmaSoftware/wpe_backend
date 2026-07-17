@@ -20,9 +20,10 @@ class DisableAPICSRFMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
         self.api_prefix = getattr(settings, "API_PATH_PREFIX", "/api/")
+        self.protected_paths = list(getattr(settings, "API_CSRF_PROTECTED_PATHS", []))
 
     def __call__(self, request):
-        if request.path.startswith(self.api_prefix):
+        if request.path.startswith(self.api_prefix) and not _path_matches(request.path, self.protected_paths):
             request._dont_enforce_csrf_checks = True
 
         return self.get_response(request)
@@ -64,4 +65,3 @@ class APIAuthenticationMiddleware:
             request.api_key_authenticated = True
 
         return self.get_response(request)
-

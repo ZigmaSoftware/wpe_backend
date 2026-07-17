@@ -23,6 +23,8 @@ urlpatterns = [
     path("api/scale/", include("apps.scale.urls")),
     path("api/weighscale/", include("apps.weighscale.urls")),
     path("api/inventory/", include("apps.inventory.urls")),
+    path("api/task-tracker/", include("apps.task_tracker.urls")),
+    path("api/drive/", include("apps.drive.urls")),
     path("api/", include("grn_app.urls")),
 ]
 
