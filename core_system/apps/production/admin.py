@@ -1,9 +1,7 @@
 from django.contrib import admin
-from . import extrusion_admin  # noqa: F401  (registers Extrusion module admin models)
 from .models import (
     BagCreationMaster,
     BinCreationMaster,
-    TareMaster,
     ColorCreationMaster,
     PackingMaterialMaster,
     PackingTypeMaster,
@@ -225,12 +223,6 @@ class BinCreationMasterAdmin(ProductionCodeMasterAdmin):
 class BagCreationMasterAdmin(ProductionCodeMasterAdmin):
     list_display = ["code", "name", "department", "standard_weight", "current_status", "is_active"]
     list_filter = ["department", "current_status", "is_active"]
-
-
-@admin.register(TareMaster)
-class TareMasterAdmin(ProductionCodeMasterAdmin):
-    list_display = ["code", "name", "stage", "tare_weight", "uom", "is_active"]
-    list_filter = ["stage", "is_active"]
 
 
 @admin.register(PackingTypeMaster)

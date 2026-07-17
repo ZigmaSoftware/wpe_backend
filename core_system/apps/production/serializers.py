@@ -19,7 +19,6 @@ from .models import (
     RegrindMaterialEntry,
     BagCreationMaster,
     BinCreationMaster,
-    TareMaster,
     BOMCreationMaster,
     BOMItemCreationMaster,
     ColorCreationMaster,
@@ -736,19 +735,6 @@ class BagCreationMasterSerializer(ProductionCodeMasterSerializer):
             "department",
             "department_name",
             "current_status",
-        )
-
-
-class TareMasterSerializer(ProductionCodeMasterSerializer):
-    stage_display = serializers.CharField(source="get_stage_display", read_only=True)
-
-    class Meta(ProductionCodeMasterSerializer.Meta):
-        model = TareMaster
-        fields = ProductionCodeMasterSerializer.Meta.fields + (
-            "stage",
-            "stage_display",
-            "tare_weight",
-            "uom",
         )
 
 
