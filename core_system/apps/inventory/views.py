@@ -22,6 +22,7 @@ ACTIVE_PRODUCTION_INVENTORY_STAGES = [
     ProductionInventoryTransaction.Stage.GRANULATION_STORE,
     ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
     ProductionInventoryTransaction.Stage.LINE_WORK_CENTER,
+    ProductionInventoryTransaction.Stage.SCRAP_WAREHOUSE,
     ProductionInventoryTransaction.Stage.DISCONNECTION_FROM_LINE,
 ]
 SUMMARY_PRODUCTION_INVENTORY_STAGES = set(ACTIVE_PRODUCTION_INVENTORY_STAGES)

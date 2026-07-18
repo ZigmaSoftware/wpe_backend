@@ -26,6 +26,7 @@ from .models import (
     PackingTypeMaster,
     ProductionLineMaster,
     ProductionLineConnection,
+    ProductionScrapCapture,
     ProfileCreationMaster,
     ProfileSizeMaster,
     ProductionMachine,
@@ -1240,6 +1241,49 @@ class ProductionOutputCaptureSerializer(serializers.ModelSerializer):
             }
             for entry in self._get_required_entries(obj)
         ]
+
+
+class ProductionScrapCaptureSerializer(serializers.ModelSerializer):
+    scrap_type_name = serializers.CharField(source="scrap_type.name", read_only=True)
+    scrap_type_type = serializers.CharField(source="scrap_type.scrap_type", read_only=True)
+    warehouse_name = serializers.CharField(source="warehouse.name", read_only=True)
+    warehouse_code = serializers.CharField(source="warehouse.code", read_only=True)
+    source_batch_no = serializers.CharField(source="source_batch.batch_no", read_only=True)
+    line_connection_scan_code = serializers.CharField(source="line_connection.scan_code", read_only=True, allow_null=True)
+    line_connection_baglot = serializers.CharField(source="line_connection.serial_no", read_only=True, allow_null=True)
+    created_by_username = serializers.CharField(source="created_by.username", read_only=True, default=None)
+
+    class Meta:
+        model = ProductionScrapCapture
+        fields = (
+            "id",
+            "production_order",
+            "source_batch",
+            "source_batch_no",
+            "scrap_type",
+            "scrap_type_name",
+            "scrap_type_type",
+            "warehouse",
+            "warehouse_code",
+            "warehouse_name",
+            "line_connection",
+            "line_connection_scan_code",
+            "line_connection_baglot",
+            "source_inventory_transaction",
+            "inventory_transaction",
+            "sequence",
+            "weight_kg",
+            "device_id",
+            "workstation_id",
+            "bridge_client_id",
+            "weight_source",
+            "captured_at",
+            "created_by",
+            "created_by_username",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
 
 
 class ProductionStageRecordSerializer(serializers.Serializer):
