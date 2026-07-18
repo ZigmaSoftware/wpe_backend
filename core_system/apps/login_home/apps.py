@@ -6,3 +6,4 @@ class LoginHomeConfig(AppConfig):
     name = "apps.login_home"
     label = "login_home"
     verbose_name = "Login Home"
+
