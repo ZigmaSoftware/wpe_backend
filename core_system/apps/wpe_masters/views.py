@@ -27,6 +27,7 @@ from .models import (
     QRLabelTemplateMaster,
     RoleMaster,
     SaleTypeMaster,
+    ScrapTypeMaster,
     SerialPortConfigurationMaster,
     StoreMaster,
     UnitMaster,
@@ -50,6 +51,7 @@ from .serializers import (
     QRLabelTemplateMasterSerializer,
     RoleMasterSerializer,
     SaleTypeMasterSerializer,
+    ScrapTypeMasterSerializer,
     SerialPortConfigurationMasterSerializer,
     StoreMasterSerializer,
     UnitMasterSerializer,
@@ -215,6 +217,10 @@ class WarehouseMasterViewSet(CodeTrackedMasterViewSet):
     serializer_class = WarehouseMasterSerializer
     search_fields = ["name", "code", "warehouse_type", "description"]
     ordering_fields = ["name", "code", "warehouse_type", "created_at", "is_active"]
+    filterset_map = {
+        "warehouse_type": "warehouse_type",
+        "is_active": "is_active",
+    }
     next_code_prefix = "WH"
 
 
@@ -231,6 +237,27 @@ class SaleTypeMasterViewSet(BaseMasterViewSet):
 class PurchaseTypeMasterViewSet(BaseMasterViewSet):
     queryset = PurchaseTypeMaster.objects.all()
     serializer_class = PurchaseTypeMasterSerializer
+
+
+class ScrapTypeMasterViewSet(BaseMasterViewSet):
+    queryset = ScrapTypeMaster.objects.all()
+    serializer_class = ScrapTypeMasterSerializer
+    search_fields = ["name", "scrap_type"]
+    ordering_fields = ["scrap_type", "name", "created_at", "is_active"]
+    ordering = ["scrap_type", "name"]
+    filterset_map = {
+        "type": "scrap_type",
+        "scrap_type": "scrap_type",
+        "is_active": "is_active",
+    }
+
+    @action(detail=False, methods=["get"])
+    def lookup(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).filter(is_active=True)
+        return Response([
+            {"id": row.id, "name": row.name, "type": row.scrap_type}
+            for row in queryset
+        ])
 
 
 class StoreMasterViewSet(CodeTrackedMasterViewSet):

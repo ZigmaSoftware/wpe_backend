@@ -12,6 +12,7 @@ from apps.production.models import (
     ProductionLineConnection,
     ProductionOrder,
     ProductionOutputCapture,
+    ProductionScrapCapture,
 )
 
 from .models import ProductionInventoryTransaction
@@ -904,3 +905,81 @@ def move_pr_batch_to_line_work_center(
         remaining_to_consume -= consume_qty
 
     return moved_rows
+
+
+def record_pr_scrap_capture(
+    pr_batch: ProductionBatch,
+    scrap_capture: ProductionScrapCapture,
+    *,
+    created_by=None,
+    source_order: ProductionOrder | None = None,
+) -> ProductionInventoryTransaction:
+    quantity = Decimal(str(scrap_capture.weight_kg or ZERO))
+    if quantity <= ZERO:
+        raise ValidationError("Scrap capture weight must be greater than zero.")
+
+    connection_rows = _select_pr_connection_stage_rows(
+        pr_batch=pr_batch,
+        source_order=source_order,
+        for_update=True,
+    )
+    if not connection_rows:
+        raise ValidationError("No available Connection to Line stock found for the linked PR bag.")
+
+    available_qty = sum((Decimal(str(row.balance_qty or ZERO)) for row in connection_rows), ZERO)
+    if available_qty < quantity:
+        raise ValidationError(
+            f"Cannot move {quantity:.3f} from Connection to Line. "
+            f"Available stock is {available_qty:.3f}."
+        )
+
+    source_row = connection_rows[0]
+    remaining_to_consume = quantity
+    for row in connection_rows:
+        if remaining_to_consume <= ZERO:
+            break
+        consume_qty = min(remaining_to_consume, Decimal(str(row.balance_qty or ZERO)))
+        if consume_qty <= ZERO:
+            continue
+
+        row.outward_qty = Decimal(str(row.outward_qty or ZERO)) + consume_qty
+        row.balance_qty = Decimal(str(row.balance_qty or ZERO)) - consume_qty
+        row.to_stage = ProductionInventoryTransaction.Stage.SCRAP_WAREHOUSE
+        row.status = (
+            ProductionInventoryTransaction.Status.COMPLETED
+            if row.balance_qty <= ZERO
+            else ProductionInventoryTransaction.Status.IN_PROGRESS
+        )
+        row.save(update_fields=["outward_qty", "balance_qty", "to_stage", "status", "updated_at"])
+        remaining_to_consume -= consume_qty
+
+    warehouse_label = str(getattr(scrap_capture.warehouse, "name", "") or "").strip()
+    scrap_type_label = str(getattr(scrap_capture.scrap_type, "name", "") or "").strip()
+    scrap_category = str(getattr(scrap_capture.scrap_type, "scrap_type", "") or "").strip()
+    inventory_row = upsert_inventory_transaction(
+        movement_key=f"pr-scrap:warehouse:{scrap_capture.id}",
+        stage=ProductionInventoryTransaction.Stage.SCRAP_WAREHOUSE,
+        batch_code=str(source_row.batch_code or source_row.reference_no or pr_batch.batch_no or "").strip(),
+        production_order=pr_batch.production_order,
+        source_batch=pr_batch,
+        output_capture=None,
+        item=source_row.item,
+        item_code=source_row.item_code,
+        item_name=source_row.item_name,
+        quantity=quantity,
+        inward_qty=quantity,
+        outward_qty=ZERO,
+        balance_qty=quantity,
+        from_stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+        to_stage=ProductionInventoryTransaction.Stage.SCRAP_WAREHOUSE,
+        reference_no=str(source_row.batch_code or source_row.reference_no or pr_batch.batch_no or "").strip() or None,
+        scan_code=str(getattr(scrap_capture.line_connection, "scan_code", "") or source_row.scan_code or "").strip() or None,
+        work_center=scrap_type_label or scrap_category or None,
+        line=warehouse_label or None,
+        status=ProductionInventoryTransaction.Status.IN_PROGRESS,
+        created_by=created_by,
+    )
+    scrap_capture.source_inventory_transaction = source_row
+    scrap_capture.inventory_transaction = inventory_row
+    scrap_capture.save(update_fields=["source_inventory_transaction", "inventory_transaction", "updated_at"])
+    return inventory_row

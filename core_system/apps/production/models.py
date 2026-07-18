@@ -1544,6 +1544,63 @@ class ProductionOutputCapture(models.Model):
         return f"{self.production_order.production_id} — {self.scancode_id}"
 
 
+class ProductionScrapCapture(models.Model):
+    production_order = models.ForeignKey(ProductionOrder, on_delete=models.CASCADE, related_name="scrap_captures")
+    source_batch = models.ForeignKey(ProductionBatch, on_delete=models.PROTECT, related_name="scrap_captures")
+    scrap_type = models.ForeignKey("wpe_masters.ScrapTypeMaster", on_delete=models.PROTECT, related_name="scrap_captures")
+    warehouse = models.ForeignKey("wpe_masters.WarehouseMaster", on_delete=models.PROTECT, related_name="scrap_captures")
+    line_connection = models.ForeignKey(
+        "production.ProductionLineConnection",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="scrap_captures",
+    )
+    source_inventory_transaction = models.ForeignKey(
+        "inventory.ProductionInventoryTransaction",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="source_scrap_captures",
+    )
+    inventory_transaction = models.ForeignKey(
+        "inventory.ProductionInventoryTransaction",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="scrap_captures",
+    )
+    sequence = models.PositiveIntegerField()
+    weight_kg = models.DecimalField(max_digits=14, decimal_places=3, default=ZERO_DECIMAL)
+    device_id = models.CharField(max_length=100, blank=True, db_index=True)
+    workstation_id = models.CharField(max_length=100, blank=True, db_index=True)
+    bridge_client_id = models.CharField(max_length=128, blank=True, db_index=True)
+    weight_source = models.CharField(max_length=32, blank=True, default="")
+    captured_at = models.DateTimeField(default=timezone.now, db_index=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="production_scrap_captures",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-captured_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(fields=["production_order", "sequence"], name="prod_scrap_cap_ord_seq_uq"),
+        ]
+        indexes = [
+            models.Index(fields=["production_order", "captured_at"], name="prod_scrap_cap_ord_cap_idx"),
+            models.Index(fields=["source_batch", "captured_at"], name="prod_scrap_cap_batch_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.production_order.production_id} — Scrap {self.sequence}"
+
+
 class BatchWeightEntry(models.Model):
     batch = models.ForeignKey(ProductionBatch, on_delete=models.CASCADE, related_name="weight_entries")
     bom_component = models.ForeignKey(BOMVariantComponent, on_delete=models.PROTECT)
