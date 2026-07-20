@@ -25,12 +25,13 @@ from apps.inventory.services import (
     move_bl_batch_to_granulation_work_center,
     move_gl_batch_to_connection_line,
     move_pr_batch_to_line_work_center,
+    record_pr_scrap_capture,
     record_bl_final_capture,
     record_gl_final_capture,
     sync_ad_save_weight,
 )
 from apps.items.models import Item
-from apps.wpe_masters.models import ProductTypeSubtype
+from apps.wpe_masters.models import ProductTypeSubtype, ScrapTypeMaster, WarehouseMaster
 from common.drf import QueryParamFilterMixin, StandardResultsSetPagination, success_response
 
 from .models import (
@@ -51,6 +52,7 @@ from .models import (
     ProductionMachine,
     ProductionOrder,
     ProductionOutputCapture,
+    ProductionScrapCapture,
     ProductionSummary,
     ProductionTransaction,
     ProfileCreationMaster,
@@ -87,6 +89,7 @@ from .serializers import (
     ProductionOrderDetailSerializer,
     ProductionOrderListSerializer,
     ProductionOutputCaptureSerializer,
+    ProductionScrapCaptureSerializer,
     ProductionStageRecordSerializer,
     ProductionSummarySerializer,
     ProductionTransactionSerializer,
@@ -2562,6 +2565,159 @@ class ProductionOutputCaptureListAPIView(generics.GenericAPIView):
             ),
             data=ProductionOutputCaptureSerializer(capture).data,
             status_code=201 if created else 200,
+        )
+
+
+class ProductionScrapCaptureListAPIView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _parse_positive_id(value):
+        if value in (None, ""):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return "invalid"
+        return parsed if parsed > 0 else "invalid"
+
+    def _get_queryset(self, order_pk, *, source_batch_id=None):
+        queryset = (
+            ProductionScrapCapture.objects.filter(production_order_id=order_pk)
+            .select_related(
+                "production_order",
+                "source_batch",
+                "scrap_type",
+                "warehouse",
+                "line_connection",
+                "source_inventory_transaction",
+                "inventory_transaction",
+                "created_by",
+            )
+            .order_by("-captured_at", "-id")
+        )
+        if source_batch_id is not None:
+            queryset = queryset.filter(source_batch_id=source_batch_id)
+        return queryset
+
+    def _resolve_pr_batch(self, order: ProductionOrder, source_batch_id):
+        if source_batch_id is not None:
+            return get_object_or_404(
+                ProductionBatch.objects.select_related("production_order"),
+                pk=source_batch_id,
+                production_order=order,
+                stage=ProductionBatch.Stage.PR,
+            )
+        return (
+            ProductionBatch.objects.select_related("production_order")
+            .filter(production_order=order, stage=ProductionBatch.Stage.PR)
+            .exclude(status=ProductionBatch.BatchStatus.COMPLETED)
+            .order_by("-created_at", "-id")
+            .first()
+        )
+
+    def get(self, request, order_pk, *args, **kwargs):
+        get_object_or_404(ProductionOrder, pk=order_pk)
+        source_batch_id = self._parse_positive_id(request.query_params.get("source_batch"))
+        if source_batch_id == "invalid":
+            return success_response(message="source_batch must be a valid batch identifier.", data={}, status_code=400)
+
+        captures = self._get_queryset(order_pk, source_batch_id=source_batch_id)
+        return success_response(
+            message="Scrap captures fetched.",
+            data=list(ProductionScrapCaptureSerializer(captures, many=True).data),
+        )
+
+    def post(self, request, order_pk, *args, **kwargs):
+        order = get_object_or_404(ProductionOrder, pk=order_pk)
+        linked_source_order = resolve_linked_source_order(order)
+        source_batch_id = self._parse_positive_id(request.data.get("source_batch"))
+        if source_batch_id == "invalid":
+            return success_response(message="source_batch must be a valid batch identifier.", data={}, status_code=400)
+
+        batch = self._resolve_pr_batch(order, source_batch_id)
+        if batch is None:
+            return success_response(message="No active PR batch is available for scrap capture.", data={}, status_code=400)
+        if batch.status == ProductionBatch.BatchStatus.FAILED:
+            return success_response(message="Cannot capture scrap for a failed PR batch.", data={}, status_code=400)
+
+        scrap_type_id = self._parse_positive_id(request.data.get("scrap_type"))
+        warehouse_id = self._parse_positive_id(request.data.get("warehouse"))
+        if scrap_type_id in (None, "invalid"):
+            return success_response(message="scrap_type is required.", data={}, status_code=400)
+        if warehouse_id in (None, "invalid"):
+            return success_response(message="warehouse is required.", data={}, status_code=400)
+
+        scrap_type = get_object_or_404(ScrapTypeMaster, pk=scrap_type_id, is_active=True)
+        warehouse = get_object_or_404(WarehouseMaster, pk=warehouse_id, is_active=True)
+
+        raw_weight = request.data.get("weight_kg")
+        if raw_weight in (None, ""):
+            return success_response(message="weight_kg is required.", data={}, status_code=400)
+        try:
+            weight_kg = Decimal(str(raw_weight)).quantize(Decimal("0.001"))
+        except Exception:
+            return success_response(message="weight_kg must be a valid decimal value.", data={}, status_code=400)
+        if weight_kg <= Decimal("0.000"):
+            return success_response(message="weight_kg must be greater than zero.", data={}, status_code=400)
+
+        active_connection = get_active_line_connection_for_order(order, for_update=False)
+        if active_connection is None:
+            return success_response(message="No active line connection is available for this PR order.", data={}, status_code=400)
+
+        available_qty = get_available_pr_connection_quantity(batch, source_order=linked_source_order)
+        if available_qty <= Decimal("0.000"):
+            return success_response(
+                message="No available Connection to Line stock found for the linked PR bag.",
+                data={"available_qty": f"{available_qty:.3f}"},
+                status_code=400,
+            )
+        if weight_kg > available_qty:
+            return success_response(
+                message="Captured scrap weight exceeds available Connection to Line stock.",
+                data={"available_qty": f"{available_qty:.3f}"},
+                status_code=400,
+            )
+
+        captured_at = timezone.now()
+        metadata = extract_weight_capture_metadata(request)
+        with transaction.atomic():
+            if batch.status == ProductionBatch.BatchStatus.PENDING:
+                batch.status = ProductionBatch.BatchStatus.IN_PROGRESS
+                batch.started_at = batch.started_at or captured_at
+                batch.save(update_fields=["status", "started_at", "updated_at"])
+
+            existing_sequences = ProductionScrapCapture.objects.select_for_update().filter(
+                production_order=order
+            ).values_list("sequence", flat=True)
+            sequence = max(existing_sequences, default=0) + 1
+            capture = ProductionScrapCapture.objects.create(
+                production_order=order,
+                source_batch=batch,
+                scrap_type=scrap_type,
+                warehouse=warehouse,
+                line_connection=active_connection,
+                sequence=sequence,
+                weight_kg=weight_kg,
+                device_id=metadata["device_id"],
+                workstation_id=metadata["workstation_id"],
+                bridge_client_id=metadata["bridge_client_id"],
+                weight_source=metadata["weight_source"],
+                captured_at=captured_at,
+                created_by=request.user if getattr(request.user, "pk", None) else None,
+            )
+            record_pr_scrap_capture(
+                batch,
+                capture,
+                created_by=request.user,
+                source_order=linked_source_order,
+            )
+
+        capture = self._get_queryset(order_pk).get(pk=capture.pk)
+        return success_response(
+            message="PR scrap captured and moved to Scrap Warehouse.",
+            data=ProductionScrapCaptureSerializer(capture).data,
+            status_code=201,
         )
 
 

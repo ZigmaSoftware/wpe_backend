@@ -21,6 +21,7 @@ from .models import (
     QRLabelTemplateMaster,
     RoleMaster,
     SaleTypeMaster,
+    ScrapTypeMaster,
     SerialPortConfigurationMaster,
     StoreMaster,
     UnitMaster,
@@ -81,6 +82,35 @@ class SaleTypeMasterSerializer(BaseMasterSerializer):
 class PurchaseTypeMasterSerializer(BaseMasterSerializer):
     class Meta(BaseMasterSerializer.Meta):
         model = PurchaseTypeMaster
+
+
+class ScrapTypeMasterSerializer(BaseMasterSerializer):
+    type = serializers.CharField(source="scrap_type")
+
+    class Meta(BaseMasterSerializer.Meta):
+        model = ScrapTypeMaster
+        fields = BaseMasterSerializer.Meta.fields + ("type",)
+
+    def validate_name(self, value: str) -> str:
+        normalized = (value or "").strip()
+        if not normalized:
+            raise serializers.ValidationError("Name is required.")
+        if len(normalized) > 200:
+            raise serializers.ValidationError("Ensure this field has no more than 200 characters.")
+        return normalized
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        scrap_type = attrs.get("scrap_type", getattr(self.instance, "scrap_type", ""))
+        name = attrs.get("name", getattr(self.instance, "name", ""))
+        if not scrap_type:
+            raise serializers.ValidationError({"type": "Type is required."})
+        queryset = ScrapTypeMaster.objects.filter(scrap_type=scrap_type, name__iexact=name)
+        if self.instance and self.instance.pk:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError({"name": "A scrap type with this name already exists under the selected type."})
+        return attrs
 
 
 class StoreMasterSerializer(CodeTrackedMasterSerializer):

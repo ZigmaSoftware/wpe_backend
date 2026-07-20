@@ -219,6 +219,34 @@ class PurchaseTypeMaster(BaseMaster):
         verbose_name_plural = "Purchase Type Masters"
 
 
+class ScrapTypeMaster(BaseMaster):
+    class ScrapType(models.TextChoices):
+        STARTUP = "STARTUP", "Startup"
+        SETUP = "SETUP", "Setup"
+        PROCESS = "PROCESS", "Process"
+        DOWNTIME = "DOWNTIME", "Downtime"
+
+    name = models.CharField(max_length=200, db_index=True)
+    scrap_type = models.CharField(max_length=20, choices=ScrapType.choices, db_index=True)
+
+    class Meta(BaseMaster.Meta):
+        abstract = False
+        db_table = "wpe_scrap_type_master"
+        verbose_name = "Scrap Type Master"
+        verbose_name_plural = "Scrap Type Masters"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["scrap_type", "name"],
+                name="wpe_scrap_type_name_uniq",
+            ),
+        ]
+        ordering = ["scrap_type", "name"]
+
+    def save(self, *args, **kwargs):
+        self.name = (self.name or "").strip()
+        return super().save(*args, **kwargs)
+
+
 class DepartmentMaster(CodeTrackedMaster):
     department_head = models.ForeignKey(
         "WPEUserCreation",
