@@ -799,6 +799,91 @@ class ProductionLineMaster(ProductionCodeTrackedModel):
         verbose_name_plural = "Production Lines"
 
 
+class ProductionLineConnection(models.Model):
+    class Status(models.TextChoices):
+        ON = "ON", "On"
+        OFF = "OFF", "Off"
+
+    source_inventory_transaction = models.ForeignKey(
+        "inventory.ProductionInventoryTransaction",
+        on_delete=models.PROTECT,
+        related_name="line_connections",
+    )
+    production_line = models.ForeignKey(
+        "production.ProductionLineMaster",
+        on_delete=models.PROTECT,
+        related_name="line_connections",
+    )
+    machine = models.ForeignKey(
+        "production.ProductionMachine",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="line_connections",
+    )
+    production_order = models.ForeignKey(
+        "production.ProductionOrder",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="line_connections",
+    )
+    source_production_order = models.ForeignKey(
+        "production.ProductionOrder",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="source_line_connections",
+    )
+    item = models.ForeignKey(
+        "Items.Item",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="line_connections",
+    )
+    production_line_name = models.CharField(max_length=200, blank=True, db_column="line_name")
+    machine_name = models.CharField(max_length=200, blank=True, db_column="machine_name")
+    scan_code = models.CharField(max_length=200, db_index=True, db_column="scancode")
+    serial_no = models.CharField(max_length=100, db_index=True, db_column="baglot")
+    reference_no = models.CharField(max_length=100, blank=True)
+    item_code = models.CharField(max_length=100, blank=True)
+    item_name = models.CharField(max_length=255, blank=True)
+    weight_kg = models.DecimalField(max_digits=14, decimal_places=3, default=ZERO_DECIMAL, db_column="weight")
+    status = models.CharField(max_length=8, choices=Status.choices, default=Status.ON, db_index=True)
+    connected_at = models.DateTimeField(default=timezone.now, db_index=True)
+    disconnected_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True, default="")
+    connected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="connected_line_connections",
+    )
+    disconnected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="disconnected_line_connections",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-connected_at", "-id"]
+        indexes = [
+            models.Index(fields=["status", "production_line"], name="prod_line_conn_status_idx"),
+            models.Index(fields=["scan_code", "status"], name="prod_line_conn_scan_idx"),
+            models.Index(fields=["serial_no", "status"], name="prod_line_conn_serial_idx"),
+        ]
+
+    def __str__(self):
+        line_name = str(self.production_line_name or getattr(self.production_line, "name", "") or "").strip()
+        return f"{self.serial_no} -> {line_name or self.production_line_id}"
+
+
 class BinCreationMaster(ProductionCodeTrackedModel):
     class CapacityUom(models.TextChoices):
         KG = "KG", "KG"
@@ -1457,6 +1542,63 @@ class ProductionOutputCapture(models.Model):
 
     def __str__(self):
         return f"{self.production_order.production_id} — {self.scancode_id}"
+
+
+class ProductionScrapCapture(models.Model):
+    production_order = models.ForeignKey(ProductionOrder, on_delete=models.CASCADE, related_name="scrap_captures")
+    source_batch = models.ForeignKey(ProductionBatch, on_delete=models.PROTECT, related_name="scrap_captures")
+    scrap_type = models.ForeignKey("wpe_masters.ScrapTypeMaster", on_delete=models.PROTECT, related_name="scrap_captures")
+    warehouse = models.ForeignKey("wpe_masters.WarehouseMaster", on_delete=models.PROTECT, related_name="scrap_captures")
+    line_connection = models.ForeignKey(
+        "production.ProductionLineConnection",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="scrap_captures",
+    )
+    source_inventory_transaction = models.ForeignKey(
+        "inventory.ProductionInventoryTransaction",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="source_scrap_captures",
+    )
+    inventory_transaction = models.ForeignKey(
+        "inventory.ProductionInventoryTransaction",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="scrap_captures",
+    )
+    sequence = models.PositiveIntegerField()
+    weight_kg = models.DecimalField(max_digits=14, decimal_places=3, default=ZERO_DECIMAL)
+    device_id = models.CharField(max_length=100, blank=True, db_index=True)
+    workstation_id = models.CharField(max_length=100, blank=True, db_index=True)
+    bridge_client_id = models.CharField(max_length=128, blank=True, db_index=True)
+    weight_source = models.CharField(max_length=32, blank=True, default="")
+    captured_at = models.DateTimeField(default=timezone.now, db_index=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="production_scrap_captures",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-captured_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(fields=["production_order", "sequence"], name="prod_scrap_cap_ord_seq_uq"),
+        ]
+        indexes = [
+            models.Index(fields=["production_order", "captured_at"], name="prod_scrap_cap_ord_cap_idx"),
+            models.Index(fields=["source_batch", "captured_at"], name="prod_scrap_cap_batch_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.production_order.production_id} — Scrap {self.sequence}"
 
 
 class BatchWeightEntry(models.Model):

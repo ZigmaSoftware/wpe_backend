@@ -421,6 +421,12 @@ class UserCreationViewSet(StandardizedModelViewSet):
             .filter(is_active=True)
             .order_by("staff_code", "name", "id")
         )
+        department = request.query_params.get("department") or request.query_params.get("department_name")
+        if department:
+            queryset = queryset.filter(department_master__name__iexact=department)
+        department_id = request.query_params.get("department_id")
+        if department_id:
+            queryset = queryset.filter(department_master_id=department_id)
         return Response(
             [
                 {

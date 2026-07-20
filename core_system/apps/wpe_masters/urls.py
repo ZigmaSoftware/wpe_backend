@@ -20,6 +20,7 @@ from .views import (
     QRLabelTemplateMasterViewSet,
     RoleMasterViewSet,
     SaleTypeMasterViewSet,
+    ScrapTypeMasterViewSet,
     SerialPortConfigurationMasterViewSet,
     StoreMasterViewSet,
     UnitMasterViewSet,
@@ -47,6 +48,7 @@ router.register(r"product-type-categories", ProductTypeCategoryViewSet, basename
 router.register(r"product-type-subtypes", ProductTypeSubtypeViewSet, basename="wpe-product-type-subtype")
 router.register(r"sale-types", SaleTypeMasterViewSet, basename="wpe-sale-type")
 router.register(r"purchase-types", PurchaseTypeMasterViewSet, basename="wpe-purchase-type")
+router.register(r"scrap-types", ScrapTypeMasterViewSet, basename="wpe-scrap-type")
 router.register(r"roles", RoleMasterViewSet, basename="wpe-role")
 router.register(r"departments", DepartmentMasterViewSet, basename="wpe-department")
 router.register(r"designations", DesignationMasterViewSet, basename="wpe-designation")

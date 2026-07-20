@@ -1,6 +1,9 @@
 from decimal import Decimal
 
+from django.db.models import Q
 from rest_framework import serializers
+from django.utils import timezone
+from apps.inventory.models import ProductionInventoryTransaction
 from apps.wpe_masters.models import ProductionTypeMaster
 from .models import (
     BOMVariant,
@@ -22,12 +25,20 @@ from .models import (
     PackingMaterialMaster,
     PackingTypeMaster,
     ProductionLineMaster,
+    ProductionLineConnection,
+    ProductionScrapCapture,
     ProfileCreationMaster,
     ProfileSizeMaster,
     ProductionMachine,
     WorkCentreCreationMaster,
     get_connected_lineage_batches,
     resolve_workflow_batch_no,
+)
+from .services import (
+    get_active_line_connection_for_machine,
+    get_active_line_connection_for_order,
+    resolve_inventory_baglot,
+    resolve_production_machine,
 )
 
 
@@ -294,6 +305,7 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         materials = validated_data.pop("materials", [])
+        materials = self._apply_pr_line_connection_defaults(validated_data, materials)
         order = super().create(validated_data)
         self._save_materials(order, materials)
         return order
@@ -337,6 +349,103 @@ class ProductionOrderCreateUpdateSerializer(serializers.ModelSerializer):
 
         if rows:
             ProductionOrderMaterialPlan.objects.bulk_create(rows)
+
+    def _is_pr_order(self, validated_data) -> bool:
+        extra = validated_data.get("extra_form_data") or {}
+        stage = str(extra.get("stage") or "").strip().upper()
+        production_type = str(validated_data.get("production_type") or "").strip()
+        return stage == "PR" or production_type == "WPE Production Line"
+
+    def _parse_machine_id(self, raw_value) -> int | None:
+        try:
+            parsed = int(str(raw_value or "").strip())
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    def _recalculate_materials_for_quantity(self, materials, planned_quantity: Decimal, bom_multiplier: Decimal):
+        recalculated = []
+        for material in materials or []:
+            payload = dict(material)
+            per_unit_quantity = Decimal(str(payload.get("per_unit_quantity") or "0"))
+            received_quantity = Decimal(str(payload.get("received_quantity") or "0"))
+            rate = Decimal(str(payload.get("rate") or "0"))
+            required_quantity = per_unit_quantity * planned_quantity * bom_multiplier
+            remaining_quantity = required_quantity - received_quantity
+            if remaining_quantity < Decimal("0"):
+                remaining_quantity = Decimal("0")
+            amount = required_quantity * rate
+
+            payload["bom_quantity"] = f"{required_quantity:.3f}"
+            payload["required_quantity"] = f"{required_quantity:.3f}"
+            payload["remaining_quantity"] = f"{remaining_quantity:.3f}"
+            payload["amount"] = f"{amount:.2f}"
+            recalculated.append(payload)
+        return recalculated
+
+    def _apply_pr_line_connection_defaults(self, validated_data, materials):
+        if not self._is_pr_order(validated_data):
+            return materials
+
+        extra_form_data = dict(validated_data.get("extra_form_data") or {})
+        machine_id = self._parse_machine_id(extra_form_data.get("line_machine_id"))
+        machine_code = str(validated_data.get("line_number") or "").strip()
+        machine_name = str(validated_data.get("line_name") or "").strip()
+
+        machine = resolve_production_machine(
+            machine_id=machine_id,
+            machine_code=machine_code,
+            machine_name=machine_name,
+        )
+        if machine is None:
+            return materials
+
+        connection = get_active_line_connection_for_machine(
+            machine_id=machine.id,
+            machine_code=machine.machine_code,
+            machine_name=machine.name,
+            for_update=False,
+        )
+        if connection is None:
+            extra_form_data["line_machine_id"] = str(machine.id)
+            validated_data["extra_form_data"] = extra_form_data
+            return materials
+
+        available_weight = Decimal(
+            str(
+                getattr(connection.source_inventory_transaction, "balance_qty", None)
+                or getattr(connection, "weight_kg", None)
+                or "0.000"
+            )
+        )
+        if available_weight <= Decimal("0"):
+            extra_form_data["line_machine_id"] = str(machine.id)
+            validated_data["extra_form_data"] = extra_form_data
+            return materials
+
+        validated_data["line_name"] = machine.name
+        validated_data["line_number"] = machine.machine_code
+        validated_data["planned_quantity"] = available_weight
+        validated_data["planned_weight"] = available_weight
+
+        extra_form_data["line_machine_id"] = str(machine.id)
+        extra_form_data["line_connection_id"] = connection.id
+        extra_form_data["line_connection_scan_code"] = connection.scan_code
+        extra_form_data["line_connection_baglot"] = connection.serial_no
+        extra_form_data["line_connection_weight_kg"] = f"{available_weight:.3f}"
+        extra_form_data["line_connection_line_id"] = connection.production_line_id
+        extra_form_data["line_connection_line_name"] = connection.production_line_name
+        validated_data["extra_form_data"] = extra_form_data
+
+        bom_multiplier = Decimal(str(extra_form_data.get("bom_multiplier") or "1"))
+        validated_data["material_cost"] = Decimal(
+            str(validated_data.get("material_cost") or "0.00")
+        )
+        recalculated_materials = self._recalculate_materials_for_quantity(materials, available_weight, bom_multiplier)
+        total_material_cost = sum(Decimal(str(row.get("amount") or "0.00")) for row in recalculated_materials)
+        validated_data["material_cost"] = total_material_cost
+        validated_data["total_cost"] = total_material_cost + Decimal(str(validated_data.get("other_cost") or "0.00"))
+        return recalculated_materials
 
 # ===== RECIPE / BOM AND PRODUCTION MASTER SERIALIZERS =====
 
@@ -464,6 +573,141 @@ class ProductionLineMasterSerializer(ProductionCodeMasterSerializer):
             "capacity_uom",
             "status",
         )
+
+
+class ProductionLineConnectionSerializer(serializers.ModelSerializer):
+    production_line = serializers.IntegerField(source="production_line_id", read_only=True)
+    production_line_code = serializers.SerializerMethodField()
+    machine = serializers.IntegerField(source="machine_id", read_only=True, allow_null=True)
+    machine_code = serializers.SerializerMethodField()
+    production_order = serializers.IntegerField(source="production_order_id", read_only=True, allow_null=True)
+    production_id = serializers.SerializerMethodField()
+    bag = serializers.SerializerMethodField()
+    bag_code = serializers.SerializerMethodField()
+    connected_by = serializers.IntegerField(source="connected_by_id", read_only=True, allow_null=True)
+    connected_by_name = serializers.SerializerMethodField()
+    disconnected_by = serializers.IntegerField(source="disconnected_by_id", read_only=True, allow_null=True)
+    disconnected_by_name = serializers.SerializerMethodField()
+    duration = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProductionLineConnection
+        fields = (
+            "id",
+            "production_line",
+            "production_line_name",
+            "production_line_code",
+            "machine",
+            "machine_name",
+            "machine_code",
+            "scan_code",
+            "item_code",
+            "item_name",
+            "reference_no",
+            "serial_no",
+            "weight_kg",
+            "status",
+            "connected_at",
+            "disconnected_at",
+            "duration",
+            "production_order",
+            "production_id",
+            "bag",
+            "bag_code",
+            "connected_by",
+            "connected_by_name",
+            "disconnected_by",
+            "disconnected_by_name",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+    def _get_user_name(self, user) -> str | None:
+        if user is None:
+            return None
+        for accessor in ("get_full_name", "get_username"):
+            if hasattr(user, accessor):
+                value = getattr(user, accessor)()
+                if str(value or "").strip():
+                    return str(value).strip()
+        for attr in ("username", "email"):
+            value = getattr(user, attr, "")
+            if str(value or "").strip():
+                return str(value).strip()
+        return str(user)
+
+    def get_connected_by_name(self, obj):
+        return self._get_user_name(obj.connected_by)
+
+    def get_disconnected_by_name(self, obj):
+        return self._get_user_name(obj.disconnected_by)
+
+    def get_bag(self, obj):
+        return None
+
+    def get_bag_code(self, obj):
+        return str(obj.serial_no or "").strip() or None
+
+    def get_production_line_code(self, obj):
+        return str(getattr(obj.production_line, "code", "") or "").strip() or None
+
+    def get_machine_code(self, obj):
+        if getattr(obj, "machine_id", None):
+            return str(getattr(obj.machine, "machine_code", "") or "").strip() or None
+        if getattr(obj.production_line, "machine_id", None):
+            return str(getattr(obj.production_line.machine, "machine_code", "") or "").strip() or None
+        return None
+
+    def get_production_id(self, obj):
+        for order in (obj.production_order, getattr(obj, "source_production_order", None)):
+            value = str(getattr(order, "production_id", "") or "").strip()
+            if value:
+                return value
+        return None
+
+    def get_duration(self, obj):
+        start = obj.connected_at
+        end = obj.disconnected_at or timezone.now()
+        if start is None or end is None or end < start:
+            return None
+        total_seconds = int((end - start).total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+class GlScancodeDetailsSerializer(serializers.Serializer):
+    scan_code = serializers.CharField()
+    serial_no = serializers.CharField()
+    reference_no = serializers.CharField(allow_blank=True, allow_null=True)
+    item_code = serializers.CharField(allow_blank=True)
+    item_name = serializers.CharField(allow_blank=True)
+    weight_kg = serializers.DecimalField(max_digits=14, decimal_places=3)
+    total_weight_kg = serializers.DecimalField(max_digits=14, decimal_places=3)
+    production_id = serializers.CharField(allow_blank=True, allow_null=True)
+    is_connected = serializers.BooleanField()
+    active_connection = ProductionLineConnectionSerializer(allow_null=True)
+
+
+class ProductionLineConnectionConnectSerializer(serializers.Serializer):
+    scan_code = serializers.CharField()
+    production_line = serializers.IntegerField(required=False)
+    production_line_id = serializers.IntegerField(required=False)
+    production_order = serializers.IntegerField(required=False, allow_null=True)
+    production_order_id = serializers.IntegerField(required=False, allow_null=True)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        production_line_id = attrs.get("production_line") or attrs.get("production_line_id")
+        if not production_line_id:
+            raise serializers.ValidationError({"production_line": "production_line is required."})
+        attrs["production_line_id"] = production_line_id
+        attrs["production_order_id"] = attrs.get("production_order") or attrs.get("production_order_id")
+        attrs["scan_code"] = str(attrs.get("scan_code") or "").strip()
+        if not attrs["scan_code"]:
+            raise serializers.ValidationError({"scan_code": "scan_code is required."})
+        return attrs
 
 
 class BinCreationMasterSerializer(ProductionCodeMasterSerializer):
@@ -785,6 +1029,7 @@ class ProductionBatchSerializer(serializers.ModelSerializer):
 
 
 class ProductionOutputCaptureSerializer(serializers.ModelSerializer):
+    binlot = serializers.SerializerMethodField()
     source_batch_no = serializers.CharField(source="source_batch.batch_no", read_only=True)
     source_batch_display_batch_no = serializers.SerializerMethodField()
     source_batch_display_status = serializers.SerializerMethodField()
@@ -820,6 +1065,108 @@ class ProductionOutputCaptureSerializer(serializers.ModelSerializer):
             "updated_at",
         )
         read_only_fields = fields
+
+    @staticmethod
+    def _parse_positive_int(value):
+        try:
+            parsed = int(str(value or "").strip())
+        except (TypeError, ValueError):
+            return 0
+        return parsed if parsed > 0 else 0
+
+    def _resolve_pr_capture_baglot(self, obj):
+        source_batch = getattr(obj, "source_batch", None)
+        production_order = getattr(obj, "production_order", None)
+        if source_batch is None or production_order is None:
+            return str(obj.binlot or "").strip()
+
+        extra = production_order.extra_form_data or {}
+
+        connection_id = self._parse_positive_int(extra.get("line_connection_id"))
+        if connection_id:
+            connection = (
+                ProductionLineConnection.objects.select_related("source_inventory_transaction__output_capture")
+                .filter(pk=connection_id)
+                .first()
+            )
+            if connection is not None:
+                resolved_baglot = resolve_inventory_baglot(
+                    getattr(connection, "source_inventory_transaction", None),
+                    fallback=str(connection.serial_no or "").strip(),
+                )
+                if resolved_baglot:
+                    return resolved_baglot
+
+        scan_code = str(extra.get("line_connection_scan_code") or "").strip()
+        if scan_code:
+            connection_row = (
+                ProductionInventoryTransaction.objects.select_related("output_capture")
+                .filter(
+                    stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+                    scan_code__iexact=scan_code,
+                )
+                .order_by("-updated_at", "-created_at", "-id")
+                .first()
+            )
+            resolved_baglot = resolve_inventory_baglot(connection_row)
+            if resolved_baglot:
+                return resolved_baglot
+
+        machine_filters = Q()
+        machine_id = self._parse_positive_int(extra.get("line_machine_id"))
+        if machine_id:
+            machine_filters |= Q(machine_id=machine_id) | Q(production_line__machine_id=machine_id)
+
+        line_number = str(getattr(production_order, "line_number", "") or "").strip()
+        if line_number:
+            machine_filters |= (
+                Q(machine__machine_code__iexact=line_number)
+                | Q(production_line__machine__machine_code__iexact=line_number)
+            )
+
+        line_name = str(getattr(production_order, "line_name", "") or "").strip()
+        if line_name:
+            machine_filters |= (
+                Q(machine__name__iexact=line_name)
+                | Q(machine_name__iexact=line_name)
+                | Q(production_line__machine__name__iexact=line_name)
+            )
+
+        if machine_filters:
+            historical_connection = (
+                ProductionLineConnection.objects.select_related("source_inventory_transaction__output_capture")
+                .filter(machine_filters, connected_at__lte=obj.captured_at)
+                .filter(Q(disconnected_at__isnull=True) | Q(disconnected_at__gte=obj.captured_at))
+                .order_by("-connected_at", "-id")
+                .first()
+            )
+            if historical_connection is not None:
+                resolved_baglot = resolve_inventory_baglot(
+                    getattr(historical_connection, "source_inventory_transaction", None),
+                    fallback=str(historical_connection.serial_no or "").strip(),
+                )
+                if resolved_baglot:
+                    return resolved_baglot
+
+        active_connection = get_active_line_connection_for_order(production_order, for_update=False)
+        if active_connection is not None:
+            resolved_baglot = resolve_inventory_baglot(
+                getattr(active_connection, "source_inventory_transaction", None),
+                fallback=str(active_connection.serial_no or "").strip(),
+            )
+            if resolved_baglot:
+                return resolved_baglot
+
+        saved_baglot = str(extra.get("line_connection_baglot") or "").strip()
+        if saved_baglot:
+            return saved_baglot
+
+        return str(obj.binlot or "").strip()
+
+    def get_binlot(self, obj):
+        if obj.source_batch.stage == ProductionBatch.Stage.PR:
+            return self._resolve_pr_capture_baglot(obj)
+        return str(obj.binlot or "").strip()
 
     def get_source_batch_display_batch_no(self, obj):
         return resolve_workflow_batch_no(obj.source_batch)
@@ -894,6 +1241,49 @@ class ProductionOutputCaptureSerializer(serializers.ModelSerializer):
             }
             for entry in self._get_required_entries(obj)
         ]
+
+
+class ProductionScrapCaptureSerializer(serializers.ModelSerializer):
+    scrap_type_name = serializers.CharField(source="scrap_type.name", read_only=True)
+    scrap_type_type = serializers.CharField(source="scrap_type.scrap_type", read_only=True)
+    warehouse_name = serializers.CharField(source="warehouse.name", read_only=True)
+    warehouse_code = serializers.CharField(source="warehouse.code", read_only=True)
+    source_batch_no = serializers.CharField(source="source_batch.batch_no", read_only=True)
+    line_connection_scan_code = serializers.CharField(source="line_connection.scan_code", read_only=True, allow_null=True)
+    line_connection_baglot = serializers.CharField(source="line_connection.serial_no", read_only=True, allow_null=True)
+    created_by_username = serializers.CharField(source="created_by.username", read_only=True, default=None)
+
+    class Meta:
+        model = ProductionScrapCapture
+        fields = (
+            "id",
+            "production_order",
+            "source_batch",
+            "source_batch_no",
+            "scrap_type",
+            "scrap_type_name",
+            "scrap_type_type",
+            "warehouse",
+            "warehouse_code",
+            "warehouse_name",
+            "line_connection",
+            "line_connection_scan_code",
+            "line_connection_baglot",
+            "source_inventory_transaction",
+            "inventory_transaction",
+            "sequence",
+            "weight_kg",
+            "device_id",
+            "workstation_id",
+            "bridge_client_id",
+            "weight_source",
+            "captured_at",
+            "created_by",
+            "created_by_username",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
 
 
 class ProductionStageRecordSerializer(serializers.Serializer):

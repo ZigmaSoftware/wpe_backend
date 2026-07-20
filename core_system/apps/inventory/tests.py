@@ -284,3 +284,122 @@ class ProductionInventoryApiTests(APITestCase):
         self.assertEqual(row["captured_weight"], "60.000")
         self.assertEqual(row["scancode"], "SCAN-2001-01")
         self.assertEqual(row["binlot"], "BIN-2001-01")
+
+    def test_connection_and_line_work_center_rows_include_linked_scancodes(self):
+        now = timezone.now()
+        order = ProductionOrder.objects.create(
+            production_id="GL-3001",
+            production_type="WPE Granulated Blend Production",
+            production_date=now.date(),
+            planned_weight="100.000",
+        )
+        gl_batch = ProductionBatch.objects.create(
+            production_order=order,
+            stage=ProductionBatch.Stage.GL,
+            batch_no="GL-BATCH-3001",
+            workflow_batch_no="GL-BATCH-3001",
+            status=ProductionBatch.BatchStatus.COMPLETED,
+        )
+        gl_capture = ProductionOutputCapture.objects.create(
+            production_order=order,
+            source_batch=gl_batch,
+            sequence=1,
+            scancode_id="GL03GL10072026120001",
+            recipe_no="GL03",
+            quantity_kg="5.000",
+            weight_kg="5.000",
+            binlot="GL-BAG-001",
+            captured_at=now - timedelta(minutes=10),
+        )
+        connection_row = ProductionInventoryTransaction.objects.create(
+            stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+            movement_key="gl-out:connection-line:test-3001",
+            batch_code="GL-BATCH-3001",
+            production_order=order,
+            production_id=order.production_id,
+            production_type=order.production_type,
+            source_batch=gl_batch,
+            output_capture=gl_capture,
+            item_code="ITEM-GL-3001",
+            item_name="Granulation Item 3001",
+            inward_qty="5.000",
+            outward_qty="4.000",
+            balance_qty="1.000",
+            uom="kgs",
+            from_stage=ProductionInventoryTransaction.Stage.GRANULATION_STORE,
+            to_stage=ProductionInventoryTransaction.Stage.LINE_WORK_CENTER,
+            reference_no="GL-BATCH-3001",
+            scan_code=gl_capture.scancode_id,
+            status=ProductionInventoryTransaction.Status.IN_PROGRESS,
+            created_by=self.user,
+        )
+        pr_batch = ProductionBatch.objects.create(
+            production_order=order,
+            stage=ProductionBatch.Stage.PR,
+            batch_no="PR-BATCH-3001",
+            workflow_batch_no="PR-BATCH-3001",
+            status=ProductionBatch.BatchStatus.COMPLETED,
+        )
+        pr_capture = ProductionOutputCapture.objects.create(
+            production_order=order,
+            source_batch=pr_batch,
+            sequence=2,
+            scancode_id="PR03PR10072026155902",
+            recipe_no="PR03",
+            quantity_kg="4.000",
+            weight_kg="4.000",
+            captured_at=now,
+        )
+        ProductionInventoryTransaction.objects.create(
+            stage=ProductionInventoryTransaction.Stage.LINE_WORK_CENTER,
+            movement_key=f"pr-out:line-work-center:{pr_batch.id}:{connection_row.id}",
+            batch_code=connection_row.batch_code,
+            production_order=order,
+            production_id=order.production_id,
+            production_type=order.production_type,
+            source_batch=pr_batch,
+            output_capture=pr_capture,
+            item_code=connection_row.item_code,
+            item_name=connection_row.item_name,
+            inward_qty="4.000",
+            outward_qty="0.000",
+            balance_qty="4.000",
+            uom="kgs",
+            from_stage=ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+            to_stage=ProductionInventoryTransaction.Stage.LINE_WORK_CENTER,
+            reference_no=connection_row.reference_no,
+            scan_code=pr_capture.scancode_id,
+            status=ProductionInventoryTransaction.Status.IN_PROGRESS,
+            created_by=self.user,
+        )
+
+        connection_response = self.client.get(
+            self.url,
+            {
+                "stage": ProductionInventoryTransaction.Stage.CONNECTION_TO_LINE,
+                "include_history": "true",
+                "production_id": order.production_id,
+            },
+        )
+
+        self.assertEqual(connection_response.status_code, status.HTTP_200_OK)
+        connection_payload_row = connection_response.data["data"]["results"][0]
+        self.assertEqual(connection_payload_row["baglot"], "GL-BAG-001")
+        self.assertEqual(connection_payload_row["consumed_weight"], "4.000")
+        self.assertEqual(connection_payload_row["consumed_scancode"], "PR03PR10072026155902")
+
+        line_response = self.client.get(
+            self.url,
+            {
+                "stage": ProductionInventoryTransaction.Stage.LINE_WORK_CENTER,
+                "include_history": "true",
+                "production_id": order.production_id,
+            },
+        )
+
+        self.assertEqual(line_response.status_code, status.HTTP_200_OK)
+        row = line_response.data["data"]["results"][0]
+        self.assertEqual(row["baglot"], "GL-BAG-001")
+        self.assertEqual(row["captured_weight"], "4.000")
+        self.assertEqual(row["scancode"], "PR03PR10072026155902")
+        self.assertEqual(row["captured_bin_scancode"], "GL03GL10072026120001")

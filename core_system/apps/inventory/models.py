@@ -18,6 +18,7 @@ class ProductionInventoryTransaction(models.Model):
         GRANULATION_STORE = "GRANULATION_STORE", "Granulation Store"
         CONNECTION_TO_LINE = "CONNECTION_TO_LINE", "Connection to Line"
         LINE_WORK_CENTER = "LINE_WORK_CENTER", "Line Work Center"
+        SCRAP_WAREHOUSE = "SCRAP_WAREHOUSE", "Scrap Warehouse"
         DISCONNECTION_FROM_LINE = "DISCONNECTION_FROM_LINE", "Disconnection from Line"
 
     class Status(models.TextChoices):
